@@ -20,8 +20,12 @@
     .nav-inner{display:flex;align-items:center;justify-content:space-between;padding:16px 0}
     .brand-left{min-height:36px}
     .brand-right{display:flex;align-items:center;gap:12px}
-    .brand-logo{height:36px;width:auto;display:block;filter: drop-shadow(0 6px 30px rgba(0,0,0,.35));}
-
+   .brand-logo {
+  height: clamp(40px, 8vw, 80px);
+  width: auto;
+  display: block;
+  filter: drop-shadow(0 6px 30px rgba(0,0,0,.35));
+}
     /* Hero */
     .hero{padding:86px 0 40px;text-align:center}
     .eyebrow{display:inline-flex;gap:8px;align-items:center;padding:6px 10px;border-radius:999px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.06);color:var(--muted);font-size:13px}
@@ -33,8 +37,27 @@
     label{position:absolute;left:-9999px}
     input,textarea,select{background:rgba(12,19,40,.85);color:var(--text);border:1px solid rgba(255,255,255,.15);border-radius:10px;padding:12px 14px;font:inherit}
     input,select{min-width:260px}
-    .btn{display:inline-flex;align-items:center;justify-content:center;border-radius:999px;padding:10px 16px;font-weight:700;border:1px solid rgba(255,255,255,.15);background:linear-gradient(135deg, var(--brand), var(--accent));color:#0b1020;box-shadow:var(--shadow);transition:transform .15s ease}
-    .btn:hover{transform:translateY(-1px)}
+    .btn{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  border-radius:999px;
+  padding:10px 16px;
+  font-weight:700;
+
+  /* toned down: darker + more transparent */
+  background: rgba(12,19,40,.60);        /* was bright gradient */
+  color: var(--text);
+  border:1px solid rgba(255,255,255,.12); /* subtler border */
+  box-shadow: 0 4px 16px rgba(0,0,0,.25); /* softer shadow */
+  transition: background .15s ease, transform .15s ease, opacity .15s ease;
+}
+
+.btn:hover{
+  background: rgba(12,19,40,.75);  /* a touch less transparent on hover */
+  transform: translateY(-1px);
+}
+
     .note{color:var(--muted);font-size:13px;margin-top:8px}
     .status{margin-top:10px;font-size:14px}
 
