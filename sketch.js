@@ -1893,19 +1893,39 @@ if (typeof drawClusterLabels === 'function') drawClusterLabels();
 
 
 // bottom-left "Powered by" image (replaces the text legend)
+// bottom-corner "Powered by" image (clickable → semanticspace.ai)
 if (poweredByImg && poweredByImg.width > 0) {
   push();
   const PAD = 12;
-  const targetW = 140;                                        // adjust to taste
-  const ratio  = poweredByImg.height / poweredByImg.width;
+  const targetW = 140;
+  const ratio   = poweredByImg.height / poweredByImg.width;
   const targetH = Math.max(1, Math.round(targetW * ratio));
 
-  // ~50% opacity
+  // Choose corner: bottom-left (current). If you truly want bottom-right,
+  // change px to: const px = width - targetW - PAD;
+  const px = PAD;
+  const py = height - targetH - PAD;
+
+  // draw
   tint(255, 128);
-  image(poweredByImg, PAD, height - targetH - PAD, targetW, targetH);
+  image(poweredByImg, px, py, targetW, targetH);
   noTint();
+
+  // record hit-box for click detection
+  window.poweredByHit = { x: px, y: py, w: targetW, h: targetH };
+
+  // pointer cursor on hover
+  const over =
+    mouseX >= px && mouseX <= px + targetW &&
+    mouseY >= py && mouseY <= py + targetH;
+  document.body.style.cursor = (over ? 'pointer' : '');
   pop();
+} else {
+  // if image missing, clear any stale hit-box and cursor
+  window.poweredByHit = null;
+  if (document.body.style.cursor === 'pointer') document.body.style.cursor = '';
 }
+
 
 drawSelectedNodeCitationsUI();
   // Draw dimension handles ABOVE labels (world space)
@@ -2329,6 +2349,20 @@ if (uiCapture) { uiCapture = false; return; }
   // If a UI element captured the interaction, just release it and stop.
   if (uiCapture) { uiCapture = false; return; }
   if (pointerOverUI()) return;
+  // Treat as a click if the pointer barely moved
+
+
+  // Click on the Powered By image → open semanticspace.ai
+  if (clickLike && window.poweredByHit) {
+    const hb = window.poweredByHit;
+    if (mouseX >= hb.x && mouseX <= hb.x + hb.w &&
+        mouseY >= hb.y && mouseY <= hb.y + hb.h) {
+      window.open('https://semanticspace.ai', '_blank', 'noopener');
+      return; // consume the click
+    }
+  }
+
+
 
   // Click on cluster label radios (when clusters lens is on)
 if (lenses.domainClusters && ovClusterLabels > 0 && Array.isArray(clusterLabelHits) && clusterLabelHits.length) {
