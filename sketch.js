@@ -7,6 +7,10 @@ const FETCH_PROXY = 'http://localhost:8787';
 const DEFAULT_DIM_POWER = 0;
 // Dimension search (UI state)
 
+// --- Splash images ---
+let splashImg = null;        // Icons/Splash.png
+let splashDemoImg = null;    // Icons/Splash_Demo.png
+let _splashEnabled = true;
 
 // ==== Node size UI ranges (tweak to taste) ====
 let NODE_SIZE_MIN = 2;      // min circle radius (px)
@@ -38,8 +42,8 @@ let PARALLAX_ENABLED   = true;
 // Max extra response, as fractions (10% recommended)
 // - panning: how much extra the camera translation influences close nodes
 // - zooming: how much extra the camera scale influences close nodes
-const PARALLAX_PAN_FRAC  = 0.10;   // 0.0 … 0.15 feels good
-const PARALLAX_ZOOM_FRAC = 0.10;   // 0.0 … 0.15 feels good
+const PARALLAX_PAN_FRAC  = 0.15;   // 0.0 … 0.15 feels good
+const PARALLAX_ZOOM_FRAC = 0.50;   // 0.0 … 0.15 feels good
 
 // Map cited_by_count -> depth in [0..1], using robust percentiles if available
 function parallaxDepthForNode(i) {
@@ -58,31 +62,56 @@ function parallaxDepthForNode(i) {
   const t   = (L(cbc) - L(lo)) / Math.max(1e-9, (L(hi) - L(lo)));
   return Math.max(0, Math.min(1, t));
 }
+// --- Centre-aware helpers (add) ---
+function worldCenterFromCamera() {
+  // world point currently under the screen centre
+  return {
+    x: (width  * 0.5 - cam.x) / (cam.scale || 1),
+    y: (height * 0.5 - cam.y) / (cam.scale || 1)
+  };
+}
+
+// Keep previous camera to estimate pan delta (for nicer pan parallax)
+let __prevCam = { x: 0, y: 0, scale: 1 };
 
 // Return a *world* position that, after the normal cam transform,
 // yields a slightly different screen position depending on "depth".
 function parallaxWorldPos(i) {
-  const base = nodeDrawPos(i);           // your dimension-influenced position
+  const base = nodeDrawPos(i);                  // your dimension-influenced world pos
   if (!PARALLAX_ENABLED) return base;
 
-  const d  = parallaxDepthForNode(i);
+  const d = parallaxDepthForNode(i);            // 0..1 based on cited_by_count
   if (d <= 0) return base;
 
-  // Convert current camera translation back into world units
-  const camShiftX = cam.x / (cam.scale || 1);
-  const camShiftY = cam.y / (cam.scale || 1);
+  // Centre-aware anchor: world point currently at screen centre
+  const C = worldCenterFromCamera();
 
-  // Apply small, depth-weighted tweaks so:
-  // - close nodes (d~1) move a bit more with panning (PAN_FRAC)
-  // - and appear to "zoom" a hair faster (ZOOM_FRAC)
-  const kP = PARALLAX_PAN_FRAC  * d;
-  const kZ = PARALLAX_ZOOM_FRAC * d;
+  // How strongly depth affects "zoom push" and "pan slip"
+  const kZ = PARALLAX_ZOOM_FRAC * d;            // expand away from centre when zooming
+  const kP = PARALLAX_PAN_FRAC  * d;            // slight extra slide during pans
 
+  // Vector from centre to node (world space)
+  const dx = base.x - C.x;
+  const dy = base.y - C.y;
+
+  // Optional: estimate pan delta in world units this frame (camera movement)
+  const scaleNow  = (cam.scale || 1);
+  const scalePrev = (__prevCam.scale || 1);
+  const zooming   = Math.abs(scaleNow - scalePrev) > 1e-6;
+
+  // If zoom changed, don't apply pan slip this frame (avoids jitter)
+  const panDxWorld = zooming ? 0 : (cam.x - __prevCam.x) / scaleNow;
+  const panDyWorld = zooming ? 0 : (cam.y - __prevCam.y) / scaleNow;
+
+  // Apply:
+  // 1) Zoom-parallax: expand about the centre by (1 + kZ)
+  // 2) Pan-parallax: let closer (high-d) nodes overshoot slightly with camera motion
   return {
-    x: base.x * (1 + kZ) + camShiftX * kP,
-    y: base.y * (1 + kZ) + camShiftY * kP
+    x: C.x + dx * (1 + kZ) + panDxWorld * kP,
+    y: C.y + dy * (1 + kZ) + panDyWorld * kP
   };
 }
+
 
 // Screen helper (useful for tooltips/hits)
 function nodeScreenPos(i) {
@@ -669,6 +698,18 @@ function preload() {
   () => {},
   () => console.warn('Missing Icons/Powered_By.png')
 );
+
+splashImg = loadImage(
+  'Icons/Splash.png',
+  () => {},
+  () => console.warn('Missing Icons/Splash.png')
+);
+splashDemoImg = loadImage(
+  'Icons/Splash_Demo.png',
+  () => {},
+  () => console.warn('Missing Icons/Splash_Demo.png')
+);
+
 
   // Category-specific handle icons
   dimIcons = {
@@ -1323,7 +1364,7 @@ const USE_INLINE_CITATIONS  = true; // large-scale: omit inline [n] to avoid con
 
 // --- p5 lifecycle ------------------------------------------------------------
 function setup() {
-  createCanvas(windowWidth, windowHeight);
+  //createCanvas(windowWidth, windowHeight);
   const cnv = createCanvas(windowWidth, windowHeight);
   noLoop(); // draw only when we have data or on resize
 cnv.style('position','fixed');
@@ -1421,7 +1462,7 @@ infoPanel = new InfoPanel(
   computePanelHeight()
 );
 
-infoPanel.hide(); // start hidden if you prefer
+showCanvasOverviewIfNoneSelected(); // start hidden if you prefer
 
 // Internal degree slider label
 
@@ -1504,6 +1545,17 @@ ftFileInput.hide();
   document.head.appendChild(tag);
 })();
 
+(function killScrollbars(){
+  if (document.getElementById('no-scroll-css')) return;
+  const css = `
+    html, body { margin:0; padding:0; height:100%; overflow:hidden; }
+    canvas { display:block; }
+  `;
+  const s = document.createElement('style');
+  s.id = 'no-scroll-css';
+  s.textContent = css;
+  document.head.appendChild(s);
+})();
 
 }
 
@@ -1594,7 +1646,7 @@ function draw() {
   }
 
   background(14);
-
+ if (drawSplashIfNeeded()) return;
   // If a blocking load is happening, show overlay and bail before any push()
   if (isLoading) {
     drawLoadingOverlay();
@@ -1952,6 +2004,12 @@ text(zoomLabel, width - 12, height - 60);   // <- sits just above the counts
 if (msg) text(msg, width - 12, height - 44);
 
   drawAIFootprints();
+// keep last camera for pan-delta parallax
+__prevCam.x = cam.x;
+__prevCam.y = cam.y;
+__prevCam.scale = cam.scale;
+
+
 }
 
 
@@ -2060,7 +2118,7 @@ function updateInfo() {
   const totalE = edges.length | 0;
   const visN = visibleMask.length ? visibleMask.reduce((a,b)=>a+(b?1:0),0) : totalN;
   const visE = edgesFiltered.length ? edgesFiltered.length : totalE;
-  infoSpan.html(`${visN}/${totalN} nodes · ${visE}/${totalE} edges`);
+  if (infoSpan) infoSpan.hide();
 }
 
 
@@ -2345,7 +2403,8 @@ if (uiCapture) { uiCapture = false; return; }
 // Always end any pan first (even if release happens over UI)
   const start = panStart;      // keep for click-vs-drag test
   isPanning = false;
-
+const moved = start ? dist(mouseX, mouseY, start.x, start.y) : 999;
+  const clickLike = moved < 5;
   // If a UI element captured the interaction, just release it and stop.
   if (uiCapture) { uiCapture = false; return; }
   if (pointerOverUI()) return;
@@ -2448,8 +2507,8 @@ if (k >= 0) {
 }
 
 
-  const moved = start ? dist(mouseX, mouseY, start.x, start.y) : 999;
-  const clickLike = moved < 5;
+  //const moved = start ? dist(mouseX, mouseY, start.x, start.y) : 999;
+  //const clickLike = moved < 5;
   isPanning = false;
 
 
@@ -2757,6 +2816,51 @@ destroy() {
   this.index = -1;
 }
 
+setCanvasOverview() {
+  if (!this.div) return;
+
+  const stats = computeCanvasStats();
+  const meta  = (typeof projectMeta !== 'undefined' && projectMeta) ? projectMeta : {};
+  const when  = meta.created ? new Date(meta.created).toLocaleString() : '';
+
+  const hasMeta = !!(meta.title || meta.text || meta.created);
+  const title   = String(meta.title || '').trim() || 'Untitled export';
+  const text    = String(meta.text  || '').trim();
+
+  // Overview header (published-only bits shown when available)
+  const metaBlock = hasMeta ? `
+    <div style="font-weight:700; font-size:13px; margin-bottom:4px;">${escapeHtml(title)}</div>
+    <div style="opacity:.75; font-size:11px; margin-bottom:8px;">Created ${when || ''}</div>
+    <div style="white-space:pre-wrap; font-size:12px; line-height:1.45; margin-bottom:10px;">
+      ${text ? escapeHtml(text) : '<span style="opacity:.7">No description.</span>'}
+    </div>
+  ` : '';
+
+  const stat = (label, value) =>
+    `<div style="opacity:.7">${label}</div><div>${value}</div>`;
+
+  const statsGrid = `
+    <div style="display:grid;grid-template-columns:auto 1fr;gap:6px 10px;font-size:13px;margin-bottom:10px">
+      ${stat('Total nodes',    stats.totalNodes)}
+      ${stat('Nodes visible',  stats.visibleNodes)}
+      ${stat('Total edges',    stats.totalEdges)}
+      ${stat('Edges visible',  stats.visibleEdges)}
+      ${stat('With abstracts', stats.withAbs)}
+      ${stat('Full texts',     stats.withFT)}
+      ${stat('Clusters',       stats.clusters)}
+    </div>
+  `;
+
+  const chart = svgYearBars(stats.years, 226, 70, 6);
+
+  this.div.html(`
+    ${metaBlock}
+    <div style="font-weight:600;font-size:13px;margin:0 0 6px;">Network Overview</div>
+    ${statsGrid}
+    <div style="font-weight:600;font-size:13px;margin:8px 0 4px;">Publications by year</div>
+    ${chart}
+  `);
+}
 
 
 
@@ -3302,7 +3406,7 @@ function cleanDOI(s) {
 
 function deselectNode() {
   selectedIndex = -1;
-  if (infoPanel) infoPanel.hide(); // remove the panel completely
+  showCanvasOverviewIfNoneSelected(); // remove the panel completely
   redraw();
 }
 
@@ -3496,6 +3600,8 @@ function recomputeVisibility() {
 
   updateInfo?.();
   updateDimSections?.();
+showCanvasOverviewIfNoneSelected();
+
   redraw();
 }
 
@@ -4071,7 +4177,7 @@ function deselectDimension() {
   for (const d of dimTools) if (d) d.selected = false;
 
   // clear info panel
-  if (infoPanel) infoPanel.hide();
+  showCanvasOverviewIfNoneSelected();
 
   // no active AI footprint when no dimension is selected
   aiActiveFootprint = null;
@@ -4140,7 +4246,7 @@ function deleteDimension(k) {
   // 7) Refresh UI and redraw
   renderDimensionsUI?.();
   updateDimSections?.();
-  if (infoPanel) infoPanel.hide();
+  showCanvasOverviewIfNoneSelected();
   hoverIndex = -1;                     // drop any transient hover highlight
   redraw();
 }
@@ -4498,20 +4604,44 @@ function drawLoadingOverlay() {
   noStroke();
   fill(0, 160);
   rectMode(CENTER);
+    // Optional centred splash (Demo vs Normal)
+  const splash = (typeof DEMO_MODE !== 'undefined' && DEMO_MODE) ? splashDemoImg : splashImg;
+  let yCenter = cy; // we may shift UI down if the splash is drawn
+  if (splash && splash.width && splash.height) {
+    push();
+    imageMode(CENTER);
+
+    // Fit splash to ~60% of viewport while preserving aspect
+    const maxW = width * 0.6;
+    const maxH = height * 0.6;
+    const sc = Math.min(maxW / splash.width, maxH / splash.height, 1);
+
+    // Draw splash a bit above true centre so bar/message can sit below it
+    const splashH = splash.height * sc;
+    const splashY = cy - 20;  // slight lift
+    image(splash, cx, splashY, splash.width * sc, splashH);
+
+    // Move the status box underneath the splash
+    yCenter = splashY + (splashH / 2) + 48;
+    pop();
+  }
+
+
 
   // status box
   const W = 360, H = 76, R = 10;
-  rect(cx, cy, W, H, R);
+  rect(cx, yCenter, W, H, R);
 
   // message
   fill(255);
   textAlign(CENTER, BOTTOM);
   textSize(14);
-  text(loadingMsg || 'Loading…', cx, cy - 6);
+  text(loadingMsg || 'Loading…', cx, yCenter - 6);
 
   // progress track
   const bw = 300, bh = 12;
-  const bx = cx - bw / 2, by = cy + 8;
+  const bx = cx - bw / 2, by = yCenter + 8;
+
   fill(35, 35, 45, 230);
   rectMode(CORNER);
   rect(bx, by, bw, bh, 6);
@@ -8189,6 +8319,10 @@ let _isBuildingLeft  = false;
 let _isBuildingRight = false;
 
 async function onCiteButtonClicked(b) {
+if (DEMO_MODE) {
+  showToast?.('Citations expansion is disabled in Demo mode');
+  return;
+}
   if (selectedIndex < 0) return;
 
   const seedIdx = nodes[selectedIndex].idx;
@@ -8572,7 +8706,7 @@ function drawSelectedNodeCitationsUI() {
   const tBtns = Math.max(0, Math.min(1, (zoomLevel - ZOOM_FADE_START) / (ZOOM_FADE_END - ZOOM_FADE_START)));
 if (tBtns <= 0) return;
 const tText = tBtns;  // labels fade in at the same time as buttons
-
+if (DEMO_MODE) return;
   const n = nodes[selectedIndex];
   if (!n) return;
   if (lenses?.openAccess && !n.oa) return;
@@ -8768,6 +8902,8 @@ if (tText > 0) {
     drawTooltip(b.sx, b.sy - (btnR + 12), b.tip);
   }
 }
+
+
 // Median of existing node radii; falls back to NODE_R
 function baselineNodeR() {
   if (!Array.isArray(nodes) || nodes.length === 0) return NODE_R;
@@ -10240,17 +10376,18 @@ _syncAIDimsWithFootprints();
       text:    (m.userText ?? m.text ?? '').toString(),
       created: (m.created ?? m.exported_at ?? '').toString()
     };
-    if (projectMeta.title || projectMeta.text || projectMeta.created) {
-      renderProjectMetaPanel();
-    } else {
+    
       hideProjectMetaPanel();
-    }
+    
   } catch { hideProjectMetaPanel(); }
 
   // 8) Camera fit & UI refresh
   centerCameraOnWorld();
   recomputeVisibility?.();
   updateInfo(); redraw();
+showCanvasOverviewIfNoneSelected();
+
+
 }
 function viewerNodeId(i) {
   // Prefer OpenAlex W-id; fallback to DOI; else stable local id.
@@ -11923,3 +12060,144 @@ function scheduleVisRecompute() {
   });
 }
 //const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+// ---- Canvas Overview stats + chart ----
+function computeCanvasStats() {
+  const totalNodes   = Array.isArray(nodes) ? nodes.length : 0;
+  const totalEdges   = Array.isArray(edges) ? edges.length : 0;
+
+  const visibleNodes = Array.isArray(visibleMask)
+    ? visibleMask.reduce((a, b) => a + (b ? 1 : 0), 0)
+    : totalNodes;
+
+  const visibleEdges = Array.isArray(edgesFiltered)
+    ? edgesFiltered.length
+    : (Array.isArray(edges) && Array.isArray(visibleMask))
+        ? edges.filter(e => visibleMask[e.source|0] && visibleMask[e.target|0]).length
+        : 0;
+
+  let withAbs = 0, withFT = 0;
+  const yearCounts = new Map();
+  let yMin =  Infinity, yMax = -Infinity;
+
+  for (let i = 0; i < totalNodes; i++) {
+    const it = (itemsData && itemsData[i]) || {};
+    const w  = it.openalex || {};
+
+    // Abstract presence (robust to compact + flags)
+    const hasAbs = !!(it.hasAbs || nodes?.[i]?.hasAbs || w.abstract || w.abstract_inverted_index);
+    if (hasAbs) withAbs++;
+
+    // Full text presence (either cached flag or text)
+    const hasFT = !!(nodes?.[i]?.hasFullText || (typeof it.fulltext === 'string' && it.fulltext.trim()));
+    if (hasFT) withFT++;
+
+    // Year histogram
+    const y = Number.isFinite(+w.publication_year) ? +w.publication_year : Number(nodes?.[i]?.year);
+    if (Number.isFinite(y)) {
+      yearCounts.set(y, (yearCounts.get(y) || 0) + 1);
+      if (y < yMin) yMin = y;
+      if (y > yMax) yMax = y;
+    }
+  }
+
+  const clusters =
+    Number.isFinite(clusterCount) ? clusterCount :
+    (Array.isArray(clusterOf) && clusterOf.length) ? (Math.max(...clusterOf) + 1) : 0;
+
+  return {
+    totalNodes, visibleNodes, totalEdges, visibleEdges,
+    withAbs, withFT, clusters,
+    years: {
+      min: (yMin ===  Infinity) ? null : yMin,
+      max: (yMax === -Infinity) ? null : yMax,
+      counts: yearCounts
+    }
+  };
+}
+
+// Simple inline SVG bar chart for year counts
+function svgYearBars(years, width = 226, height = 82, margin = 6) {
+  const { min, max, counts } = years || {};
+  if (min == null || max == null || !counts || !counts.size) {
+    return `<div style="opacity:.7;font-size:12px">No year data</div>`;
+  }
+
+  const W = Math.max(120, width);
+  const labelH = 12;                 // space for labels below the bars
+  const H = Math.max(52, height);    // total svg height (includes labelH)
+  const chartH = H - labelH;         // height available for bars/background
+  const bw = Math.max(1, Math.floor((W - margin*2) / (max - min + 1)));
+
+  let maxCount = 1;
+  for (let y = min; y <= max; y++) maxCount = Math.max(maxCount, counts.get(y) || 0);
+
+  let rects = '';
+  for (let y = min; y <= max; y++) {
+    const c = counts.get(y) || 0;
+    const x = margin + (y - min) * bw;
+    const h = Math.round((c / maxCount) * (chartH - margin*2));
+    const yTop = (chartH - margin - h);
+    rects += `<rect x="${x}" y="${yTop}" width="${bw-1}" height="${h}" rx="2" ry="2" fill="rgba(255,255,255,.85)"/>`;
+  }
+
+  // background only behind the bars, not the labels
+  return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">
+    <rect x="0" y="0" width="${W}" height="${chartH}" fill="rgba(255,255,255,0.06)" rx="6"/>
+    ${rects}
+    <!-- year labels placed BELOW the chart area -->
+    <text x="${margin}" y="${chartH + labelH - 2}" font-size="10" fill="rgba(255,255,255,0.8)">${min}</text>
+    <text x="${W - margin - 20}" y="${chartH + labelH - 2}" font-size="10" fill="rgba(255,255,255,0.8)">${max}</text>
+  </svg>`;
+}
+
+
+
+function showCanvasOverviewIfNoneSelected() {
+  if (!infoPanel) return;
+  const noneSelected = (selectedIndex < 0) && (selectedDim < 0) && (aiActiveFootprint == null);
+  if (noneSelected) {
+    infoPanel.show();
+    infoPanel.setCanvasOverview();
+  }
+}
+
+function deselectNode() {
+  selectedIndex = -1;
+  showCanvasOverviewIfNoneSelected();
+  redraw();
+}
+
+function deselectDimension() {
+  selectedDim = -1;
+  showCanvasOverviewIfNoneSelected();
+  redraw();
+}
+function hasGraphData() {
+  return Array.isArray(nodes) && nodes.length > 0;
+}
+function drawSplashIfNeeded() {
+  if (!_splashEnabled) return false;
+  if (hasGraphData())   return false;
+
+  const splash = (typeof DEMO_MODE !== 'undefined' && DEMO_MODE) ? splashDemoImg : splashImg;
+  if (!splash || !splash.width || !splash.height) return false;
+
+  const cx = width / 2, cy = height / 2;
+
+  push();
+  // optional subtle dim so the splash “sits” on the canvas
+  noStroke();
+  fill(0, 100);
+  rect(0, 0, width, height);
+
+  imageMode(CENTER);
+
+  // Fit to ~60% viewport, preserve aspect
+  const maxW = width * 0.6;
+  const maxH = height * 0.6;
+  const sc   = Math.min(maxW / splash.width, maxH / splash.height, 1);
+  image(splash, cx, cy, splash.width * sc, splash.height * sc);
+  pop();
+
+  return true; // indicates we drew the splash and want to skip normal drawing
+}
