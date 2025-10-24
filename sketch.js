@@ -137,7 +137,7 @@ let poweredByImg;
 
 // --- Bug/Feature Tracking ----------------------------------------------------
 // Toggle to show a bug icon in the top-right control bar
-let BUG_MODE = false;  // set true to enable
+let BUG_MODE = true;  // set true to enable
 
 // Your Formspree endpoint (replace with your form ID URL, e.g. https://formspree.io/f/abcdjklm)
 const FORM_ENDPOINT = 'https://formspree.io/f/mwprdqjw';
