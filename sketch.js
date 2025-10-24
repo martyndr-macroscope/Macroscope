@@ -137,7 +137,7 @@ let poweredByImg;
 
 // --- Bug/Feature Tracking ----------------------------------------------------
 // Toggle to show a bug icon in the top-right control bar
-let BUG_MODE = true;  // set true to enable
+let BUG_MODE = false;  // set true to enable
 
 // Your Formspree endpoint (replace with your form ID URL, e.g. https://formspree.io/f/abcdjklm)
 const FORM_ENDPOINT = 'https://formspree.io/f/mwprdqjw';
@@ -10256,7 +10256,7 @@ REMOTE_AI_BASE      = _joinBase(_aiFromIndex)      || REMOTE_AI_BASE;
       oa: !!nn.oa,
       year: Number.isFinite(+nn.year) ? +nn.year : NaN,
       hasAbs: !!nn.hasAbs,
-      hasFullText: false,
+        hasFullText: !!nn.hasFullText,
       idStr: (nn.id || '').replace(/^https?:\/\/openalex\.org\//i, '') || null,        // ← used for lazy detail fetch
         intIn: (Number.isFinite(+nn.intIn) ? (+nn.intIn|0) : undefined),  // ← NEW
 
@@ -10559,7 +10559,12 @@ const __intInMax = __intInDeg.length ? Math.max(...__intInDeg) : 0;
     cbc: n.cbc|0,
      intIn: __intInDeg[i]|0,   // ← NEW
     deg: (degree?.[i] ?? 0)|0,
-    cluster: (clusterOf?.[i] ?? -1)|0
+    cluster: (clusterOf?.[i] ?? -1)|0,
+    hasFullText: !!(
+    (itemsData?.[i]?.fulltext && String(itemsData[i].fulltext).trim()) ||
+    n.hasFullText
+  )
+
   }));
 
 if (typeof buildDimensionsIndex === 'function') buildDimensionsIndex();
