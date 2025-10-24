@@ -209,7 +209,7 @@ function createProjectMetaPanel() {
   panel.style('box-shadow','0 8px 24px rgba(0,0,0,0.25)');
   panel.style('backdrop-filter','blur(2px)');
   panel.style('padding','10px 12px');
-  panel.style('color','#fff');
+  panel.style('color','#bdbdbd');
   panel.style('z-index','10035');
   panel.hide();
   if (typeof captureUI === 'function') captureUI(panel.elt);
