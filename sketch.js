@@ -449,114 +449,6 @@ let ovClusterLabels = 0; // label pill opacity for clusters
 let overlaysPanel = null;
 
 
-// ───── Touch / Pointer gestures for mobile (pinch-to-zoom + two-finger pan) ─────
-let _activePointers = new Map();
-let _gestureInit = null;   // { mid, dist, midWorld, scale }
-let _gestureCanvasEl = null;   // the <canvas> DOM element used for pointer math
-
-
-
-function enableTouchGestures(p5Canvas){
-  const el = (p5Canvas && p5Canvas.elt) ? p5Canvas.elt : p5Canvas;
-
-  // Ensure the canvas owns the gesture on iOS Safari
-  if (el && el.style) el.style.touchAction = 'none';
-
-  // Block old iOS "gesture*" events from zooming the page
-  el.addEventListener('gesturestart',  (e)=>e.preventDefault());
-  el.addEventListener('gesturechange', (e)=>e.preventDefault());
-  el.addEventListener('gestureend',    (e)=>e.preventDefault());
-
-  // Prevent double-tap zoom
-  el.addEventListener('touchstart', (e)=>{ e.preventDefault(); }, { passive:false });
-
-  // Pointer Events (work for mouse, pen, touch)
-  el.addEventListener('pointerdown', onPointerDown);
-  el.addEventListener('pointermove', onPointerMove, { passive:false });
-  el.addEventListener('pointerup', onPointerUp);
-  el.addEventListener('pointercancel', onPointerUp);
-_gestureCanvasEl = (p5Canvas && p5Canvas.elt) ? p5Canvas.elt : p5Canvas;
-
-
-
-}
-
-function onPointerDown(e){
-  if (pointerOverUI?.()) return;
-  e.preventDefault();
-  e.target.setPointerCapture?.(e.pointerId);
-  _activePointers.set(e.pointerId, { x:e.clientX, y:e.clientY });
-
-  if (_activePointers.size === 1){
-    panStart = { x:e.clientX, y:e.clientY, camX:cam.x, camY:cam.y };
-    isPanning = true;
-  } else if (_activePointers.size === 2){
-    // kill any pan state before starting pinch
-    isPanning = false;
-    panStart  = null;
-    _gestureInit = computePinchState();
-  }
-}
-
-
-function onPointerMove(e){
-  if (pointerOverUI?.()) return;
-  if (e.pointerType === 'mouse') return;      // ← mouse uses p5 mouseDragged/moved
-  if (!_activePointers.has(e.pointerId)) return;
-  e.preventDefault();
-  _activePointers.set(e.pointerId, { x:e.clientX, y:e.clientY });
-
-  if (_activePointers.size === 1 && isPanning && panStart){
-    const p = _activePointers.values().next().value;
-    cam.x = panStart.camX + (p.x - panStart.x);
-    cam.y = panStart.camY + (p.y - panStart.y);
-    redraw();
-  } else if (_activePointers.size === 2){
-    const now = computePinchState();
-    if (_gestureInit){
-      const zoom = now.dist / Math.max(1e-3, _gestureInit.dist);
-      const newScale = clamp(_gestureInit.scale * zoom, 0.1, 64);
-      const mid0 = _gestureInit.midWorld;
-      cam.scale = newScale;
-      cam.x = now.mid.x - mid0.x * cam.scale;
-      cam.y = now.mid.y - mid0.y * cam.scale;
-      redraw();
-    }
-  }
-}
-
-function onPointerUp(e){
-  if (e.pointerType === 'mouse') return;      // ← mouse uses p5 mouseReleased
-  _activePointers.delete(e.pointerId);
-  if (_activePointers.size < 2) _gestureInit = null;
-  if (_activePointers.size === 0){ isPanning = false; panStart = null; }
-}
-
-function computePinchState(){
-  const pts = Array.from(_activePointers.values());
-  if (pts.length < 2) return null;
-
-  // Convert client (page) coords to canvas-local coords
-  const rect = _gestureCanvasEl?.getBoundingClientRect?.() || { left:0, top:0 };
-  const ax = pts[0].x - rect.left;
-  const ay = pts[0].y - rect.top;
-  const bx = pts[1].x - rect.left;
-  const by = pts[1].y - rect.top;
-
-  const mid = { x:(ax + bx)/2, y:(ay + by)/2 };
-  const dx = ax - bx, dy = ay - by;
-  const dist = Math.hypot(dx, dy);
-
-  // Convert the *initial* midpoint to world space with current cam
-  const midWorld = { x:(mid.x - cam.x) / (cam.scale || 1),
-                     y:(mid.y - cam.y) / (cam.scale || 1) };
-
-  return { mid, dist, midWorld, scale: cam.scale || 1 };
-}
-
-
-
-
 function refreshDimMembershipFlags() {
   nodeInAnyDim   = new Array(nodes.length).fill(false);
   nodeInAnyAIDim = new Array(nodes.length).fill(false);
@@ -1537,7 +1429,6 @@ cnv.style('position','fixed');
 cnv.style('left','0');
 cnv.style('top','0');
 cnv.style('z-index','0');
-enableTouchGestures(cnv);
 
 
   // Hook up the HTML controls that are already in index.html
@@ -1714,12 +1605,9 @@ ftFileInput.hide();
 
 (function killScrollbars(){
   if (document.getElementById('no-scroll-css')) return;
-const css = `
+  const css = `
     html, body { margin:0; padding:0; height:100%; overflow:hidden; }
-    /* Make the canvas own the gesture on touch devices */
-    canvas { display:block; touch-action:none; -ms-touch-action:none; }
-    /* Avoid pull-to-refresh/bounce */
-    html, body { overscroll-behavior: none; }
+    canvas { display:block; }
   `;
   const s = document.createElement('style');
   s.id = 'no-scroll-css';
