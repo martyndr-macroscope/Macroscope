@@ -42,26 +42,29 @@ let PARALLAX_ENABLED   = true;
 // Max extra response, as fractions (10% recommended)
 // - panning: how much extra the camera translation influences close nodes
 // - zooming: how much extra the camera scale influences close nodes
-const PARALLAX_PAN_FRAC  = 0.15;   // 0.0 … 0.15 feels good
-const PARALLAX_ZOOM_FRAC = 0.50;   // 0.0 … 0.15 feels good
+const PARALLAX_PAN_FRAC  = 0.10;   // 0.0 … 0.15 feels good
+const PARALLAX_ZOOM_FRAC = 0.20;   // 0.0 … 0.15 feels good
 
 // Map cited_by_count -> depth in [0..1], using robust percentiles if available
 function parallaxDepthForNode(i) {
-  // prefer per-node "cbc" already used in shading
-  const n   = nodes[i] || {};
-  const cbc = Number(n.cbc || 0);
+  const n = nodes[i] || {};
 
-  // fallbacks for percentile bounds
-  const p5  = Number.isFinite(cbcP5)  ? cbcP5  : cbcMin;
-  const p95 = Number.isFinite(cbcP95) ? cbcP95 : cbcMax;
+  // Prefer internal in-degree if available; else fall back to cited_by_count
+  const useInt = Number.isFinite(Number(n.intIn));
+  const val    = useInt ? Math.max(0, n.intIn|0) : Math.max(0, Number(n.cbc || 0));
+
+  // Robust bounds
+  const p5  = useInt ? intInP5  : (Number.isFinite(cbcP5)  ? cbcP5  : cbcMin);
+  const p95 = useInt ? intInP95 : (Number.isFinite(cbcP95) ? cbcP95 : cbcMax);
   const lo  = Math.max(0, Math.min(p5,  p95));
   const hi  = Math.max(lo + 1e-9, Math.max(p5, p95));
 
-  // log-scale for big spreads (0 → 3000+)
-  const L   = (x) => Math.log1p(Math.max(0, x));
-  const t   = (L(cbc) - L(lo)) / Math.max(1e-9, (L(hi) - L(lo)));
+  // Log mapping for stability on heavy-tailed counts
+  const L = (x) => Math.log1p(Math.max(0, x));
+  const t = (L(val) - L(lo)) / Math.max(1e-9, (L(hi) - L(lo)));
   return Math.max(0, Math.min(1, t));
 }
+
 // --- Centre-aware helpers (add) ---
 function worldCenterFromCamera() {
   // world point currently under the screen centre
@@ -131,6 +134,18 @@ let REMOTE_AI_BASE = null;
 let DEMO_MODE = !!(window.DEMO_MODE ?? false);
 const SELECT_SQUARE_MULT = 1.0;
 let poweredByImg;
+
+// --- Bug/Feature Tracking ----------------------------------------------------
+// Toggle to show a bug icon in the top-right control bar
+let BUG_MODE = false;  // set true to enable
+
+// Your Formspree endpoint (replace with your form ID URL, e.g. https://formspree.io/f/abcdjklm)
+const FORM_ENDPOINT = 'https://formspree.io/f/mwprdqjw';
+
+let bugIconImg = null;          // preloaded icon (optional, for future use)
+let __bugDialogDiv = null;      // modal root reference
+
+
 
 // Optional Unpaywall assist (recommended): enter your email
 const UNPAYWALL_EMAIL = 'martyn.dade-robertson@northumbria.ac.uk'; // e.g. 'you@example.com'
@@ -286,7 +301,7 @@ function saveCitedByCaps(caps) {
 
 window.CITED_BY_CAPS = loadCitedByCaps();
 
-let OPENAI_API_KEY = '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';                     // set via modal; not persisted
+let OPENAI_API_KEY = '';                     // set via modal; not persisted
 let OPENAI_MODEL   = 'gpt-4o-mini';          // adjust if you prefer another model
 
 let filtersPanel = null;
@@ -709,7 +724,12 @@ splashDemoImg = loadImage(
   () => {},
   () => console.warn('Missing Icons/Splash_Demo.png')
 );
-
+// Bug icon (case-sensitive on GitHub Pages; make sure filename matches!)
+bugIconImg = loadImage(
+  'Icons/bug.png', // or 'Icons/Bug.png' if that’s your filename
+  () => {},
+  () => console.warn('Missing Icons/bug.png')
+);
 
   // Category-specific handle icons
   dimIcons = {
@@ -1036,6 +1056,20 @@ loadBtn.mousePressed(() => {
     projectFileInput.elt.click();
   }
 });
+// Bug / Feature icon (right side)
+if (BUG_MODE) {
+  const bugBtn = createImg('./Icons/bug.png', 'Report bug / suggest feature');
+  bugBtn.parent(saveLoadBar);
+  bugBtn.size(40, 40);
+  bugBtn.style('display','block');
+  bugBtn.style('cursor','pointer');
+  bugBtn.attribute('draggable','false');
+  bugBtn.attribute('title', 'Report bug / suggest feature');
+  attachTooltip?.(bugBtn, 'Report bug / suggest feature'); // matches your pattern
+  captureUI?.(bugBtn.elt);
+  bugBtn.mousePressed(openBugDialog);
+}
+
 
 // After you create Save/Load buttons:
 // Export Viewer (using image instead of text)
@@ -1322,6 +1356,30 @@ const DIM_COLORS = {
 // Robust citation shading
 let cbcP5 = 0, cbcP95 = 1;      // 5th/95th percentiles
 let cbcLogMin = 0, cbcLogMax = 1;
+
+// Robust internal in-degree shading (citations received within the graph)
+let intInP5 = 0, intInP95 = 1;
+let intInLogMin = 0, intInLogMax = 1;
+
+function computeIntInRobustStats() {
+  if (!nodes || !nodes.length) {
+    intInP5 = 0; intInP95 = 1; intInLogMin = 0; intInLogMax = 1;
+    return;
+  }
+  const vals = nodes.map(n => Math.max(0, Number(n.intIn || 0))).sort((a,b)=>a-b);
+  if (!vals.length) { intInP5 = 0; intInP95 = 1; intInLogMin = 0; intInLogMax = 1; return; }
+  const pick = (p) => vals[Math.max(0, Math.min(vals.length-1, Math.floor(p*(vals.length-1))))];
+  if (vals.length < 10) { intInP5 = vals[0]; intInP95 = vals[vals.length-1]; }
+  else {
+    intInP5 = pick(0.05); intInP95 = pick(0.95);
+    if (intInP95 <= intInP5) { intInP5 = vals[0]; intInP95 = vals[vals.length-1]; }
+  }
+  intInLogMin = Math.log1p(intInP5);
+  intInLogMax = Math.log1p(intInP95);
+  if (intInLogMax <= intInLogMin) { intInLogMin = Math.log1p(vals[0]||0); intInLogMax = Math.log1p(vals[vals.length-1]||1); }
+}
+
+
 
 // --- Synthesis UI ---
 let synthBtn, synthPanel, synthBody, synthCloseBtn, synthCopyBtn, synthDownloadBtn;
@@ -5030,9 +5088,6 @@ stroke(r, g, b, alpha);
 
 
 
-
-
-
 function drawDimHandles() {
   if (!Array.isArray(dimTools) || !dimTools.length) return;
 
@@ -5144,12 +5199,6 @@ function drawDimHandles() {
 }
 
 
-
-
-
-
-
-
 async function buildGraphFromPayloadAsync(payload) {
   const items = Array.isArray(payload?.items) ? payload.items
               : (Array.isArray(payload) ? payload : []);
@@ -5252,10 +5301,20 @@ async function buildGraphFromPayloadAsync(payload) {
 
   // ---- Finish: compute derived structures (quick) ----
   edges = normEdges;
+{
+  const inDeg = new Array(n).fill(0);
+  for (const e of normEdges) {
+    const t = (e.target|0);
+    if (t>=0 && t<n) inDeg[t]++;
+  }
+  for (let i=0;i<n;i++) nodes[i].intIn = inDeg[i]|0;
+}
+
   buildAdjacency(n, edges);
   computeDegreesFromAdj();
   initDegreeFilterUI();
   applyDegreeFilter(0);
+  computeIntInRobustStats();
 
   computeYearBounds();
   initYearFilterUI();
@@ -10199,6 +10258,9 @@ REMOTE_AI_BASE      = _joinBase(_aiFromIndex)      || REMOTE_AI_BASE;
       hasAbs: !!nn.hasAbs,
       hasFullText: false,
       idStr: (nn.id || '').replace(/^https?:\/\/openalex\.org\//i, '') || null,        // ← used for lazy detail fetch
+        intIn: (Number.isFinite(+nn.intIn) ? (+nn.intIn|0) : undefined),  // ← NEW
+
+    
     };
     // Minimal stub so InfoPanel doesn't crash if remote is unavailable
     itemsData[i] = { openalex: { id: nn.id || null, cited_by_count: nn.cbc|0,
@@ -10211,6 +10273,23 @@ REMOTE_AI_BASE      = _joinBase(_aiFromIndex)      || REMOTE_AI_BASE;
   buildAdjacency(N, edges);
   computeDegreesFromAdj();
   initDegreeFilterUI?.();
+// Ensure internal in-degree exists and compute robust stats for parallax
+(function ensureIntInAndStats() {
+  const need = nodes.some(n => n && (n.intIn === undefined));
+  if (need) {
+    const inDeg = new Array(N).fill(0);
+    for (const e of edges) {
+      const t = (e.target|0);
+      if (t>=0 && t<N) inDeg[t]++;
+    }
+    for (let i=0;i<N;i++) nodes[i].intIn = inDeg[i]|0;
+  }
+  computeIntInRobustStats();
+  // Keep CBC percentiles ready for fallback
+  computeCbcRobustStats?.();
+})();
+
+
 
 // 3.5) Initialise ranges required by filters (years + external citations)
 computeYearBounds();            // sets yearMin/yearMax and yearLo/yearHi from nodes[]
@@ -10454,6 +10533,19 @@ const dims = (dimTools || []).map(d => ({
     nodes: Array.from(f.nodeIds || []),
     summaryRef: `A${j+1}.json`
   }));
+// Compute directed internal in-degrees for export
+function computeInternalInDegrees(nCount, edgeList) {
+  const inDeg = new Array(nCount).fill(0);
+  for (const e of (edgeList || [])) {
+    const t = (Array.isArray(e) ? e[1] : (e.t ?? e.target)) | 0;
+    if (t >= 0 && t < nCount) inDeg[t]++;
+  }
+  return inDeg;
+}
+const __E_ARRAY = (edges||[]).map(e => [e.source|0, e.target|0]);
+const __intInDeg = computeInternalInDegrees(nodes.length|0, __E_ARRAY);
+const __intInMin = __intInDeg.length ? Math.min(...__intInDeg) : 0;
+const __intInMax = __intInDeg.length ? Math.max(...__intInDeg) : 0;
 
   // nodes
   const simpleNodes = nodes.map((n,i)=>({
@@ -10465,6 +10557,7 @@ const dims = (dimTools || []).map(d => ({
     hasAbs: !!n.hasAbs,
     oa: !!n.oa,
     cbc: n.cbc|0,
+     intIn: __intInDeg[i]|0,   // ← NEW
     deg: (degree?.[i] ?? 0)|0,
     cluster: (clusterOf?.[i] ?? -1)|0
   }));
@@ -10497,11 +10590,13 @@ const dimIndexSnapshot = {
       counts: { nodes: nodes.length|0, edges: edges.length|0 },
       paths: { detailsBase: 'data/details/', aiBase: 'data/ai/' }
     },
-    ranges: {
-      year: { min: yrMin, max: yrMax },
-      internalDegree: { min: 0, max: (degreeMax|0) },
-      citedBy: { min: cMin, max: cMax }
-    },
+ranges: {
+  year: { min: yrMin, max: yrMax },
+  internalDegree: { min: 0, max: (degreeMax|0) },
+  internalIn: { min: __intInMin|0, max: __intInMax|0 },   // ← NEW
+  citedBy: { min: cMin, max: cMax }
+},
+
     nodes: simpleNodes,
     edges: (edges||[]).map(e => [e.source|0, e.target|0]),
     clusters: {
@@ -12154,12 +12249,24 @@ function svgYearBars(years, width = 226, height = 82, margin = 6) {
 
 function showCanvasOverviewIfNoneSelected() {
   if (!infoPanel) return;
+
+  // NEW: if nothing is loaded, hide the panel and bail
+  if (!hasGraphData()) { 
+    infoPanel.hide(); 
+    return; 
+  }
+
   const noneSelected = (selectedIndex < 0) && (selectedDim < 0) && (aiActiveFootprint == null);
   if (noneSelected) {
     infoPanel.show();
     infoPanel.setCanvasOverview();
+  } else {
+    // if something *is* selected, the specific renderers will .show() themselves
+    // Keep this symmetrical so it doesn't hang around
+    infoPanel.hide();
   }
 }
+
 
 function deselectNode() {
   selectedIndex = -1;
@@ -12200,4 +12307,175 @@ function drawSplashIfNeeded() {
   pop();
 
   return true; // indicates we drew the splash and want to skip normal drawing
+}
+function openBugDialog() {
+  // Build once; reuse.
+  if (!__bugDialogDiv) {
+    __bugDialogDiv = createDiv('');
+    __bugDialogDiv.id('bugDialog');
+    __bugDialogDiv.style('position','fixed');
+    __bugDialogDiv.style('inset','0');
+    __bugDialogDiv.style('background','rgba(0,0,0,0.55)');
+    __bugDialogDiv.style('z-index','10090');
+    __bugDialogDiv.style('display','flex');
+    __bugDialogDiv.style('align-items','center');
+    __bugDialogDiv.style('justify-content','center');
+
+    // Card
+    const card = createDiv('');
+    card.parent(__bugDialogDiv);
+    card.style('width','min(680px, 92vw)');
+    card.style('max-height','84vh');
+    card.style('overflow','auto');
+    card.style('background','rgba(20,20,24,0.95)');
+    card.style('border','1px solid rgba(255,255,255,0.12)');
+    card.style('border-radius','14px');
+    card.style('box-shadow','0 18px 50px rgba(0,0,0,0.45)');
+    card.style('backdrop-filter','blur(4px)');
+    card.style('padding','16px 16px 12px 16px');
+    card.style('color','#fff');
+
+    const title = createDiv('Report a bug / Suggest a feature');
+    title.parent(card);
+    title.style('font-weight','700');
+    title.style('font-size','16px');
+    title.style('margin','0 0 10px 0');
+
+    const hint = createDiv(
+      '<div style="opacity:.8; font-size:12px; margin-bottom:10px;">' +
+      'Please describe the issue and context, or suggest improvements. ' +
+      'We will include session context (URL, time, demo mode, dataset title) automatically.</div>'
+    );
+    hint.parent(card);
+
+    // Description textarea
+    const descLabel = createDiv('<b>Description of the bug</b>');
+    descLabel.parent(card);
+    descLabel.style('font-size','13px');
+    descLabel.style('margin','10px 0 4px');
+
+    const desc = createElement('textarea');
+    desc.parent(card);
+    desc.id('bugDesc');
+    desc.attribute('placeholder', 'Give as much information as you can on the bug and the context where it occurred…');
+    desc.style('width','100%');
+    desc.style('height','120px');
+    desc.style('resize','vertical');
+    desc.style('padding','8px');
+    desc.style('border-radius','8px');
+    desc.style('border','1px solid rgba(255,255,255,0.15)');
+    desc.style('background','#111');
+    desc.style('color','#fff');
+
+    // Ideas textarea
+    const ideaLabel = createDiv('<b>Ideas for new features or improvements</b>');
+    ideaLabel.parent(card);
+    ideaLabel.style('font-size','13px');
+    ideaLabel.style('margin','12px 0 4px');
+
+    const ideas = createElement('textarea');
+    ideas.parent(card);
+    ideas.id('bugIdeas');
+    ideas.attribute('placeholder', 'Optional: What would you like to see improved?');
+    ideas.style('width','100%');
+    ideas.style('height','100px');
+    ideas.style('resize','vertical');
+    ideas.style('padding','8px');
+    ideas.style('border-radius','8px');
+    ideas.style('border','1px solid rgba(255,255,255,0.15)');
+    ideas.style('background','#111');
+    ideas.style('color','#fff');
+
+    // Buttons row
+    const row = createDiv('');
+    row.parent(card);
+    row.style('display','flex');
+    row.style('gap','10px');
+    row.style('justify-content','flex-end');
+    row.style('margin','12px 0 0');
+
+    const cancelBtn = createButton('Cancel');
+    cancelBtn.parent(row);
+    cancelBtn.mousePressed(closeBugDialog);
+
+    const sendBtn = createButton('Send');
+    sendBtn.parent(row);
+    sendBtn.style('font-weight','600');
+    sendBtn.mousePressed(async () => {
+      await submitBugForm({
+        description: desc.value().trim(),
+        ideas: ideas.value().trim()
+      }, sendBtn);
+    });
+
+    // Click outside to close
+    __bugDialogDiv.mousePressed((ev) => {
+      if (ev?.target === __bugDialogDiv.elt) closeBugDialog();
+    });
+
+    captureUI?.(__bugDialogDiv.elt); // prevent canvas panning through the modal
+  }
+
+  __bugDialogDiv.show();
+}
+
+function closeBugDialog() {
+  __bugDialogDiv?.hide();
+}
+
+async function submitBugForm(payload, btn) {
+  try {
+    if (!FORM_ENDPOINT || FORM_ENDPOINT.includes('REPLACE_ME')) {
+      showToast?.('Form endpoint not configured.');
+      return;
+    }
+    // Basic requirement: need at least a bug description OR ideas
+    if (!payload.description && !payload.ideas) {
+      showToast?.('Please provide a description or an idea.');
+      return;
+    }
+
+    // Build context bundle
+    const context = {
+      url: location?.href || '',
+      time: new Date().toISOString(),
+      demoMode: !!DEMO_MODE,
+      bugMode: !!BUG_MODE,
+      projectTitle: (projectMeta?.title || '').trim(), // shown under top-right icons
+      datasetBase: (window.DATA_BASE_PREFIX || ''),    // demo dataset path if used
+      selectedIndex: (typeof selectedIndex === 'number' ? selectedIndex : null),
+      userAgent: (navigator?.userAgent || ''),
+      appVersion: (window.APP_VERSION || '')
+    };
+
+    const body = {
+      description: payload.description,
+      ideas: payload.ideas,
+      context
+    };
+
+    btn?.attribute('disabled', 'true');
+    btn?.html('Sending…');
+
+    const r = await fetch(FORM_ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify(body)
+    });
+
+    if (!r.ok) {
+      const t = await r.text().catch(()=> '');
+      throw new Error(`HTTP ${r.status}${t ? ` – ${t}` : ''}`);
+    }
+
+    // Success UX
+    showToast?.('Thanks! Your feedback was sent.');
+    closeBugDialog();
+
+  } catch (err) {
+    console.error(err);
+    showToast?.(`Failed to send: ${err?.message || 'unknown error'}`);
+  } finally {
+    if (btn) { btn.removeAttribute('disabled'); btn.html('Send'); }
+  }
 }
