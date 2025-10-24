@@ -137,7 +137,7 @@ let poweredByImg;
 
 // --- Bug/Feature Tracking ----------------------------------------------------
 // Toggle to show a bug icon in the top-right control bar
-let BUG_MODE = false;  // set true to enable
+let BUG_MODE = true;  // set true to enable
 
 // Your Formspree endpoint (replace with your form ID URL, e.g. https://formspree.io/f/abcdjklm)
 const FORM_ENDPOINT = 'https://formspree.io/f/mwprdqjw';
@@ -209,7 +209,7 @@ function createProjectMetaPanel() {
   panel.style('box-shadow','0 8px 24px rgba(0,0,0,0.25)');
   panel.style('backdrop-filter','blur(2px)');
   panel.style('padding','10px 12px');
-  panel.style('color','#bdbdbd');
+  panel.style('color','rgba(94, 94, 94, 1)');
   panel.style('z-index','10035');
   panel.hide();
   if (typeof captureUI === 'function') captureUI(panel.elt);
