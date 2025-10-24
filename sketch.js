@@ -137,7 +137,7 @@ let poweredByImg;
 
 // --- Bug/Feature Tracking ----------------------------------------------------
 // Toggle to show a bug icon in the top-right control bar
-let BUG_MODE = false;  // set true to enable
+let BUG_MODE = true;  // set true to enable
 
 // Your Formspree endpoint (replace with your form ID URL, e.g. https://formspree.io/f/abcdjklm)
 const FORM_ENDPOINT = 'https://formspree.io/f/mwprdqjw';
@@ -301,7 +301,7 @@ function saveCitedByCaps(caps) {
 
 window.CITED_BY_CAPS = loadCitedByCaps();
 
-let OPENAI_API_KEY = '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';                     // set via modal; not persisted
+let OPENAI_API_KEY = '';                     // set via modal; not persisted
 let OPENAI_MODEL   = 'gpt-4o-mini';          // adjust if you prefer another model
 
 let filtersPanel = null;
