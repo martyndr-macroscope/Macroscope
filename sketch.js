@@ -137,7 +137,7 @@ let poweredByImg;
 
 // --- Bug/Feature Tracking ----------------------------------------------------
 // Toggle to show a bug icon in the top-right control bar
-let BUG_MODE = true;  // set true to enable
+let BUG_MODE = false;  // set true to enable
 
 // Your Formspree endpoint (replace with your form ID URL, e.g. https://formspree.io/f/abcdjklm)
 const FORM_ENDPOINT = 'https://formspree.io/f/mwprdqjw';
@@ -209,7 +209,7 @@ function createProjectMetaPanel() {
   panel.style('box-shadow','0 8px 24px rgba(0,0,0,0.25)');
   panel.style('backdrop-filter','blur(2px)');
   panel.style('padding','10px 12px');
-  panel.style('color','rgba(94, 94, 94, 1)');
+  panel.style('color','#fff');
   panel.style('z-index','10035');
   panel.hide();
   if (typeof captureUI === 'function') captureUI(panel.elt);
@@ -447,6 +447,95 @@ let ovClusterLabels = 0; // label pill opacity for clusters
 
 // Panel handle
 let overlaysPanel = null;
+
+
+// ───── Touch / Pointer gestures for mobile (pinch-to-zoom + two-finger pan) ─────
+let _activePointers = new Map();
+let _gestureInit = null;   // { mid, dist, midWorld, scale }
+
+function enableTouchGestures(p5Canvas){
+  const el = (p5Canvas && p5Canvas.elt) ? p5Canvas.elt : p5Canvas;
+
+  // Ensure the canvas owns the gesture on iOS Safari
+  if (el && el.style) el.style.touchAction = 'none';
+
+  // Block old iOS "gesture*" events from zooming the page
+  el.addEventListener('gesturestart',  (e)=>e.preventDefault());
+  el.addEventListener('gesturechange', (e)=>e.preventDefault());
+  el.addEventListener('gestureend',    (e)=>e.preventDefault());
+
+  // Prevent double-tap zoom
+  el.addEventListener('touchstart', (e)=>{ e.preventDefault(); }, { passive:false });
+
+  // Pointer Events (work for mouse, pen, touch)
+  el.addEventListener('pointerdown', onPointerDown);
+  el.addEventListener('pointermove', onPointerMove, { passive:false });
+  el.addEventListener('pointerup', onPointerUp);
+  el.addEventListener('pointercancel', onPointerUp);
+}
+
+function onPointerDown(e){
+  if (pointerOverUI?.()) return;
+  e.preventDefault();
+  e.target.setPointerCapture?.(e.pointerId);
+  _activePointers.set(e.pointerId, { x:e.clientX, y:e.clientY });
+
+  if (_activePointers.size === 1){
+    // one-finger drag = pan
+    panStart = { x:e.clientX, y:e.clientY, camX:cam.x, camY:cam.y };
+    isPanning = true;
+  } else if (_activePointers.size === 2){
+    // start pinch state
+    _gestureInit = computePinchState();
+  }
+}
+
+function onPointerMove(e){
+  if (pointerOverUI?.()) return;
+  if (!_activePointers.has(e.pointerId)) return;
+  e.preventDefault();
+  _activePointers.set(e.pointerId, { x:e.clientX, y:e.clientY });
+
+  if (_activePointers.size === 1 && isPanning && panStart){
+    // one-finger pan
+    const p = _activePointers.values().next().value;
+    cam.x = panStart.camX + (p.x - panStart.x);
+    cam.y = panStart.camY + (p.y - panStart.y);
+    redraw();
+  } else if (_activePointers.size === 2){
+    // pinch-to-zoom (with two-finger pan of the midpoint)
+    const now = computePinchState();
+    if (_gestureInit){
+      const zoom = now.dist / Math.max(1e-3, _gestureInit.dist);
+      const newScale = clamp(_gestureInit.scale * zoom, 0.1, 64);
+
+      // zoom around the initial midpoint (world coords)
+      const mid0 = _gestureInit.midWorld;             // world point that was under the fingers
+      cam.scale = newScale;
+      // keep the *current* midpoint under the same world point
+      cam.x = now.mid.x - mid0.x * cam.scale;
+      cam.y = now.mid.y - mid0.y * cam.scale;
+      redraw();
+    }
+  }
+}
+
+function onPointerUp(e){
+  _activePointers.delete(e.pointerId);
+  if (_activePointers.size < 2) _gestureInit = null;
+  if (_activePointers.size === 0){ isPanning = false; panStart = null; }
+}
+
+function computePinchState(){
+  const pts = Array.from(_activePointers.values());
+  const a = pts[0], b = pts[1];
+  const mid = { x:(a.x + b.x)/2, y:(a.y + b.y)/2 };
+  const dx = a.x - b.x, dy = a.y - b.y;
+  const dist = Math.hypot(dx, dy);
+  const midWorld = { x:(mid.x - cam.x) / (cam.scale||1), y:(mid.y - cam.y) / (cam.scale||1) };
+  return { mid, dist, midWorld, scale: cam.scale || 1 };
+}
+
 
 
 function refreshDimMembershipFlags() {
@@ -1429,6 +1518,7 @@ cnv.style('position','fixed');
 cnv.style('left','0');
 cnv.style('top','0');
 cnv.style('z-index','0');
+enableTouchGestures(cnv);
 
 
   // Hook up the HTML controls that are already in index.html
@@ -1605,9 +1695,12 @@ ftFileInput.hide();
 
 (function killScrollbars(){
   if (document.getElementById('no-scroll-css')) return;
-  const css = `
+const css = `
     html, body { margin:0; padding:0; height:100%; overflow:hidden; }
-    canvas { display:block; }
+    /* Make the canvas own the gesture on touch devices */
+    canvas { display:block; touch-action:none; -ms-touch-action:none; }
+    /* Avoid pull-to-refresh/bounce */
+    html, body { overscroll-behavior: none; }
   `;
   const s = document.createElement('style');
   s.id = 'no-scroll-css';
