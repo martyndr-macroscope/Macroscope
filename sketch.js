@@ -452,6 +452,9 @@ let overlaysPanel = null;
 // ───── Touch / Pointer gestures for mobile (pinch-to-zoom + two-finger pan) ─────
 let _activePointers = new Map();
 let _gestureInit = null;   // { mid, dist, midWorld, scale }
+let _gestureCanvasEl = null;   // the <canvas> DOM element used for pointer math
+
+
 
 function enableTouchGestures(p5Canvas){
   const el = (p5Canvas && p5Canvas.elt) ? p5Canvas.elt : p5Canvas;
@@ -472,11 +475,14 @@ function enableTouchGestures(p5Canvas){
   el.addEventListener('pointermove', onPointerMove, { passive:false });
   el.addEventListener('pointerup', onPointerUp);
   el.addEventListener('pointercancel', onPointerUp);
+_gestureCanvasEl = (p5Canvas && p5Canvas.elt) ? p5Canvas.elt : p5Canvas;
+
+
+
 }
 
 function onPointerDown(e){
   if (pointerOverUI?.()) return;
-  if (e.pointerType === 'mouse') return;      // ← let p5 mousePressed handle clicks
   e.preventDefault();
   e.target.setPointerCapture?.(e.pointerId);
   _activePointers.set(e.pointerId, { x:e.clientX, y:e.clientY });
@@ -485,9 +491,13 @@ function onPointerDown(e){
     panStart = { x:e.clientX, y:e.clientY, camX:cam.x, camY:cam.y };
     isPanning = true;
   } else if (_activePointers.size === 2){
+    // kill any pan state before starting pinch
+    isPanning = false;
+    panStart  = null;
     _gestureInit = computePinchState();
   }
 }
+
 
 function onPointerMove(e){
   if (pointerOverUI?.()) return;
@@ -524,13 +534,26 @@ function onPointerUp(e){
 
 function computePinchState(){
   const pts = Array.from(_activePointers.values());
-  const a = pts[0], b = pts[1];
-  const mid = { x:(a.x + b.x)/2, y:(a.y + b.y)/2 };
-  const dx = a.x - b.x, dy = a.y - b.y;
+  if (pts.length < 2) return null;
+
+  // Convert client (page) coords to canvas-local coords
+  const rect = _gestureCanvasEl?.getBoundingClientRect?.() || { left:0, top:0 };
+  const ax = pts[0].x - rect.left;
+  const ay = pts[0].y - rect.top;
+  const bx = pts[1].x - rect.left;
+  const by = pts[1].y - rect.top;
+
+  const mid = { x:(ax + bx)/2, y:(ay + by)/2 };
+  const dx = ax - bx, dy = ay - by;
   const dist = Math.hypot(dx, dy);
-  const midWorld = { x:(mid.x - cam.x) / (cam.scale||1), y:(mid.y - cam.y) / (cam.scale||1) };
+
+  // Convert the *initial* midpoint to world space with current cam
+  const midWorld = { x:(mid.x - cam.x) / (cam.scale || 1),
+                     y:(mid.y - cam.y) / (cam.scale || 1) };
+
   return { mid, dist, midWorld, scale: cam.scale || 1 };
 }
+
 
 
 
