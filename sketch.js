@@ -137,7 +137,7 @@ let poweredByImg;
 
 // --- Bug/Feature Tracking ----------------------------------------------------
 // Toggle to show a bug icon in the top-right control bar
-let BUG_MODE = true;  // set true to enable
+let BUG_MODE = false;  // set true to enable
 
 // Your Formspree endpoint (replace with your form ID URL, e.g. https://formspree.io/f/abcdjklm)
 const FORM_ENDPOINT = 'https://formspree.io/f/mwprdqjw';
@@ -301,7 +301,7 @@ function saveCitedByCaps(caps) {
 
 window.CITED_BY_CAPS = loadCitedByCaps();
 
-let OPENAI_API_KEY = '';                     // set via modal; not persisted
+let OPENAI_API_KEY = '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';                     // set via modal; not persisted
 let OPENAI_MODEL   = 'gpt-4o-mini';          // adjust if you prefer another model
 
 let filtersPanel = null;
@@ -476,43 +476,38 @@ function enableTouchGestures(p5Canvas){
 
 function onPointerDown(e){
   if (pointerOverUI?.()) return;
+  if (e.pointerType === 'mouse') return;      // ← let p5 mousePressed handle clicks
   e.preventDefault();
   e.target.setPointerCapture?.(e.pointerId);
   _activePointers.set(e.pointerId, { x:e.clientX, y:e.clientY });
 
   if (_activePointers.size === 1){
-    // one-finger drag = pan
     panStart = { x:e.clientX, y:e.clientY, camX:cam.x, camY:cam.y };
     isPanning = true;
   } else if (_activePointers.size === 2){
-    // start pinch state
     _gestureInit = computePinchState();
   }
 }
 
 function onPointerMove(e){
   if (pointerOverUI?.()) return;
+  if (e.pointerType === 'mouse') return;      // ← mouse uses p5 mouseDragged/moved
   if (!_activePointers.has(e.pointerId)) return;
   e.preventDefault();
   _activePointers.set(e.pointerId, { x:e.clientX, y:e.clientY });
 
   if (_activePointers.size === 1 && isPanning && panStart){
-    // one-finger pan
     const p = _activePointers.values().next().value;
     cam.x = panStart.camX + (p.x - panStart.x);
     cam.y = panStart.camY + (p.y - panStart.y);
     redraw();
   } else if (_activePointers.size === 2){
-    // pinch-to-zoom (with two-finger pan of the midpoint)
     const now = computePinchState();
     if (_gestureInit){
       const zoom = now.dist / Math.max(1e-3, _gestureInit.dist);
       const newScale = clamp(_gestureInit.scale * zoom, 0.1, 64);
-
-      // zoom around the initial midpoint (world coords)
-      const mid0 = _gestureInit.midWorld;             // world point that was under the fingers
+      const mid0 = _gestureInit.midWorld;
       cam.scale = newScale;
-      // keep the *current* midpoint under the same world point
       cam.x = now.mid.x - mid0.x * cam.scale;
       cam.y = now.mid.y - mid0.y * cam.scale;
       redraw();
@@ -521,6 +516,7 @@ function onPointerMove(e){
 }
 
 function onPointerUp(e){
+  if (e.pointerType === 'mouse') return;      // ← mouse uses p5 mouseReleased
   _activePointers.delete(e.pointerId);
   if (_activePointers.size < 2) _gestureInit = null;
   if (_activePointers.size === 0){ isPanning = false; panStart = null; }
