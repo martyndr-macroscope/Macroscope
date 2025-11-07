@@ -211,73 +211,10 @@ function fetchWithTimeout(resource, options = {}, timeoutMs = 20000) {
     .finally(() => clearTimeout(id));
 }
 
-
 probeProxyOnce();
 
 // --- Project meta (shown on right, under the top-right icons) ---
 let projectMeta = { title: '', text: '', created: '' };
-let projectMetaPanel = null;
-
-function createProjectMetaPanel() {
-  if (projectMetaPanel) return projectMetaPanel;
-  const panel = createDiv('');
-  panel.id('project-meta-panel');
-  panel.style('position','fixed');
-  panel.style('right','12px');
-  panel.style('top','72px'); // will be re-positioned under the save/load bar if present
-  panel.style('width','250px');
-  panel.style('background','rgba(0,0,0,0.55)');
-  panel.style('border','1px solid rgba(255,255,255,0.12)');
-  panel.style('border-radius','12px');
-  panel.style('box-shadow','0 8px 24px rgba(0,0,0,0.25)');
-  panel.style('backdrop-filter','blur(2px)');
-  panel.style('padding','10px 12px');
-  panel.style('color','#fff');
-  panel.style('z-index','10035');
-  panel.hide();
-  if (typeof captureUI === 'function') captureUI(panel.elt);
-  projectMetaPanel = panel;
-  return projectMetaPanel;
-}
-
-function positionProjectMetaPanel() {
-  try {
-    const bar = (typeof saveLoadBar !== 'undefined') ? saveLoadBar : null;
-    if (bar?.elt) {
-      const r = bar.elt.getBoundingClientRect();
-      // 8px gap below the save/load bar
-      projectMetaPanel.style('top', `${Math.round(r.bottom + 8)}px`);
-      projectMetaPanel.style('right', '12px');
-    }
-  } catch {}
-}
-
-function renderProjectMetaPanel() {
-  if (!projectMetaPanel) createProjectMetaPanel();
-  const { title, text, created } = projectMeta || {};
-  const when = created ? new Date(created).toLocaleString() : '';
-  const safeTitle = (String(title||'').trim() || 'Untitled export');
-  const safeText  = String(text||'').trim();
-
-  const html = `
-    <div style="font-weight:700; font-size:13px; margin-bottom:4px;">${safeTitle}</div>
-    <div style="opacity:.75; font-size:11px; margin-bottom:8px;">Created ${when || ''}</div>
-    <div style="white-space:pre-wrap; font-size:12px; line-height:1.45;">${safeText ? safeText : '<span style="opacity:.7">No description.</span>'}</div>
-  `;
-  projectMetaPanel.html(html);
-  positionProjectMetaPanel();
-  projectMetaPanel.show();
-}
-
-function hideProjectMetaPanel() {
-  if (projectMetaPanel) projectMetaPanel.hide();
-}
-
-
-
-
-
-
 
 // ---- Camera / interactions ----
 
@@ -1563,7 +1500,6 @@ hiddenFileInput.elt.setAttribute('accept', '.json,application/json,application/p
 // 🔧 Add these:
 createTopControlBar();   // top-left icon bar (Import JSON & Force Layout)
 createSaveLoadBar();     // top-right Save/Load project panel
-createProjectMetaPanel();
 
   // Initial UI text
   updateInfo();    // ← ADD THIS
@@ -11557,12 +11493,13 @@ try {
     text:    (m.userText  ?? m.text  ?? '').toString(),
     created: (m.created   ?? m.exported_at ?? '').toString()
   };
-
-  // SHOW the panel with the loaded meta
-  renderProjectMetaPanel();
+  if (typeof infoPanel !== 'undefined' && infoPanel?.setCanvasOverview) {
+  infoPanel.setCanvasOverview();
+  infoPanel.show();
+}
 
 } catch {
-  hideProjectMetaPanel();
+  
 }
 
   // 8) Camera fit & UI refresh
@@ -11797,7 +11734,7 @@ async function exportViewerPackageZip(opts = {}) {
   text:  (opts.userText  || '').toString(),
   created: new Date().toISOString()
 };
-renderProjectMetaPanel();
+if (infoPanel?.setCanvasOverview) { infoPanel.setCanvasOverview(); infoPanel.show(); }
 
 
   if (typeof JSZip === 'undefined') { showToast?.('JSZip not found'); return; }
