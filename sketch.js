@@ -324,7 +324,7 @@ function saveCitedByCaps(caps) {
 
 window.CITED_BY_CAPS = loadCitedByCaps();
 
-let OPENAI_API_KEY = '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';                     // set via modal; not persisted
+let OPENAI_API_KEY = '';                     // set via modal; not persisted
 let OPENAI_MODEL   = 'gpt-4o-mini';          // adjust if you prefer another model
 
 let filtersPanel = null;
