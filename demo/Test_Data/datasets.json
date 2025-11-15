@@ -1,4 +1,6 @@
 [
   { "slug": "DEMO_Bio Design Influence Map", "title": "Influence Map: Bio Design" },
-{ "slug": "DEMO_CUP Psychological Medicine", "title": "Journal Map: Psychological Medicine" }
+{ "slug": "DEMO_Psychological Medicine", "title": "Journal Map: Psychological Medicine" },
+{ "slug": "DEMO_Acta Numerica", "title": "Journal Map: Acta Numerica" }
+
 ]

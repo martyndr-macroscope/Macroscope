@@ -10,7 +10,29 @@ window.JOURNAL_MIN_CLUSTER_SIZE = 5;
 
 // --- Handle icon sizing (Focus/Bin) ---
 
+// ---- Cluster threshold (single source of truth) ----
+const CLUSTER_MIN_DEFAULT = 5;
+window.CLUSTER_MIN_SIZE = Number.isFinite(+window.CLUSTER_MIN_SIZE)
+  ? (+window.CLUSTER_MIN_SIZE|0)
+  : CLUSTER_MIN_DEFAULT;
 
+function getClusterMin() {
+  // Prefer the persisted global, then the live UI slider if set, else default
+  const ui  = Number(clusterSizeThreshold || 0) | 0;
+  const glo = Number(window.CLUSTER_MIN_SIZE || 0) | 0;
+  return Math.max(0, glo || ui || CLUSTER_MIN_DEFAULT);
+}
+function setClusterMin(v) {
+  const val = Math.max(0, Number(v|0));
+  window.CLUSTER_MIN_SIZE = val;
+  // keep the UI in sync:
+  if (typeof clusterSizeThreshold !== 'undefined') clusterSizeThreshold = val;
+  initClusterFilterUI?.();   // refresh slider/input/label bounds+value
+}
+
+
+
+let FORCE_TICKS_PER_FRAME = 3; // try 3–5 on desktop GPUs
 
 // --- Splash images ---
 let splashImg = null;        // Icons/Splash.png
@@ -38,7 +60,7 @@ function getFulltextBoxMult() {
 }
 let layoutAlpha = 0;          // simulated "temperature" 1→0
 const alphaDecay = 0.997;     // cooling per tick
-const alphaMin   = 0.1;      // don’t drop below this while running
+const alphaMin   = 0.3;      // don’t drop below this while running
 
 let layoutTickCount = 0;
 
@@ -211,6 +233,47 @@ function fetchWithTimeout(resource, options = {}, timeoutMs = 20000) {
     .finally(() => clearTimeout(id));
 }
 
+// Try proxy first; if blocked (403/401) or fails, fall back to direct
+// Try proxy first; if blocked (403/401) or fails, fall back to direct
+async function fetchOAJson(fullUrl, timeoutMs = 25000) {
+  const attempts = [];
+
+  // 1) proxy (only if configured & available)
+  if (FETCH_PROXY && __proxyAvailable) attempts.push(viaProxy(fullUrl));
+
+  // 2) direct (always keep a direct fallback)
+  attempts.push(fullUrl);
+
+  let lastErr = null;
+  for (const u of attempts) {
+    try {
+      const r = await fetchWithTimeout(
+        u,
+        { headers: { accept: 'application/json' }, mode: 'cors' },
+        timeoutMs
+      );
+      if (r.ok) return await r.json();
+
+      // If proxy said "Forbidden/Unauthorized", disable it and try direct
+      if ((r.status === 401 || r.status === 403) && u !== fullUrl) {
+        console.warn('Proxy blocked (', r.status, ') → falling back to direct.');
+        __proxyAvailable = false;
+        continue;
+      }
+      lastErr = new Error(`HTTP ${r.status}`);
+    } catch (e) {
+      lastErr = e;
+      // If proxy path threw, disable and try direct
+      if (u !== fullUrl) { __proxyAvailable = false; continue; }
+    }
+  }
+  throw lastErr || new Error('OpenAlex request failed.');
+}
+
+
+
+
+
 probeProxyOnce();
 
 // --- Project meta (shown on right, under the top-right icons) ---
@@ -261,7 +324,7 @@ function saveCitedByCaps(caps) {
 
 window.CITED_BY_CAPS = loadCitedByCaps();
 
-let OPENAI_API_KEY = '';                     // set via modal; not persisted
+let OPENAI_API_KEY = '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';                     // set via modal; not persisted
 let OPENAI_MODEL   = 'gpt-4o-mini';          // adjust if you prefer another model
 
 let filtersPanel = null;
@@ -331,16 +394,25 @@ let clusterSizesTotal = [];
 
 // Tuned for biggish maps; tweak carefully
 const physics = {
-  repulsion: 900,      // node–node push
-  repelRadius: 180,    // cutoff radius for repulsion
-  cellSize: 120,       // grid cell for broad-phase
-  spring: 0.045,       // link spring constant
+  repulsion: 1100,      // node–node push
+  repelRadius: 200,    // cutoff radius for repulsion
+  cellSize: 140,       // grid cell for broad-phase
+  spring: 0.006,       // link spring constant
   restLength: 95,      // link natural length
   gravity: 0.006,      // gentle pull toward layoutCenter
-  damping: 0.91,       // velocity damping per tick (0..1)
-  timeStep: 0.22,      // integration step in "simulation seconds"
-  maxSpeed: 3.0,       // hard cap on per-axis velocity (px/sim-sec)
-  forceCap: 2.5        // hard cap on |force| per axis (N-ish units)
+  damping: 0.88,       // velocity damping per tick (0..1)
+  timeStep: 0.35,      // integration step in "simulation seconds"
+  maxSpeed: 6.0,       // hard cap on per-axis velocity (px/sim-sec)
+  forceCap: 3.5,        // hard cap on |force| per axis (N-ish units)
+  
+  // --- cluster-aware tuning ---
+  clusterCohesion: 0.030,     // pull toward cluster centroid (0.012–0.030)
+  clusterSpringBoost: 1.5,   // multiply spring inside a cluster
+  crossSpringFactor: 0.50,    // multiply spring across clusters
+  intraRepelFactor: 0.70      // <1.0 = less repulsion inside a cluster
+
+
+
 };
 
 
@@ -350,6 +422,7 @@ let layoutBtn; // (optional) UI button
 let cam = { x: 0, y: 0, scale: 1 };
 let zoomLevel = 0; 
 let isPanning = false;
+
 let panStart = null;
 let hoverIndex = -1;   // node under the cursor, -1 if none
 
@@ -408,6 +481,13 @@ let ovAbstracts = 0;     // outline ring on docs that have abstracts
 let ovOpenAccess = 0;    // green halo on OA docs
 let ovClusterColors = 0; // node tint saturation for clusters
 let ovClusterLabels = 0; // label pill opacity for clusters
+// Keep handles to overlay sliders so we can restore UI positions on load
+let ovAbsSlider = null, ovOASlider = null, ovClustColorSlider = null, ovClustLabelSlider = null;
+let nodeSizeSlider = null;
+
+
+
+
 
 // Panel handle
 let overlaysPanel = null;
@@ -519,13 +599,14 @@ edgesSlider = mkSlider('Citation Network', Math.round(visEdges*100), (e) => {
   const initPct = Math.round(
     Math.max(0, Math.min(100, invLerp01(NODE_SIZE_MIN, NODE_SIZE_MAX, initR) * 100))
   );
-  const sl = mkSlider('Node Size', initPct, (e) => {
-    const t = Number(e.target.value) / 100; // 0..1
-    const targetR = lerp01(NODE_SIZE_MIN, NODE_SIZE_MAX, t);
-    // scale is relative to NODE_R baseline (so n.r continues to work)
-    nodeSizeScale = targetR / NODE_R;
-    redraw();
-  });
+  nodeSizeSlider = mkSlider('Node Size', Math.round(nodeSizeScale * 100), (e) => {
+  const v = Number(e.target.value) / 100;
+  // clamp just in case
+  nodeSizeScale = Math.max(0.01, Math.min(5, v));
+  // If you already have a dedicated size recompute, call it; otherwise the usual pair works
+  if (typeof scheduleVisRecompute === 'function') scheduleVisRecompute();
+  else { recomputeVisibility(); redraw(); }
+});
 })();
 
 }
@@ -1705,7 +1786,9 @@ function currentSelectOutlineColor() {
 function draw() {
   if (layoutRunning) {
     // advance physics
+  for (let s = 0; s < FORCE_TICKS_PER_FRAME; s++) {
     forceTick();
+  }
   }
 
   background(14);
@@ -1716,18 +1799,19 @@ function draw() {
     return;
   }
 
-  // Safety: if the visibility mask isn't ready/valid, default to all visible
-  if (!visibleMask || visibleMask.length !== nodes.length) {
-    visibleMask = new Array(nodes.length).fill(true);
-  }
+  // Safety …
+if (!visibleMask || visibleMask.length !== nodes.length) {
+  visibleMask = new Array(nodes.length).fill(true);
+}
 
-  // Hover detection (in world coords)
-  const wm = screenToWorld(mouseX, mouseY);
-  const hit = findHoverNode(wm.x, wm.y);
-  if (hit !== hoverIndex) hoverIndex = hit;
+// Compute on-screen nodes/edges for this frame **first**
+recomputeViewportCulling(96); // padding in px
 
- // NEW: compute on-screen nodes/edges for this frame
-recomputeViewportCulling(96); // padding in px 
+// Then do hover detection (uses fresh inView[])
+const wm = screenToWorld(mouseX, mouseY);
+const hit = findHoverNode(wm.x, wm.y);
+if (hit !== hoverIndex) hoverIndex = hit;
+
 
   // ---------------------- WORLD SPACE ----------------------
   push();
@@ -1971,11 +2055,17 @@ rect(p.x, p.y, w, h, 2 / cam.scale);
   }
 }
 
-
-
-
-
   }
+
+if (dimHover < 0 && !uiCapture && 
+    (typeof pointerOverUI !== 'function' || !pointerOverUI())) {
+  const wm = screenToWorld(mouseX, mouseY);
+  const hit = findHoverNode(wm.x, wm.y);
+  if (hit !== hoverIndex) {
+    hoverIndex = hit;
+    // no redraw() needed; we're in draw() already
+  }
+}
 
   // Dimension edges in world space (doesn't use push/pop)
   if (typeof drawDimEdges === 'function') drawDimEdges();
@@ -1994,14 +2084,15 @@ rect(p.x, p.y, w, h, 2 / cam.scale);
   }
 
   // Node hover tooltip (only if not over a handle)
-  if (hoverIndex >= 0 && dimHover < 0) {
-    const n = nodes[hoverIndex];
-    if (n && (!lenses.openAccess || n.oa)) {
-      const pw = parallaxWorldPos(hoverIndex);
-      const ps = worldToScreen(pw.x, pw.y);
-      drawTooltip(ps.x, ps.y - 10, n.label);
-    }
+if (hoverIndex >= 0) {
+  const n = nodes[hoverIndex];
+  // Respect OA lens (don’t show tooltips for hidden-by-OA nodes)
+  if (n && (!lenses.openAccess || n.oa)) {
+    const pw = parallaxWorldPos(hoverIndex);
+    const ps = worldToScreen(pw.x, pw.y);
+    drawTooltip(ps.x, ps.y - 10, n.label);
   }
+}
 
   // Cluster labels (screen-space)
 if (typeof drawClusterLabels === 'function') drawClusterLabels();
@@ -2356,6 +2447,28 @@ function forceTick() {
   const cxMid = layoutCenter ? layoutCenter.cx : (world.w * 0.5);
   const cyMid = layoutCenter ? layoutCenter.cy : (world.h * 0.5);
 
+  // --- cluster centroids (for cohesion) ---
+  let centX = null, centY = null, centN = null;
+  if (Number.isInteger(clusterCount) && clusterCount > 0 && Array.isArray(clusterOf) && clusterOf.length === nodes.length) {
+    centX = new Array(clusterCount).fill(0);
+    centY = new Array(clusterCount).fill(0);
+    centN = new Array(clusterCount).fill(0);
+    for (let i = 0; i < nodes.length; i++) {
+      const cid = clusterOf[i];
+      if (cid != null && cid >= 0 && cid < clusterCount) {
+        centX[cid] += nodes[i].x;
+        centY[cid] += nodes[i].y;
+        centN[cid] += 1;
+      }
+    }
+    for (let c = 0; c < clusterCount; c++) {
+      if (centN[c] > 0) { centX[c] /= centN[c]; centY[c] /= centN[c]; }
+      else { centX[c] = cxMid; centY[c] = cyMid; }
+    }
+  }
+
+
+
   // Build/update your broad-phase grid from current positions
   buildSpatialGrid(physics.cellSize);
 
@@ -2373,7 +2486,16 @@ forEachEdge((ai, bi, L) => {
   const a = nodes[ai], b = nodes[bi];
   const dx = b.x - a.x, dy = b.y - a.y;
   const d  = Math.hypot(dx, dy) || 1e-6;
-  const k  = physics.spring * layoutAlpha;
+  const sameCluster =
+    Array.isArray(clusterOf) &&
+    clusterOf.length === nodes.length &&
+    clusterOf[ai] != null &&
+    clusterOf[ai] === clusterOf[bi];
+
+  const k = physics.spring *
+            (sameCluster ? physics.clusterSpringBoost : physics.crossSpringFactor) *
+            layoutAlpha;
+
   const rl = physics.restLength;
   const f  = k * (d - rl);
   const fx = (f * dx / d);
@@ -2391,6 +2513,13 @@ forEachEdge((ai, bi, L) => {
     // Iterate only near neighbours (implement getNearbyIndices your way)
     const neigh = getNearbyIndices(a.x, a.y, physics.repelRadius, physics.cellSize);
     let fx = 0, fy = 0;
+    if (centX && centY) {
+      const cid = clusterOf[i];
+      if (cid != null && cid >= 0 && cid < clusterCount && centN[cid] > 0) {
+        fx += (centX[cid] - a.x) * physics.clusterCohesion * layoutAlpha;
+        fy += (centY[cid] - a.y) * physics.clusterCohesion * layoutAlpha;
+      }
+    }
     for (let j = 0; j < neigh.length; j++) {
       const k = neigh[j];
       if (k === i) continue;
@@ -2402,6 +2531,9 @@ forEachEdge((ai, bi, L) => {
       if (d > physics.repelRadius) continue;
       // Coulomb-like, softened at short distances
       const s = physics.repulsion * layoutAlpha / (d2 + 25);
+      
+      
+      
       fx += s * (dx / d);
       fy += s * (dy / d);
     }
@@ -2485,8 +2617,16 @@ function findHoverNode(wx, wy) {
   for (let i = 0; i < nodes.length; i++) {
     const ni = nodes[i];
     if (!ni) continue;
-    if (visibleMask.length && !visibleMask[i]) continue;
-    if (lenses.openAccess && !ni.oa) continue;
+// Allow hover for any node actually drawn on screen (even if dimmed by filters)
+if (Array.isArray(inView) && inView.length === nodes.length && !inView[i]) continue;
+// Respect OA lens
+if (lenses.openAccess && !ni.oa) continue;
+
+    // Only skip if the node is actually off-screen; allow hover even if it’s dimmed by filters
+if (Array.isArray(inView) && inView.length === nodes.length && !inView[i]) continue;
+// Respect OA lens (don’t hover hidden-by-OA nodes)
+if (lenses.openAccess && !ni.oa) continue;
+
 
     // where the node is *drawn* this frame
     const ps = nodeScreenPos(i);
@@ -2559,7 +2699,7 @@ function wrapLines(s, maxChars) {
 
 // --- Pan with left mouse drag ---
 function mousePressed() {
-    if (uiCapture || pointerOverUI()) return; 
+    if (uiCapture || (typeof pointerOverUI === 'function' && pointerOverUI())) return;
 
   const k = hitHandleAtScreen(mouseX, mouseY);
   if (k >= 0) {
@@ -2585,7 +2725,7 @@ function mousePressed() {
 
 
 function mouseDragged() {
-  if (uiCapture || pointerOverUI()) return;
+  if (uiCapture || (typeof pointerOverUI === 'function' && pointerOverUI())) return;
 
   // Dragging a Dimension handle?
   if (dimDrag.active) {
@@ -2824,16 +2964,35 @@ const newScale = clamp(cam.scale * zoom, 0.1, 64);
 
 // Update hover without animating constantly
 function mouseMoved() {
+  // Never block hover; UI capture only matters for dragging/zooming.
+  // Keep the on-screen set fresh so hit-tests are cheap.
+  recomputeViewportCulling(96);
+
   let need = false;
 
+  // --- HUD hits are done in SCREEN space
   const hitHandle = hitHandleAtScreen(mouseX, mouseY);
   if (hitHandle !== dimHover) { dimHover = hitHandle; need = true; }
-    // Hover over the new cite buttons (screen-space)
+
   const citeHit = hitCiteButtonAtScreen(mouseX, mouseY);
   if (citeHit !== citeUi.hover) { citeUi.hover = citeHit; need = true; }
 
+  const newAIHover = hoverAIFootprintMarker(mouseX, mouseY);
+  if (newAIHover !== aiHoverFootprint) { aiHoverFootprint = newAIHover; need = true; }
 
-  // Only compute node hover when NOT over a handle
+  // Cluster label hover (screen-space rectangles you compute when drawing labels)
+  let newClusterHover = -1;
+  if (Array.isArray(clusterLabelHits) && clusterLabelHits.length) {
+    for (const h of clusterLabelHits) {
+      const within = Math.abs(mouseX - h.cx) <= (h.hw || 0) &&
+                     Math.abs(mouseY - h.cy) <= (h.hh || 0);
+      if (within) { newClusterHover = h.clusterId; break; }
+    }
+  }
+  if (newClusterHover !== clusterHoverId) { clusterHoverId = newClusterHover; need = true; }
+
+  // --- Graph hits are done in WORLD space (account for cam pan/zoom)
+  // Only compute node hover when NOT over a handle (so handles “win”)
   let newHover = -1;
   if (dimHover < 0) {
     const wm = screenToWorld(mouseX, mouseY);
@@ -2841,142 +3000,9 @@ function mouseMoved() {
   }
   if (newHover !== hoverIndex) { hoverIndex = newHover; need = true; }
 
-  // --- NEW: AI icon hover
-  const newAIHover = hoverAIFootprintMarker(mouseX, mouseY);
-  if (newAIHover !== aiHoverFootprint) { aiHoverFootprint = newAIHover; need = true; }
-
-  // --- NEW: Cluster label hover (uses clusterLabelHits you fill in drawClusterLabels)
-let newClusterHover = -1;
-
-if (Array.isArray(clusterLabelHits) && clusterLabelHits.length) {
-  for (const h of clusterLabelHits) {
-    const within = Math.abs(mouseX - h.cx) <= (h.hw || 0) &&
-                   Math.abs(mouseY - h.cy) <= (h.hh || 0);
-    if (within) { newClusterHover = h.clusterId; break; }
-  }
-}
-if (newClusterHover !== clusterHoverId) { clusterHoverId = newClusterHover; need = true; }
-
   if (need) redraw();
 }
 
-function alphaForCBC(c) {
-  // Robust log scaling with percentile clipping -> [minAlpha..maxAlpha]
-  const minAlpha = 60, maxAlpha = 255; // tweak if you want stronger/weaker overall
-  const L = Math.log1p(Math.max(0, Number(c||0)));
-  const Lmin = cbcLogMin, Lmax = cbcLogMax;
-  if (!(Lmax > Lmin)) return (c > 0) ? maxAlpha : minAlpha;
-  const t = Math.max(0, Math.min(1, (L - Lmin) / (Lmax - Lmin)));
-  return Math.round(minAlpha + (maxAlpha - minAlpha) * t);
-}
-
-/* ===================== COMMUNITY DETECTION (Label Propagation) ===================== */
-// Fast, parameter-free community detection.
-// Uses `adj` (your existing adjacency list). Writes to `clusterOf` & returns cluster count.
-
-// Enforce a minimum cluster size by reassigning tiny clusters
-// strategy: majority-neighbour to a "big" cluster; else -> -1 (unclustered).
-function applyMinClusterSize(minSize = 1) {
-  minSize = Math.max(1, minSize|0);
-  if (!Array.isArray(clusterOf) || clusterOf.length !== nodes.length || clusterCount <= 0) return;
-
-  // Snapshot for colour/label carry-over
-  const prevCluster = clusterOf.slice();
-  const prevLabels  = Array.isArray(clusterLabels) ? clusterLabels.slice() : null;
-  const prevColors  = Array.isArray(clusterColors) ? clusterColors.slice() : null;
-
-  // 1) Count sizes
-  const sizes = new Array(clusterCount).fill(0);
-  for (let i = 0; i < clusterOf.length; i++) {
-    const c = clusterOf[i];
-    if (c != null && c >= 0 && c < clusterCount) sizes[c]++;
-  }
-
-  // Fast exit if all clusters are already >= minSize
-  const anySmall = sizes.some(s => s > 0 && s < minSize);
-  if (!anySmall) {
-    // Still refresh clusterSizesTotal for the UI
-    clusterSizesTotal = sizes.slice();
-    return;
-  }
-
-  const isBig = sizes.map(s => s >= minSize);
-
-  // 2) Reassign nodes from small clusters
-  const reassigned = clusterOf.slice();
-  let changed = false;
-
-  for (let i = 0; i < reassigned.length; i++) {
-    const c = reassigned[i];
-    if (c == null || c < 0) continue;
-    if (isBig[c]) continue; // already fine
-
-    // Count big neighbour clusters
-    const nbrs = adj[i] || [];
-    const counts = new Map();
-    for (const j of nbrs) {
-      const cj = reassigned[j];
-      if (cj != null && cj >= 0 && isBig[cj]) {
-        counts.set(cj, (counts.get(cj) || 0) + 1);
-      }
-    }
-
-    if (counts.size) {
-      // Pick majority big cluster
-      let bestCid = -1, bestCnt = -1;
-      for (const [cid, cnt] of counts.entries()) {
-        if (cnt > bestCnt || (cnt === bestCnt && cid < bestCid)) {
-          bestCnt = cnt; bestCid = cid;
-        }
-      }
-      if (bestCid >= 0 && bestCid < clusterCount) {
-        reassigned[i] = bestCid;
-        changed = true;
-      }
-    } else {
-      // No big neighbours -> unclustered
-      reassigned[i] = -1;
-      changed = true;
-    }
-  }
-
-  // 3) Compact cluster IDs (skip -1)
-  const used = new Set(reassigned.filter(c => c != null && c >= 0));
-  const uniq = Array.from(used).sort((a,b)=>a-b);
-  const map  = new Map(uniq.map((lab, idx) => [lab, idx]));
-  const out  = new Array(reassigned.length);
-  for (let i = 0; i < reassigned.length; i++) {
-    const c = reassigned[i];
-    out[i] = (c != null && c >= 0) ? map.get(c) : -1;
-  }
-  clusterOf = out;
-
-  // 4) Recompute clusterCount + sizes
-  clusterCount = uniq.length;
-  clusterSizesTotal = new Array(clusterCount).fill(0);
-  for (let i = 0; i < clusterOf.length; i++) {
-    const c = clusterOf[i];
-    if (c != null && c >= 0) clusterSizesTotal[c]++;
-  }
-
-  // 5) Carry labels/colours by overlap mapping when possible
-  try {
-    const carriedLabels = remapClusterLabels?.(prevCluster, clusterOf, prevLabels, 0.25);
-    clusterLabels = carriedLabels || new Array(clusterCount).fill('');
-  } catch { clusterLabels = new Array(clusterCount).fill(''); }
-
-  try {
-    const carriedColors = remapClusterColors?.(prevCluster, clusterOf, prevColors, 0.25);
-    clusterColors = carriedColors || makeClusterColors(clusterCount);
-    clusterColors = normalizeClusterColors(clusterColors);
-  } catch { clusterColors = makeClusterColors(clusterCount); }
-
-  // Fill auto-labels for any blanks (keeps AI/manual ones)
-  computeClusterLabels?.();
-
-  // Refresh any UI dependent on cluster sizes
-  initClusterFilterUI?.();
-}
 
 // Uses `adj` (your existing adjacency list). Writes to clusterOf/clusterCount etc.
 function computeDomainClusters(maxIters = 50) {
@@ -4086,7 +4112,8 @@ if (venue) push(dimsIndex.venues, venue, i);
       if (!rec.nodes.has(i)) { rec.nodes.add(i); rec.count++; }
     }
     for (const rec of byCid.values()) {
-      if (rec.count > 10) dimsIndex.clusters.set(rec.label, rec); // keep your size threshold
+      const min = getClusterMin();
+if (rec.count >= min) dimsIndex.clusters.set(rec.label, rec);
     }
   }
 }
@@ -5200,7 +5227,8 @@ function computeClusterLabels() {
     // keep existing label as-is
     if (prev[cid] && String(prev[cid]).trim()) { next[cid] = prev[cid]; continue; }
 
-    if ((idxs?.length || 0) < CLUSTER_TITLE_MIN_SIZE) { next[cid] = ''; continue; }
+    const minForLabel = getClusterMin();
+if ((idxs?.length || 0) < minForLabel) { next[cid] = ''; continue; }
 
     // TF-IDF within this cluster
     const TF = new Map(); let tot = 0;
@@ -5261,7 +5289,7 @@ function drawClusterLabels() {
 
     // Use TOTAL cluster size for gating, not the visible count
     const total = (clusterSizesTotal && clusterSizesTotal[cid] != null) ? clusterSizesTotal[cid] : k;
-    const minReq = Math.max(CLUSTER_TITLE_MIN_SIZE, clusterSizeThreshold || 0);
+    const minReq = getClusterMin();
     if (total < minReq || k === 0) continue;
 
     sx /= k; sy /= k;
@@ -6675,6 +6703,26 @@ for (let i = 0; i < nNow; i++) {
    const arrVis = arrAll.filter(i => !visibleMask.length || visibleMask[i]);
    const use = arrVis.length ? arrVis : arrAll;
 
+
+
+   // Respect UI threshold and a small hard floor for quality
+const minForAI = getClusterMin();
+
+// Primary size signal: use total cluster size if available (not just what's visible)
+const totalSize = (Array.isArray(clusterSizesTotal) && clusterSizesTotal[cid] != null)
+  ? (clusterSizesTotal[cid] | 0)
+  : (arrAll.length | 0);
+
+if (totalSize < minForAI) {
+  // Skip—below threshold; don't spend tokens on tiny clusters
+  continue;
+}
+
+
+
+
+
+
    // Build sample of titles + abstracts
    const sample = [];
    for (let j = 0; j < use.length && sample.length < LABEL_ABS_PER_CLUSTER; j++) {
@@ -6767,18 +6815,18 @@ addAIFootprintFromItems('reader', _footprintItems, finalReaderText, 'Reader extr
   updateInfo(); redraw();
 }
 function pointerOverUI() {
-  const evt = window.event;
-  if (!evt || !evt.target) return false;
-  let el = evt.target;
-  while (el) {
+  const el = document.elementFromPoint(mouseX, mouseY);
+  if (!el) return false;
+  let cur = el;
+  while (cur) {
     if (
-      (topBar && el === topBar.elt) ||
-      (lensBar && el === lensBar.elt) ||
-      (dimSidebar && el === dimSidebar.elt) ||
-      (infoPanel && infoPanel.div && el === infoPanel.div.elt) ||
-      (synthPanel && el === synthPanel.elt)
+      (topBar && cur === topBar.elt) ||
+      (lensBar && cur === lensBar.elt) ||
+      (dimSidebar && cur === dimSidebar.elt) ||
+      (infoPanel && infoPanel.div && cur === infoPanel.div.elt) ||
+      (synthPanel && cur === synthPanel.elt)
     ) return true;
-    el = el.parentElement;
+    cur = cur.parentElement;
   }
   return false;
 }
@@ -6827,8 +6875,31 @@ const dims = (dimTools || []).map(d => {
   };
 
   // filters, lenses, camera
-  const filt = { degThreshold, yearLo, yearHi };
+ // ... inside serializeState():
+const filt = {
+  degThreshold,
+  yearLo,
+  yearHi,
+  extCitesThreshold,      // <- NEW
+  clusterSizeThreshold    // <- NEW
+};
+
   const camState = { x: cam.x, y: cam.y, scale: cam.scale };
+// NEW: visibility + overlays state
+const visibility = {
+  visAllPubs,
+  visDims,
+  visAIDims,
+  visEdges,
+  nodeSizeScale       // ← moved here
+};
+const overlays = {
+  ovAbstracts,
+  ovOpenAccess,
+  ovClusterColors,
+  ovClusterLabels     // ← no nodeSizeScale here
+};
+
 
   // --- NEW: AI footprints (strip volatile fields like _markerScreen) ---
   const aiDocs = Array.isArray(aiFootprints) ? aiFootprints.map(f => ({
@@ -6871,7 +6942,10 @@ const obj = {
   lenses: lenses,
   filters: filt,
   camera: camState,
-  aiFootprints: aiDocs
+  aiFootprints: aiDocs,
+  visibility,
+  overlays
+
 };
 
   return obj;
@@ -7028,10 +7102,88 @@ if (save.lenses) {
   lenses.aiDocs = false;
 }
 
+// --- Restore filters & thresholds from the save file ---
+const f = save.filters || {};
+if (Number.isFinite(f.degThreshold))        degThreshold        = f.degThreshold|0;
+if (Number.isFinite(f.extCitesThreshold))   extCitesThreshold   = Math.max(0, f.extCitesThreshold|0);
+if (Number.isFinite(f.clusterSizeThreshold)) clusterSizeThreshold = Math.max(0, f.clusterSizeThreshold|0);
+if (Number.isFinite(f.yearLo))              yearLo              = f.yearLo|0;
+if (Number.isFinite(f.yearHi))              yearHi              = f.yearHi|0;
+
+// Rebuild bounds and sync UIs
+computeYearBounds?.();
+initExtCitesFilterUI?.();
+initClusterFilterUI?.();
+
 initDegreeFilterUI();
 applyDegreeFilter(degThreshold);
 initYearFilterUI();
 recomputeVisibility();
+
+// --- NEW: restore visibility + overlays and sync UI ---
+
+// Visibility (sliders exist as allPubsSlider, dimsSlider, aiDimsSlider, edgesSlider)
+if (save.visibility) {
+  if (Number.isFinite(save.visibility.visAllPubs)) visAllPubs = +save.visibility.visAllPubs;
+  if (Number.isFinite(save.visibility.visDims))    visDims    = +save.visibility.visDims;
+  if (Number.isFinite(save.visibility.visAIDims))  visAIDims  = +save.visibility.visAIDims;
+  if (Number.isFinite(save.visibility.visEdges))   visEdges   = +save.visibility.visEdges;
+
+  // push into sliders if they're already built
+  try {
+    if (allPubsSlider?.elt) { allPubsSlider.elt.value = String(Math.round(visAllPubs*100)); markZeroClass?.(allPubsSlider, visAllPubs===0); }
+    if (dimsSlider?.elt)    { dimsSlider.elt.value    = String(Math.round(visDims*100));    markZeroClass?.(dimsSlider,    visDims===0); }
+    if (aiDimsSlider?.elt)  { aiDimsSlider.elt.value  = String(Math.round(visAIDims*100));  markZeroClass?.(aiDimsSlider,  visAIDims===0); }
+    if (edgesSlider?.elt)   { edgesSlider.elt.value   = String(Math.round(visEdges*100));   markZeroClass?.(edgesSlider,   visEdges===0); }
+  } catch {}
+
+  // ensure graph paints with new vis
+  if (typeof scheduleVisRecompute === 'function') scheduleVisRecompute(); else { recomputeVisibility(); redraw(); }
+// Node size
+if (Number.isFinite(save.visibility.nodeSizeScale)) {
+  nodeSizeScale = +save.visibility.nodeSizeScale;
+  try {
+    if (nodeSizeSlider?.elt) {
+      nodeSizeSlider.elt.value = String(Math.round(nodeSizeScale * 100));
+    }
+  } catch {}
+}
+// Ensure sizes take effect
+if (typeof scheduleVisRecompute === 'function') scheduleVisRecompute();
+else { recomputeVisibility(); redraw(); }
+}
+
+// Overlays (use new slider refs we captured in buildOverlaysInto)
+if (save.overlays) {
+  if (Number.isFinite(save.overlays.ovAbstracts))      ovAbstracts      = +save.overlays.ovAbstracts;
+  if (Number.isFinite(save.overlays.ovOpenAccess))     ovOpenAccess     = +save.overlays.ovOpenAccess;
+  if (Number.isFinite(save.overlays.ovClusterColors))  ovClusterColors  = +save.overlays.ovClusterColors;
+  if (Number.isFinite(save.overlays.ovClusterLabels))  ovClusterLabels  = +save.overlays.ovClusterLabels;
+
+  // Keep the 'domainClusters' lens in sync with the two overlay sliders
+  lenses.domainClusters = (ovClusterColors > 0) || (ovClusterLabels > 0);
+
+  // Push overlay values back into sliders if they're mounted
+  try {
+    if (ovAbsSlider?.elt)         ovAbsSlider.elt.value        = String(Math.round(ovAbstracts*100));
+    if (ovOASlider?.elt)          ovOASlider.elt.value         = String(Math.round(ovOpenAccess*100));
+    if (ovClustColorSlider?.elt)  ovClustColorSlider.elt.value = String(Math.round(ovClusterColors*100));
+    if (ovClustLabelSlider?.elt)  ovClustLabelSlider.elt.value = String(Math.round(ovClusterLabels*100));
+  } catch {}
+
+  // Ensure cluster data exists if overlays are on
+  if (lenses.domainClusters) {
+    if (!Array.isArray(clusterOf) || clusterOf.length !== nodes.length || !clusterCount || !clusterColors?.length) {
+      computeDomainClusters();
+      computeClusterLabels?.();
+      buildDimensionsIndex?.();
+    }
+  }
+  redraw();
+}
+
+
+
 
   // 7) Restore AI footprints (if provided)
 setLoadingProgress(0.97, 'Restoring AI notes…');
@@ -8618,6 +8770,7 @@ menu.style('backdrop-filter', '');
   addItem('Retrieve by OpenAlex ID…', () => openIdRetrievalDialog('wid'));
   addItem('Retrieve by Journal…', () => openJournalRetrievalDialog());
   addItem('Retrieve Journal by Publisher…', () => openPublisherJournalDialog());
+addItem('Retrieve by Institution…', () => openInstitutionRetrievalDialog());
 
 
 
@@ -10059,11 +10212,173 @@ function removeNodesByIndexSet(S) {
 
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// OpenAlex: Retrieve by Institution — search name -> pick -> (optional) year range -> fetch works
+// ─────────────────────────────────────────────────────────────────────────────
+function openInstitutionRetrievalDialog() {
+  const dlg = document.createElement('div');
+  dlg.className = 'glass-modal';
+  Object.assign(dlg.style, {
+    position:'fixed', inset:'0', background:'rgba(0,0,0,0.45)', backdropFilter:'blur(4px)',
+    display:'flex', alignItems:'center', justifyContent:'center', zIndex:'10060'
+  });
 
+  dlg.innerHTML = `
+    <div class="glass-card"
+         style="padding:14px;min-width:680px;max-width:92vw;background:rgba(16,16,20,0.95);
+                border:1px solid rgba(255,255,255,0.18);border-radius:10px;color:#fff;
+                font:14px/1.35 system-ui, -apple-system, Segoe UI, Roboto">
+      <div style="font-weight:600;margin-bottom:8px">Retrieve by Institution (OpenAlex)</div>
 
+      <label style="display:block;margin:0 0 6px">Institution name</label>
+      <div style="display:flex;gap:8px;margin-bottom:10px">
+        <input id="inst_query" type="text" placeholder="e.g. MIT, ETH Zürich, Northumbria University…"
+               style="flex:1;padding:8px;border-radius:6px;
+                      border:1px solid rgba(255,255,255,0.2);background:#111;color:#fff"/>
+        <button id="inst_search"
+                style="background:#2a84ff;border:1px solid rgba(255,255,255,0.2);
+                       color:#fff;padding:6px 10px;border-radius:8px;cursor:pointer">Search</button>
+      </div>
 
+      <div id="inst_results"
+           style="max-height:220px;overflow:auto;border:1px solid rgba(255,255,255,0.12);
+                  border-radius:8px;padding:6px;display:none;margin-bottom:10px"></div>
 
+      <div id="inst_pick" style="display:none;margin-top:6px;padding:8px;border:1px dashed rgba(255,255,255,0.18);border-radius:8px">
+        <div id="inst_name" style="font-weight:600"></div>
+        <div id="inst_meta" style="opacity:0.8;margin-top:4px"></div>
 
+        <div style="display:flex;gap:10px;align-items:center;justify-content:flex-start;margin-top:10px;flex-wrap:wrap">
+          <label for="inst_ylo" style="opacity:.9">From year</label>
+          <input id="inst_ylo" type="number" style="width:90px;padding:4px 6px;background:#000;color:#fff;border:1px solid #333;border-radius:6px"/>
+          <label for="inst_yhi" style="opacity:.9">To year</label>
+          <input id="inst_yhi" type="number" style="width:90px;padding:4px 6px;background:#000;color:#fff;border:1px solid #333;border-radius:6px"/>
+          <span style="opacity:.7;font-size:12px">(Optional — limits retrieved publications)</span>
+        </div>
+
+        <div style="display:flex;gap:8px;align-items:center;justify-content:flex-end;margin-top:10px">
+          <label for="inst_min" style="opacity:.8;font-size:12px">Min cluster size</label>
+          <input id="inst_min" type="number" min="1" step="1" value="${window.JOURNAL_MIN_CLUSTER_SIZE || 5}"
+                 style="width:80px;padding:4px 6px;background:#000;color:#fff;border:1px solid #333;border-radius:6px"/>
+          <button id="inst_go"
+                  style="background:#2a84ff;border:1px solid rgba(255,255,255,0.2);
+                         color:#fff;padding:6px 10px;border-radius:8px;cursor:pointer">Retrieve</button>
+        </div>
+      </div>
+
+      <div style="display:flex;justify-content:flex-end;margin-top:10px">
+        <button id="inst_cancel" style="background:transparent;border:1px solid rgba(255,255,255,0.3);
+                color:#fff;padding:6px 10px;border-radius:8px;cursor:pointer">Cancel</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(dlg);
+
+  const qInput = dlg.querySelector('#inst_query');
+  const btnSearch = dlg.querySelector('#inst_search');
+  const resDiv   = dlg.querySelector('#inst_results');
+  const pickBox  = dlg.querySelector('#inst_pick');
+  const pickName = dlg.querySelector('#inst_name');
+  const pickMeta = dlg.querySelector('#inst_meta');
+  const yLoEl    = dlg.querySelector('#inst_ylo');
+  const yHiEl    = dlg.querySelector('#inst_yhi');
+  const minInp   = dlg.querySelector('#inst_min');
+  const btnGo    = dlg.querySelector('#inst_go');
+  const btnCancel= dlg.querySelector('#inst_cancel');
+
+  // Sensible defaults for years (use current dataset bounds if available)
+  try {
+    if (Number.isFinite(window.yearMin)) yLoEl.value = String(window.yearMin);
+    if (Number.isFinite(window.yearMax)) yHiEl.value = String(window.yearMax);
+  } catch {}
+  if (!yLoEl.value) yLoEl.value = '2015';
+  if (!yHiEl.value) yHiEl.value = String(new Date().getFullYear());
+
+  let selectedInst = null;
+
+  const rowStyles = (row) => {
+    row.style.padding = '8px';
+    row.style.borderRadius = '6px';
+    row.style.cursor = 'pointer';
+    row.onmouseenter = ()=> row.style.background = 'rgba(255,255,255,0.06)';
+    row.onmouseleave = ()=> row.style.background = 'transparent';
+  };
+
+  const close = () => dlg.remove();
+
+  async function doSearch() {
+    const q = (qInput.value || '').trim();
+    if (!q) { showToast?.('Enter an institution name to search.'); return; }
+    resDiv.style.display = 'block';
+    resDiv.innerHTML = `<div style="opacity:.8;padding:8px">Searching…</div>`;
+
+    try {
+      const base = 'https://api.openalex.org/institutions';
+      const mailto = (window.OPENALEX_MAILTO || window.UNPAYWALL_EMAIL || '').trim();
+      const withMailto = (qs) => mailto ? (qs + `&mailto=${encodeURIComponent(mailto)}`) : qs;
+
+      const url = `${base}?${withMailto(`search=${encodeURIComponent(q)}&per-page=25`)}&sort=works_count:desc`;
+      const j   = await fetchOAJson(url);
+
+      const results = Array.isArray(j?.results) ? j.results : [];
+
+      if (!results.length) {
+        resDiv.innerHTML = `<div style="opacity:.8;padding:8px">No institutions found for “${q}”.</div>`;
+        pickBox.style.display = 'none';
+        return;
+      }
+      resDiv.innerHTML = '';
+      results.forEach(inst => {
+        const row = document.createElement('div');
+        rowStyles(row);
+        row.innerHTML = `
+          <div style="font-weight:600">${inst.display_name || '(untitled institution)'}</div>
+          <div style="opacity:.8;font-size:12px;margin-top:2px">
+            Works: ${Number(inst.works_count||0).toLocaleString()}${inst.country_code ? ` · ${inst.country_code}`:''}
+          </div>
+        `;
+        row.onclick = () => {
+          selectedInst = inst;
+          pickName.textContent = inst.display_name || '(untitled institution)';
+          pickMeta.textContent = `Total publications in OpenAlex: ${Number(inst.works_count||0).toLocaleString()}`;
+          pickBox.style.display = 'block';
+          row.style.background = 'rgba(42,132,255,0.18)';
+        };
+        resDiv.appendChild(row);
+      });
+    } catch (e) {
+      console.error(e);
+      resDiv.innerHTML = `<div style="color:#f66;padding:8px">Error: ${e.message || e}</div>`;
+    }
+  }
+
+  async function doRetrieve() {
+    if (!selectedInst?.id) { showToast?.('Please select an institution first.'); return; }
+    const yLo = Number(yLoEl.value|0);
+    const yHi = Number(yHiEl.value|0);
+    if (yLo && yHi && yHi < yLo) { showToast?.('“To year” must be ≥ “From year”.'); return; }
+
+    close();
+    const minClusterSize = Math.max(1, Number(minInp?.value || window.JOURNAL_MIN_CLUSTER_SIZE || 5));
+    await retrieveAllWorksForInstitution(selectedInst, {
+      minClusterSize,
+      yearLo: yLo || null,
+      yearHi: yHi || null
+    });
+  }
+
+  btnSearch.onclick = doSearch;
+  btnGo.onclick     = doRetrieve;
+  btnCancel.onclick = close;
+
+  dlg.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); close(); }
+    if (e.key === 'Enter' && document.activeElement === qInput) { e.preventDefault(); doSearch(); }
+  });
+
+  qInput.focus();
+  qInput.select();
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // OpenAlex: Retrieve by Journal (Source) — search by title -> pick -> fetch works
@@ -10513,11 +10828,109 @@ function openPublisherJournalDialog() {
   qInput.select();
 }
 
+// Fetch & stream ALL works for a given OpenAlex Institution, using cursor paging
+// Fetch & stream ALL works for a given OpenAlex Institution, using cursor paging
+// Fetch & stream ALL works for a given OpenAlex Institution, using cursor paging
+async function retrieveAllWorksForInstitution(inst, opts = {}) {
+  try {
+    const instId = (inst?.id || '').replace(/^https?:\/\/openalex\.org\//i, '');
+    if (!instId || !/^I\d+$/i.test(instId)) throw new Error('Invalid OpenAlex Institution ID');
+
+    const yLo = Number(opts.yearLo || 0);
+    const yHi = Number(opts.yearHi || 0);
+    const wantYearFilter = (yLo && yHi && yHi >= yLo);
+
+    showLoading(`Retrieving works: ${inst.display_name || 'institution'}`, 0.02);
+
+    const perPage = 200;         // OpenAlex max
+    let cursor    = '*';         // start token
+    let fetched   = 0;
+    let sinceLast = 0;
+    const base    = 'https://api.openalex.org/works';
+    const filter  = `institutions.id:${instId}`;
+    const mailto  = (window.OPENALEX_MAILTO || window.UNPAYWALL_EMAIL || '').trim();
+
+    let page = 0;
+    let total = null;
+
+    while (cursor) {
+      page++;
+
+      const qs = new URLSearchParams();
+      const datedFilter = wantYearFilter
+        ? `${filter},from_publication_date:${yLo}-01-01,to_publication_date:${yHi}-12-31`
+        : filter;
+      qs.set('filter', datedFilter);
+      qs.set('per-page', String(perPage));
+      qs.set('cursor', cursor);            // ← use the current cursor token
+      if (mailto) qs.set('mailto', mailto);
+
+      const full = `${base}?${qs.toString()}`;
+      const j    = await fetchOAJson(full);
+
+      if (total == null) total = Number(j?.meta?.count || 0);
+
+      const works = Array.isArray(j?.results) ? j.results : [];
+      if (!works.length) {
+        // defensive: stop if the API returns no results for this cursor
+        break;
+      }
+
+      fetched   += works.length;
+      sinceLast += works.length;
+
+      integrateWorksAndEdges(null, works, null);
+
+      // periodic UI refresh while streaming
+      if (sinceLast >= 2000) {
+        onGraphDataChanged?.();
+        sinceLast = 0;
+        if (typeof nextTick === 'function') await nextTick();
+      }
+
+      // progress: if total is known, show a proportional bar; else page modulo
+      if (Number.isFinite(total) && total > 0) {
+        const p = Math.min(0.98, fetched / total);
+        setLoadingProgress(p, `Retrieved ${fetched.toLocaleString()} of ${total.toLocaleString()} works…`);
+      } else {
+        setLoadingProgress((page % 10) / 10, `Retrieved ${fetched.toLocaleString()} works…`);
+      }
+
+      // advance cursor; null means “no more pages”
+      cursor = j?.meta?.next_cursor || null;
+
+      // avoid a tight loop
+      if (typeof nextTick === 'function') await nextTick();
+      else await new Promise(res => setTimeout(res, 0));
+    }
+
+    hideLoading();
+    onGraphDataChanged?.();
+
+    // clustering + UI rebuilds
+    if (typeof computeDomainClusters === 'function') {
+      if (!Array.isArray(clusterOf) || clusterOf.length !== nodes.length || !clusterCount) {
+        computeDomainClusters();
+      }
+    }
+    if (typeof applyMinClusterSize === 'function') {
+      const minSize = Math.max(1, Number(opts.minClusterSize || window.JOURNAL_MIN_CLUSTER_SIZE || 5));
+      applyMinClusterSize(minSize);
+      setClusterMin(minSize);
+    }
+
+    if (typeof buildDimensionsIndex === 'function') buildDimensionsIndex();
+    if (typeof renderDimensionsUI   === 'function') renderDimensionsUI();
+    if (typeof recomputeVisibility  === 'function') recomputeVisibility();
+
+  } catch (e) {
+    hideLoading();
+    console.error(e);
+    showToast?.(e.message || String(e));
+  }
+}
 
 
-
-
-// Fetch & stream works for a given OpenAlex Source (journal) into the graph
 // Fetch & stream works for a given OpenAlex Source (journal) into the graph
 // Fetch & stream ALL works for a given OpenAlex Source (journal), using cursor paging
 // Robust retrieval of all works for a given OpenAlex Source (journal)
@@ -11037,58 +11450,56 @@ function buildOverlaysInto(containerBody) {
   };
 
   // Abstracts
-  mkSlider('Abstracts', Math.round(ovAbstracts*100), (e) => {
+  ovAbsSlider = mkSlider('Abstracts', Math.round(ovAbstracts*100), (e) => {
     ovAbstracts = Number(e.target.value)/100;
     redraw();
   });
 
   // Open Access
-  mkSlider('Open Access', Math.round(ovOpenAccess*100), (e) => {
+  ovOASlider = mkSlider('Open Access', Math.round(ovOpenAccess*100), (e) => {
     ovOpenAccess = Number(e.target.value)/100;
     redraw();
   });
 
-  // Clusters
-// Clusters (node colours)
-mkSlider('Clusters', Math.round(ovClusterColors*100), (e) => {
-  ovClusterColors = Number(e.target.value)/100;
+  // Clusters (node colours)
+  ovClustColorSlider = mkSlider('Clusters', Math.round(ovClusterColors*100), (e) => {
+    ovClusterColors = Number(e.target.value)/100;
 
-  // Lens is on if either colours or labels are on
-  lenses.domainClusters = (ovClusterColors > 0) || (ovClusterLabels > 0);
+    // Lens is on if either colours or labels are on
+    lenses.domainClusters = (ovClusterColors > 0) || (ovClusterLabels > 0);
 
-  if (lenses.domainClusters) {
-    if (!Array.isArray(clusterOf) || clusterOf.length !== nodes.length || !clusterCount || !clusterColors?.length) {
-      computeDomainClusters();
-      computeClusterLabels?.();
-      buildDimensionsIndex?.();
+    if (lenses.domainClusters) {
+      if (!Array.isArray(clusterOf) || clusterOf.length !== nodes.length || !clusterCount || !clusterColors?.length) {
+        computeDomainClusters();
+        computeClusterLabels?.();
+        buildDimensionsIndex?.();
+      }
     }
-  }
-  redraw();
-});
+    redraw();
+  });
 
-// Cluster Labels (pill UI + click)
-mkSlider('Cluster Labels', Math.round(ovClusterLabels*100), (e) => {
-  ovClusterLabels = Number(e.target.value)/100;
+  // Cluster Labels (pill UI + click)
+  ovClustLabelSlider = mkSlider('Cluster Labels', Math.round(ovClusterLabels*100), (e) => {
+    ovClusterLabels = Number(e.target.value)/100;
 
-  // Lens is on if either colours or labels are on
-  lenses.domainClusters = (ovClusterColors > 0) || (ovClusterLabels > 0);
+    // Lens is on if either colours or labels are on
+    lenses.domainClusters = (ovClusterColors > 0) || (ovClusterLabels > 0);
 
-  if (lenses.domainClusters) {
-    if (!Array.isArray(clusterOf) || clusterOf.length !== nodes.length || !clusterCount || !clusterColors?.length) {
-      computeDomainClusters();
-      computeClusterLabels?.();
-      buildDimensionsIndex?.();
+    if (lenses.domainClusters) {
+      if (!Array.isArray(clusterOf) || clusterOf.length !== nodes.length || !clusterCount || !clusterColors?.length) {
+        computeDomainClusters();
+        computeClusterLabels?.();
+        buildDimensionsIndex?.();
+      }
     }
-  }
 
-  // If labels are fully off, also clear hover/selection and hits so they’re not clickable.
-  if (ovClusterLabels === 0) {
-    clusterHoverId = -1;
-    clusterSelectId = -1;
-    clusterLabelHits = [];
-  }
-  redraw();
-});
+    if (ovClusterLabels === 0) {
+      clusterHoverId = -1;
+      clusterSelectId = -1;
+      clusterLabelHits = [];
+    }
+    redraw();
+  });
 
 }
 
@@ -11446,7 +11857,8 @@ if (indexObj.dimIndex) {
     }
     for (const rec of byCid.values()) {
       // keep your size threshold behaviour
-      if (rec.count > 10) dimsIndex.clusters.set(rec.label, rec);
+      const min = getClusterMin();
+if (rec.count >= min) dimsIndex.clusters.set(rec.label, rec);
     }
   }
 })();
@@ -11502,6 +11914,77 @@ try {
   
 }
 
+if (indexObj?.view) {
+  const v = indexObj.view;
+
+  // Lenses
+  if (v.lenses && typeof v.lenses === 'object') {
+    lenses = { ...lenses, ...v.lenses };
+  }
+
+  // Visibility
+  if (v.visibility) {
+    if (Number.isFinite(v.visibility.visAllPubs)) visAllPubs = +v.visibility.visAllPubs;
+    if (Number.isFinite(v.visibility.visDims))    visDims    = +v.visibility.visDims;
+    if (Number.isFinite(v.visibility.visAIDims))  visAIDims  = +v.visibility.visAIDims;
+    if (Number.isFinite(v.visibility.visEdges))   visEdges   = +v.visibility.visEdges;
+
+    try {
+      if (allPubsSlider?.elt) allPubsSlider.elt.value = String(Math.round(visAllPubs*100));
+      if (dimsSlider?.elt)    dimsSlider.elt.value    = String(Math.round(visDims*100));
+      if (aiDimsSlider?.elt)  aiDimsSlider.elt.value  = String(Math.round(visAIDims*100));
+      if (edgesSlider?.elt)   edgesSlider.elt.value   = String(Math.round(visEdges*100));
+    } catch {}
+  }
+
+  // Overlays
+  if (v.overlays) {
+    if (Number.isFinite(v.overlays.ovAbstracts))      ovAbstracts      = +v.overlays.ovAbstracts;
+    if (Number.isFinite(v.overlays.ovOpenAccess))     ovOpenAccess     = +v.overlays.ovOpenAccess;
+    if (Number.isFinite(v.overlays.ovClusterColors))  ovClusterColors  = +v.overlays.ovClusterColors;
+    if (Number.isFinite(v.overlays.ovClusterLabels))  ovClusterLabels  = +v.overlays.ovClusterLabels;
+
+    lenses.domainClusters = (ovClusterColors > 0) || (ovClusterLabels > 0);
+
+    try {
+      if (ovAbsSlider?.elt)         ovAbsSlider.elt.value        = String(Math.round(ovAbstracts*100));
+      if (ovOASlider?.elt)          ovOASlider.elt.value         = String(Math.round(ovOpenAccess*100));
+      if (ovClustColorSlider?.elt)  ovClustColorSlider.elt.value = String(Math.round(ovClusterColors*100));
+      if (ovClustLabelSlider?.elt)  ovClustLabelSlider.elt.value = String(Math.round(ovClusterLabels*100));
+    } catch {}
+  }
+
+  // Camera (respect saved view)
+  if (v.camera) {
+    if (Number.isFinite(v.camera.x))     cam.x = v.camera.x;
+    if (Number.isFinite(v.camera.y))     cam.y = v.camera.y;
+    if (Number.isFinite(v.camera.scale)) cam.scale = v.camera.scale;
+  }
+
+if (v.visibility && Number.isFinite(v.visibility.nodeSizeScale)) {
+  nodeSizeScale = +v.visibility.nodeSizeScale;
+  try {
+    if (nodeSizeSlider?.elt) {
+      nodeSizeSlider.elt.value = String(Math.round(nodeSizeScale * 100));
+    }
+  } catch {}
+}
+// Recompute so sizes apply
+if (typeof scheduleVisRecompute === 'function') scheduleVisRecompute();
+else { recomputeVisibility(); redraw(); }
+
+}
+
+// If no camera in manifest, fall back to fit-to-content
+if (!indexObj?.view?.camera) {
+  fitWorldInView(60);
+}
+
+recomputeVisibility?.();
+updateInfo(); redraw();
+
+
+
   // 8) Camera fit & UI refresh
 // 8) Camera fit & UI refresh
 adjustWorldToContent(80);  // keep pan bounds generous
@@ -11546,6 +12029,12 @@ const _userText  = (metaOverrides && typeof metaOverrides.userText  === 'string'
   (clusterOf || []).forEach(c => { if (c>=0) sizes[c] = (sizes[c]||0) + 1; });
   const labels = {};
   (Array.isArray(clusterLabels) ? clusterLabels : []).forEach((t,c)=>{ if (t) labels[c]=t; });
+  const view = {
+  camera: { x: cam.x, y: cam.y, scale: cam.scale },
+  lenses: { ...lenses },  // shallow copy
+  visibility: { visAllPubs, visDims, visAIDims, visEdges, nodeSizeScale},
+  overlays: { ovAbstracts, ovOpenAccess, ovClusterColors, ovClusterLabels }
+};
 
   // Make sure dimsIndex is up-to-date for snapshotting
 if (typeof buildDimensionsIndex === 'function') buildDimensionsIndex();
@@ -11661,6 +12150,7 @@ ranges: {
   count: Object.keys(sizes).length,
   labels,
   sizes,
+  view,
   colors: (Array.isArray(clusterColors) && clusterColors.length
            ? clusterColors
            : makeClusterColors(Object.keys(sizes).length))
@@ -11669,6 +12159,8 @@ ranges: {
     dimIndex: dimIndexSnapshot,
     aiDimensions: ai,
     tooltips: true
+  
+  
   };
 }
 
@@ -13267,8 +13759,39 @@ function computeCanvasStats() {
     }
   };
 }
+// Compact the [min..max] year range into ~targetBars bins.
+// Returns: { bins:[{lo,hi,count}], min, max, totalBars }
+function binYearCounts(years, targetBars = 60) {
+  const { min, max, counts } = years || {};
+  if (min == null || max == null || !counts || !counts.size) {
+    return { bins: [], min, max, totalBars: 0 };
+  }
 
-// Simple inline SVG bar chart for year counts
+  // number of distinct calendar years
+  const span = (max - min + 1);
+  // if small span, keep per-year bars
+  if (span <= targetBars) {
+    const bins = [];
+    for (let y = min; y <= max; y++) {
+      bins.push({ lo: y, hi: y, count: counts.get(y) || 0 });
+    }
+    return { bins, min, max, totalBars: bins.length };
+  }
+
+  // large span → aggregate into bins of size ceil(span/targetBars)
+  const binSize = Math.max(1, Math.ceil(span / targetBars));
+  const bins = [];
+  for (let bLo = min; bLo <= max; bLo += binSize) {
+    const bHi = Math.min(max, bLo + binSize - 1);
+    let c = 0;
+    for (let y = bLo; y <= bHi; y++) c += (counts.get(y) || 0);
+    bins.push({ lo: bLo, hi: bHi, count: c });
+  }
+  return { bins, min, max, totalBars: bins.length };
+}
+
+
+// Simple inline SVG bar chart for year counts (auto-binned, full-width)
 function svgYearBars(years, width = 226, height = 82, margin = 6) {
   const { min, max, counts } = years || {};
   if (min == null || max == null || !counts || !counts.size) {
@@ -13279,29 +13802,43 @@ function svgYearBars(years, width = 226, height = 82, margin = 6) {
   const labelH = 12;                 // space for labels below the bars
   const H = Math.max(52, height);    // total svg height (includes labelH)
   const chartH = H - labelH;         // height available for bars/background
-  const bw = Math.max(1, Math.floor((W - margin*2) / (max - min + 1)));
 
-  let maxCount = 1;
-  for (let y = min; y <= max; y++) maxCount = Math.max(maxCount, counts.get(y) || 0);
-
-  let rects = '';
-  for (let y = min; y <= max; y++) {
-    const c = counts.get(y) || 0;
-    const x = margin + (y - min) * bw;
-    const h = Math.round((c / maxCount) * (chartH - margin*2));
-    const yTop = (chartH - margin - h);
-    rects += `<rect x="${x}" y="${yTop}" width="${bw-1}" height="${h}" rx="2" ry="2" fill="rgba(255,255,255,.85)"/>`;
+  // Build bins (~60 by default) so we never create thousands of rects
+  const { bins, totalBars } = binYearCounts(years, 60);
+  if (!totalBars) {
+    return `<div style="opacity:.7;font-size:12px">No year data</div>`;
   }
 
-  // background only behind the bars, not the labels
+  // Compute max bar height from counts
+  let maxCount = 1;
+  for (const b of bins) maxCount = Math.max(maxCount, b.count || 0);
+
+  // Exact step so the bars fill the width (float, not integer)
+  const usableW = Math.max(1, W - margin * 2);
+  const step = usableW / totalBars;       // bar "slot" width
+  const pad  = Math.min(1, step * 0.06);  // tiny inner padding for separators
+  const barW = Math.max(0, step - pad);   // actual rect width
+
+  let rects = '';
+  bins.forEach((b, i) => {
+    const h = maxCount ? Math.round((b.count / maxCount) * (chartH - margin * 2)) : 0;
+    const yTop = (chartH - margin - h);
+    const x = margin + i * step; // float—so we fill perfectly
+    rects += `<rect x="${x}" y="${yTop}" width="${barW}" height="${h}" rx="2" ry="2" fill="rgba(255,255,255,.85)"/>`;
+  });
+
+  // Labels: always show true earliest and latest years
+  const minLblX = margin;
+  const maxLblX = W - margin - 20; // space for text
+
   return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">
     <rect x="0" y="0" width="${W}" height="${chartH}" fill="rgba(255,255,255,0.06)" rx="6"/>
     ${rects}
-    <!-- year labels placed BELOW the chart area -->
-    <text x="${margin}" y="${chartH + labelH - 2}" font-size="10" fill="rgba(255,255,255,0.8)">${min}</text>
-    <text x="${W - margin - 20}" y="${chartH + labelH - 2}" font-size="10" fill="rgba(255,255,255,0.8)">${max}</text>
+    <text x="${minLblX}" y="${chartH + labelH - 2}" font-size="10" fill="rgba(255,255,255,0.8)">${min}</text>
+    <text x="${maxLblX}" y="${chartH + labelH - 2}" font-size="10" fill="rgba(255,255,255,0.8)">${max}</text>
   </svg>`;
 }
+
 
 
 
