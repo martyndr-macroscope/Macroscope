@@ -2,7 +2,15 @@
 
 // --- OpenAI direct-from-browser (local use only) ---
 // Where your proxy is running:
-const FETCH_PROXY = 'http://localhost:8787';
+//const FETCH_PROXY = 'https://semanticspace-proxy.onrender.com';
+const IS_LOCAL =
+  window.location.hostname === 'localhost' ||
+  window.location.hostname === '127.0.0.1';
+
+const FETCH_PROXY = IS_LOCAL
+  ? 'http://localhost:8787'                         // your local Node server
+  : 'https://semanticspace-proxy.onrender.com';        // EXACT URL from Render
+
 // Default power for any newly created dimension tool
 const DEFAULT_DIM_POWER = 0;
 // Dimension search (UI state)
@@ -182,7 +190,7 @@ let poweredByImg;
 
 // --- Bug/Feature Tracking ----------------------------------------------------
 // Toggle to show a bug icon in the top-right control bar
-let BUG_MODE = false;  // set true to enable
+let BUG_MODE = true;  // set true to enable
 
 // Your Formspree endpoint (replace with your form ID URL, e.g. https://formspree.io/f/abcdjklm)
 const FORM_ENDPOINT = 'https://formspree.io/f/mwprdqjw';
@@ -6118,8 +6126,7 @@ function stripSummaryJson(raw) {
 }
 
 async function runSynthesisAbstracts() {
-  if (!OPENAI_API_KEY) { openApiKeyModal(); return; }
-
+  
   // 1) Collect all visible items that have abstracts (you already have this)
   const items = collectVisibleForSynthesis(Infinity);
   const totalVisible = (visibleMask || []).reduce((a,b)=>a+(b?1:0),0);
@@ -6416,14 +6423,14 @@ async function openaiChatDirect(messages, opts = {}) {
   let delay = 900; // starting backoff (ms)
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const r = await fetch(OPENAI_PROXY, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(OPENAI_API_KEY ? { 'Authorization': `Bearer ${OPENAI_API_KEY}` } : {})
-        },
-        body: JSON.stringify(body)
-      });
+const r = await fetch(OPENAI_PROXY, {
+  method: 'POST',
+  headers: {
+    'Content-Type': 'application/json'
+    // No Authorization header here – the proxy adds the API key server-side
+  },
+  body: JSON.stringify(body)
+});
       if (!r.ok) {
         const ra = Number(r.headers.get('retry-after')) || 0;
         const err = new Error(`OpenAI ${r.status}`);
@@ -6550,7 +6557,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 // ---------- Reader (full-text) main ----------
 async function runReaderFulltext() {
-  if (!OPENAI_API_KEY) { openApiKeyModal(); return; }
+
 
   // 0) Collect visible, cached full texts
   const docs = collectVisibleForReader() || [];
@@ -6660,7 +6667,7 @@ function extractJson(raw) {
 }
 
 async function runLabelClustersAI() {
-  if (!OPENAI_API_KEY) { openApiKeyModal(); return; }
+
 
   // Ensure we have clusters
   if (!clusterOf || clusterOf.length !== nodes.length) computeDomainClusters();
@@ -12534,7 +12541,7 @@ function nextHandleSpawnPos() {
 // === Full Text Literature Review (cluster-themed, full sections) ===
 // === Full Text Literature Review — v2 (structured, coverage-safe) ===
 async function runFullTextLitReview() {
-  if (!OPENAI_API_KEY) { openApiKeyModal(); return; }
+
 
   // 0) Collect visible cached full texts
   const docsAll = collectVisibleFulltextCorpus() || []; // [{idx,title,authors,year,venue,doi,url,text},...]
@@ -13475,7 +13482,7 @@ async function buildFullTextLitReviewFromCorpus(docsAll, titleHint) {
 
 // Main: run across all clusters >= minSize; create 1 lens + 1 doc per cluster.
 async function runMultiClusterLitReviews(minSize = 50) {
-  if (!OPENAI_API_KEY) { openApiKeyModal(); return; }
+  
   if (!Array.isArray(clusterOf) || clusterCount <= 0) {
     computeDomainClusters?.();
   }
