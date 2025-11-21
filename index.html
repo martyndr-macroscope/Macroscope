@@ -128,18 +128,25 @@
       </form>
 
       
-      <div class="cta-row">
-        <a class="btn" href="demo/">Try the Demo</a>
-        <div class="video-embed" aria-label="Macroscope overview video">
-          <iframe
-            src="https://www.youtube.com/embed/-TJSqPAysT8"
-            title="Macroscope overview"
-            frameborder="0"
-            allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-            allowfullscreen
-          ></iframe>
-        </div>
-      </div>
+<div class="cta-row">
+  <a class="btn" href="demo/">Try the Demo</a>
+
+  <!-- NEW: Beta access button with password prompt -->
+  <button class="btn" type="button" onclick="openBetaAccess()">
+    Beta access
+  </button>
+
+  <div class="video-embed" aria-label="Macroscope overview video">
+    <iframe
+      src="https://www.youtube.com/embed/-TJSqPAysT8"
+      title="Macroscope overview"
+      frameborder="0"
+      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+      allowfullscreen
+    ></iframe>
+  </div>
+</div>
+
 
 
       <div class="grid">
@@ -230,5 +237,33 @@
       function start(){ if (playlist.length === 0) return; setBG(a, playlist[0]); a.classList.remove('hidden'); clearInterval(timer); timer = setInterval(step, 9000); }
     })();
   </script>
+
+<script>
+  // Simple password-gated beta access
+  function openBetaAccess() {
+    const pwd = window.prompt('Enter beta access password:');
+    if (pwd === null) return; // user cancelled
+
+    if (pwd === 'macroscope') {
+      // Remember that this browser has passed the gate
+      try {
+        sessionStorage.setItem('macroscope_beta_ok', 'yes');
+      } catch (e) {
+        console.warn('Could not persist beta flag in sessionStorage:', e);
+      }
+      // Go to the full app
+      window.location.href = 'beta/';
+    } else {
+      window.alert('Incorrect password.');
+    }
+  }
+</script>
+</body>
+</html>
+
+
+
+
+
 </body>
 </html>

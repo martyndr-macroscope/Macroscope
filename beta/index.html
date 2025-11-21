@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Macroscope — Beta</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <style>
+    html,body{height:100%;margin:0;background:#0e0e12;color:#eaeaea;
+      font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+    canvas{display:block}
+    .ui{position:fixed;left:12px;top:12px;z-index:10}
+    .ui button,.ui input[type="file"]{margin-right:8px;margin-bottom:6px}
+  </style>
+
+  <!-- p5 + JSZip (same as demo) -->
+  <script src="https://cdn.jsdelivr.net/npm/p5@1.9.0/lib/p5.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+
+  <!-- PDF.js ES Module build -->
+  <script type="module">
+    import * as pdfjsLib from "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.7.76/build/pdf.mjs";
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      "https://cdn.jsdelivr.net/npm/pdfjs-dist@4.7.76/build/pdf.worker.mjs";
+    window.pdfjsLib = pdfjsLib;
+  </script>
+
+  <!-- Fallback classic build -->
+  <script src="https://unpkg.com/pdfjs-dist@4.6.82/build/pdf.min.js"></script>
+  <script>
+    window.pdfjsLib = window.pdfjsLib || pdfjsLib;
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      'https://unpkg.com/pdfjs-dist@4.6.82/build/pdf.worker.min.js';
+  </script>
+
+  <!-- Password gate + full-mode flags BEFORE loading the app -->
+  <script>
+    (function () {
+      // If landing page already set the flag, we skip the extra prompt
+      let ok = false;
+      try {
+        ok = sessionStorage.getItem('macroscope_beta_ok') === 'yes';
+      } catch (e) {
+        console.warn('sessionStorage unavailable, will always prompt for beta password.', e);
+      }
+
+      if (!ok) {
+        const pwd = window.prompt('Enter beta access password:');
+        if (pwd === 'macroscope') {
+          try {
+            sessionStorage.setItem('macroscope_beta_ok', 'yes');
+          } catch (e) {
+            console.warn('Could not persist beta flag in sessionStorage:', e);
+          }
+        } else {
+          window.alert('Incorrect password. Returning to home page.');
+          window.location.href = '../';
+        }
+      }
+
+      // Force FULL (non-demo) mode for this page
+      window.DEMO_MODE = false;
+      // Keep same data prefix as demo unless you want a different root
+      window.DATA_BASE_PREFIX = 'Test_Data/';
+    })();
+  </script>
+
+  <!-- Helper your app expects -->
+  <script src="../data-retrieval.js"></script>
+
+  <!-- Full app -->
+  <script src="../sketch.js" defer></script>
+</head>
+<body>
+  <div class="ui">
+    <button id="importBtn">Import JSON</button>
+    <span id="info"></span>
+  </div>
+</body>
+</html>
