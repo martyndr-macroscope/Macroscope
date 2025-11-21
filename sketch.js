@@ -9,7 +9,7 @@ const IS_LOCAL =
 
 const FETCH_PROXY = IS_LOCAL
   ? 'http://localhost:8787'                         // your local Node server
-  : 'https://semanticspace-proxy-2.onrender.com';        // EXACT URL from Render
+  : 'https://proxy.semanticspace.ai';        // EXACT URL from Render
 
 // Default power for any newly created dimension tool
 const DEFAULT_DIM_POWER = 0;
