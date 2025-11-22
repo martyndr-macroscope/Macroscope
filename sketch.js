@@ -6745,28 +6745,47 @@ for (let i = 0; i < nNow; i++) {
   arr.push(i);
 }
 
-// Primary source for sizes
- // Primary source
- let all = [...groups.entries()];
+  // Primary source: clusters from the live clusterOf array
+  let all = [...groups.entries()];
 
- // Fallback: if groups is empty (clusterOf not ready for these nodes yet),
- // derive from the hydrated sidebar snapshot so we don't bail early.
- if (!all.length && dimsIndex?.clusters?.size) {
-   all = [...dimsIndex.clusters.values()]
-           .map(rec => [rec.cid, Array.from(rec.nodes || [])])
-           .map(([cid, arr], k) => [Number.isFinite(+cid) ? +cid : k, arr]);
- }
+  // Fallback: if groups is empty (clusterOf not ready for these nodes yet),
+  // derive from the hydrated sidebar snapshot so we don't bail early.
+  if (!all.length && dimsIndex?.clusters?.size) {
+    all = [...dimsIndex.clusters.values()]
+      .map(rec => [rec.cid, Array.from(rec.nodes || [])])
+      .map(([cid, arr], k) => [Number.isFinite(+cid) ? +cid : k, arr]);
+  }
 
- if (!all.length) {
-   msg = 'No clusters found to label.';
-   updateInfo(); redraw(); return;
- }
+  if (!all.length) {
+    msg = 'No clusters found to label.';
+    updateInfo(); redraw(); return;
+  }
 
- showLoading('Labelling clusters…', 0.05);
+  // ---- Apply the SAME size threshold as the UI ----
+  // (This is the same getClusterMin() used for:
+  //  - cluster pills on the canvas
+  //  - dimsIndex.clusters in the sidebar)
+  const minForAI = getClusterMin();
 
- const updated = [];
- for (let k = 0; k < all.length; k++) {
-   const [cid, arrAll] = all[k];
+  const targets = all.filter(([cid, arrAll]) => {
+    if (!Array.isArray(clusterSizesTotal) || clusterSizesTotal[cid] == null) {
+      // fall back to the local size if total size is missing
+      return (arrAll.length | 0) >= minForAI;
+    }
+    return (clusterSizesTotal[cid] | 0) >= minForAI;
+  });
+
+  if (!targets.length) {
+    msg = `No clusters meet the current minimum size (${minForAI}).`;
+    updateInfo(); redraw(); return;
+  }
+
+  showLoading('Labelling clusters…', 0.05);
+
+  const updated = [];
+  for (let k = 0; k < targets.length; k++) {
+    const [cid, arrAll] = targets[k];
+
 
    // Prefer visible nodes if there are any; else use all in the cluster
    const arrVis = arrAll.filter(i => !visibleMask.length || visibleMask[i]);
@@ -6805,10 +6824,10 @@ if (totalSize < minForAI) {
    }
    // Even a 1-paper cluster will still yield a title-only sample
 
-   setLoadingProgress(
-     0.05 + 0.9 * (k / all.length),
-     `Labelling cluster ${k+1}/${all.length} (${sample.length} abstracts)`
-   );
+    setLoadingProgress(
+      0.05 + 0.9 * (k / targets.length),
+      `Labelling cluster ${k+1}/${targets.length} (${sample.length} abstracts)`
+    );
 
    try {
      const raw = await openaiChatDirect(
@@ -9200,6 +9219,23 @@ if (DEMO_MODE) {
   const seedIdx = nodes[selectedIndex].idx;
   const seedOA  = itemsData[seedIdx]?.openalex?.id;
 
+  // Robust origin publication year (for guarding time direction)
+  const seedYear = (() => {
+    const nYear = Number(nodes[seedIdx]?.year);
+    if (Number.isFinite(nYear) && nYear >= 1000 && nYear <= 3000) return nYear;
+    const ow = itemsData[seedIdx]?.openalex || {};
+    const raw = Number(ow.publication_year || (ow.from_publication_date || '').slice(0, 4));
+    if (Number.isFinite(raw) && raw >= 1000 && raw <= 3000) return raw;
+    return null;
+  })();
+
+  // Extract a reasonable publication year from an OpenAlex work
+  const getWorkYear = (w) => {
+    if (!w) return NaN;
+    const raw = Number(w.publication_year || (w.from_publication_date || '').slice(0, 4));
+    return (Number.isFinite(raw) && raw >= 1000 && raw <= 3000) ? raw : NaN;
+  };
+
   // Track per-node completion flags
   const item = itemsData[seedIdx] || {};
   item._built = item._built || {};
@@ -9213,9 +9249,25 @@ if (DEMO_MODE) {
 
       const edgesOA = [];
       const onBatch = (works, ctx) => {
-        if (ctx?.level === 1) for (const w of works) edgesOA.push([seedOA, w.id]);
-        integrateWorksAndEdges(seedIdx, works, null); // live nodes
-onGraphDataChanged();
+        // LEFT side = cited works (backwards along references).
+        let filtered = works || [];
+        if (seedYear != null) {
+          filtered = filtered.filter(w => {
+            const y = getWorkYear(w);
+            if (!Number.isFinite(y)) return true;        // keep undated works
+            // Backward track: cited work should not post-date the seed
+            return y <= seedYear;
+          });
+        }
+
+        if (ctx?.level === 1) {
+          for (const w of filtered) edgesOA.push([seedOA, w.id]);
+        }
+
+        if (filtered.length) {
+          integrateWorksAndEdges(seedIdx, filtered, null); // live nodes
+          onGraphDataChanged();
+        }
       };
 
       const res = await DataRetrieval.expandCited({
@@ -9249,9 +9301,22 @@ onGraphDataChanged();
 
       const edgesOA = [];
       const onBatch = (works, ctx) => {
+        // RIGHT side = citing works (forwards along citations).
+        let filtered = works || [];
+        if (seedYear != null) {
+          filtered = filtered.filter(w => {
+            const y = getWorkYear(w);
+            if (!Number.isFinite(y)) return true;        // keep undated works
+            // Forward track: citing work should not pre-date the seed
+            return y >= seedYear;
+          });
+        }
+
+        if (!filtered.length) return;
+
         // edges are added after the call as a single bulk integrate from res.edgesOA;
         // here we stream the nodes so you see them arrive.
-        integrateWorksAndEdges(seedIdx, works, null);
+        integrateWorksAndEdges(seedIdx, filtered, null);
         onGraphDataChanged();
       };
 
@@ -9323,6 +9388,7 @@ onGraphDataChanged();
     return;
   }
 }
+
 
 
 
