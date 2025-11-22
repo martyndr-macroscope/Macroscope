@@ -240,6 +240,23 @@ function fetchWithTimeout(resource, options = {}, timeoutMs = 20000) {
   return fetch(resource, { ...options, signal: controller.signal })
     .finally(() => clearTimeout(id));
 }
+// Generic watchdog: time-limit any async operation (e.g. stubborn PDFs)
+async function withTimeout(promise, ms, label = 'operation') {
+  let timer = null;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${ms} ms`));
+    }, ms);
+  });
+
+  try {
+    // Whichever settles first wins
+    return await Promise.race([promise, timeout]);
+  } finally {
+    if (timer !== null) clearTimeout(timer);
+  }
+}
+
 
 // Try proxy first; if blocked (403/401) or fails, fall back to direct
 // Try proxy first; if blocked (403/401) or fails, fall back to direct
@@ -478,6 +495,10 @@ const INFO_PANEL_TOP_SHIFT = 200;  // move panel down by this many pixels
 
 // --- Save/Load UI ---
 let saveLoadBar, saveBtn, loadBtn, projectFileInput;
+// Track current project file name / handle so Save vs Save As behaves sensibly
+window.currentProjectName  = window.currentProjectName  || null;
+window.currentProjectHandle = window.currentProjectHandle || null;
+
 
 // --- Node Visibility (global multipliers, 0..1) ---
 let visAllPubs = 1.0;      // scales ALL publication node alphas
@@ -2314,23 +2335,27 @@ function ensureVelArrays() {
 
 
 // ---------- Start/stop ----------
+// ---------- Start/stop ----------
 function toggleLayout() {
   const next = !layoutRunning;
   layoutRunning = next;
   updateLayoutIconState();
 
   if (next) {
+    // --- TURNING LAYOUT ON ---
+
     // Only compact the scatter the first time after a fresh dataset/load:
     if (!layoutEverStarted) {
       prepareLayoutFootprint();     // one-shot footprint prep
       layoutEverStarted = true;
     }
-   // Lock gravity target to the visible content centre at start
-   const bbStart = getContentBounds(0);
-   layoutCenter = { cx: bbStart.cx, cy: bbStart.cy };
 
+    // Lock gravity target to the visible content centre at start
+    const bbStart = getContentBounds(0);
+    layoutCenter = { cx: bbStart.cx, cy: bbStart.cy };
 
-    ensureVelArrays();              // make sure vx/vy exist for all nodes
+    // Ensure velocities exist
+    ensureVelArrays();
 
     // Soft resume: tame any accumulated velocity spikes
     for (let i = 0; i < nodes.length; i++) {
@@ -2340,14 +2365,37 @@ function toggleLayout() {
       vy[i] *= 0.2;
     }
 
+    // Warm layout up from a cool state
+    layoutAlpha = 1.0;
+    layoutTickCount = 0;
     __layoutWarm = 0;               // ramp forces smoothly (see forceTick)
-    loop();
-  } else {
 
-    layoutCenter = null;   // release attractor
+    loop();                         // continuous animation while running
+  } else {
+    // --- TURNING LAYOUT OFF ---
+
+    // Release gravity centre
+    layoutCenter = null;
+
+    // Fully cool the layout & zero velocities so the state
+    // matches a freshly-restored project (no “hot” physics hanging around).
+    layoutAlpha = 0;
+    if (Array.isArray(vx)) {
+      for (let i = 0; i < vx.length; i++) vx[i] = 0;
+    }
+    if (Array.isArray(vy)) {
+      for (let i = 0; i < vy.length; i++) vy[i] = 0;
+    }
+
+    // We’re not running anymore
+    layoutRunning = false;
+    updateLayoutIconState();
+
+    // Only redraw on demand (pan/zoom/mouse) from now on
     noLoop();
   }
 }
+
 let __grid = new Map();
 
 function buildSpatialGrid(cellSize = 100) {
@@ -3895,20 +3943,26 @@ function updateDegLabel() {
 // --- Year bounds from nodes[] ---
 function computeYearBounds() {
   let minY =  9999, maxY = -9999, found = false;
+  const now = new Date().getFullYear();
+
   for (const n of nodes) {
-    if (Number.isFinite(n.year)) {
+    const y = Number(n?.year);
+    if (Number.isFinite(y) && y >= 1000 && y <= now + 1) {
       found = true;
-      if (n.year < minY) minY = n.year;
-      if (n.year > maxY) maxY = n.year;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
     }
   }
-  if (!found) { // fallback if no years present
-    const now = new Date().getFullYear();
-    minY = now; maxY = now;
+
+  if (!found) { // fallback if no sensible years present
+    minY = now;
+    maxY = now;
   }
+
   yearMin = minY; yearMax = maxY;
   yearLo = minY; yearHi = maxY;
 }
+
 
 // --- Setup/refresh the sliders to current bounds ---
 function initYearFilterUI() {
@@ -5748,9 +5802,17 @@ async function buildGraphFromPayloadAsync(payload, opts = {}) {
     const isOA  = normalizeIsOA ? normalizeIsOA(item) 
             : !!(oa.open_access && oa.open_access.is_oa === true); 
     const label = oa.display_name || oa.title || item.title || item.shortTitle || "Untitled";
-    const cbc   = Number(oa.cited_by_count ?? 0);
-    //const isOA  = !!(oa.open_access && oa.open_access.is_oa === true);
-    const ypub  = Number(oa.publication_year);
+const cbc   = Number(oa.cited_by_count ?? 0);
+//const isOA  = !!(oa.open_access && oa.open_access.is_oa === true);
+
+// Robust publication year: fall back to from_publication_date, ignore 0/garbage
+const rawYear = Number(
+  oa.publication_year ||
+  (oa.from_publication_date || '').slice(0, 4)
+);
+const ypub = (Number.isFinite(rawYear) && rawYear >= 1000 && rawYear <= 3000)
+  ? rawYear
+  : NaN;
     
 
     // abstract presence (plain text you stored, or rebuild from OA)
@@ -5766,10 +5828,10 @@ async function buildGraphFromPayloadAsync(payload, opts = {}) {
       r: 3,
       label,
       cbc,
-      oa: isOA,
-      year: Number.isFinite(ypub) ? ypub : NaN,
-      hasAbs,
-      hasFullText: hasFT 
+ oa: isOA,
+  year: ypub,
+  hasAbs,
+  hasFullText: hasFT
     };
 
     if (cbc < cbcMin) cbcMin = cbc;
@@ -6838,18 +6900,122 @@ function pointerOverUI() {
   return false;
 }
 
-function saveProject() {
+function ensureJsonFilename(name) {
+  name = (name || '').trim();
+  if (!name) name = 'domain-map';
+  // If it already ends with .json (any case), keep it
+  if (/\.json$/i.test(name)) return name;
+  return name + '.json';
+}
+
+// Legacy download-based save (no File System Access API)
+async function saveProjectLegacy() {
+  const obj = serializeState();
+
+  // Base default on current project name (without .json) if we have one
+  let base = (window.currentProjectName || 'domain-map')
+    .replace(/\.json$/i, '');
+
+  let filename;
+
+  if (window.currentProjectName) {
+    // Offer "Save" vs "Save As…" via a simple confirm dialog
+    const overwrite = window.confirm(
+      `Save changes to "${ensureJsonFilename(base)}"?\n` +
+      'Press Cancel to "Save As..."'
+    );
+    if (overwrite) {
+      filename = ensureJsonFilename(base);
+    } else {
+      const input = window.prompt('Enter a new name for this map:', base);
+      if (input === null) {
+        msg = 'Save cancelled.';
+        updateInfo(); redraw();
+        return;
+      }
+      filename = ensureJsonFilename(input);
+    }
+  } else {
+    // First ever save: always ask for a name
+    const input = window.prompt('Enter a name for this map:', base);
+    if (input === null) {
+      msg = 'Save cancelled.';
+      updateInfo(); redraw();
+      return;
+    }
+    filename = ensureJsonFilename(input);
+  }
+
+  window.currentProjectName = filename;
+  downloadJSON(obj, filename);
+}
+
+// File System Access API save (Chrome/Edge, etc.)
+async function saveProjectFS() {
+  const obj  = serializeState();
+  const json = JSON.stringify(obj, null, 2);
+
+  let handle = window.currentProjectHandle || null;
+  let effectiveName = window.currentProjectName || 'domain-map.json';
+
+  if (handle) {
+    const overwrite = window.confirm(
+      `Save changes to "${effectiveName}"?\n` +
+      'Press Cancel to "Save As..."'
+    );
+    if (!overwrite) {
+      // Force a new picker
+      handle = null;
+    }
+  }
+
+  if (!handle) {
+    // First save, or user chose "Save As…"
+    const base = (window.currentProjectName || 'domain-map')
+      .replace(/\.json$/i, '');
+    const suggestedName = ensureJsonFilename(base);
+
+    handle = await window.showSaveFilePicker({
+      suggestedName,
+      types: [{
+        description: 'Macroscope project (JSON)',
+        accept: { 'application/json': ['.json'] }
+      }]
+    });
+  }
+
+  const writable = await handle.createWritable();
+  await writable.write(json);
+  await writable.close();
+
+  window.currentProjectHandle = handle;
+  // .name is the final name chosen in the picker
+  window.currentProjectName = ensureJsonFilename(
+    handle.name || window.currentProjectName || 'domain-map'
+  );
+
+  msg = 'Project saved.';
+}
+
+async function saveProject() {
   try {
-    const obj = serializeState();
-    const stamp = new Date().toISOString().replace(/[:.]/g,'-');
-    downloadJSON(obj, `domain-map-${stamp}.json`);
-    msg = 'Project saved.';
+    if (typeof window !== 'undefined' && window.showSaveFilePicker) {
+      await saveProjectFS();      // modern browsers: real file overwrite
+    } else {
+      await saveProjectLegacy();  // fallback: download with prompts
+    }
   } catch (e) {
-    console.error(e);
-    msg = 'Save failed.';
+    if (e && (e.name === 'AbortError' || e.name === 'NotAllowedError')) {
+      // User cancelled the picker
+      msg = 'Save cancelled.';
+    } else {
+      console.error(e);
+      msg = 'Save failed.';
+    }
   }
   updateInfo(); redraw();
 }
+
 
 function serializeState() {
   // compact node positions (everything else is rebuilt from itemsData)
@@ -6971,12 +7137,18 @@ function downloadJSON(obj, filename) {
     a.remove();
   }, 0);
 }
-async function handleProjectFileSelected(p5file) {
+function handleProjectFileSelected(p5file) {
   const native = p5file?.file || p5file;
   if (!native) { msg = 'Could not access the file.'; updateInfo(); redraw(); return; }
 
+  // Remember the name (and any handle if present) for future saves
+  window.currentProjectName  = native.name || window.currentProjectName || null;
+  // native.handle is not standard for <input type="file">, but may exist in some environments
+  window.currentProjectHandle = native.handle || null;
+
   // NEW: show a loading overlay immediately
   showLoading('Reading project…', 0.01);
+
 
   const reader = new FileReader();
 
@@ -7369,17 +7541,37 @@ async function autoCacheVisible({ onlyOnScreen = true } = {}) {
 
   showLoading(`Auto-caching ${batch.length} papers…`, 0.02);
 
-  let done = 0, ok = 0, fail = 0;
+    let done = 0, ok = 0, fail = 0;
   for (const i of batch) {
-    const success = await extractFullTextForIndex(i, null, { silent: true });
+    let success = false;
+
+    try {
+      // Hard cap per paper to prevent one bad item from freezing the run
+      success = await withTimeout(
+        extractFullTextForIndex(i, null, { silent: true }),
+        45000, // 45s; tweak if you like
+        'Full-text cache'
+      );
+    } catch (e) {
+      console.warn('Auto-cache: timeout or error on index', i, e);
+      success = false;
+      // Optionally mark it so you can see “stubborn” cases later:
+      const it = itemsData?.[i] || (itemsData[i] = {});
+      it.fulltext_timeout = true;
+    }
+
     if (success) ok++; else fail++;
     done++;
 
     const frac = done / batch.length;
-    setLoadingProgress(0.02 + 0.96 * frac, `Auto-caching… ${done}/${batch.length}`);
+    setLoadingProgress(
+      0.02 + 0.96 * frac,
+      `Auto-caching… ${done}/${batch.length}`
+    );
 
     await new Promise(r => setTimeout(r, AUTOCACHE_SLEEP_MS)); // keep UI responsive
   }
+
 
   hideLoading();
   msg = `Auto-cache finished: ${ok} cached, ${fail} failed.`;
@@ -11700,23 +11892,26 @@ REMOTE_AI_BASE      = _joinBase(_aiFromIndex)      || REMOTE_AI_BASE;
                      : { source: (e.s ?? e.source)|0, target: (e.t ?? e.target)|0 }
   );
 
-  for (let i = 0; i < N; i++) {
-    const nn = indexObj.nodes[i] || {};
-    nodes[i] = {
-      idx: i,
-      x: +nn.x, y: +nn.y,
-      r: nn.r || 3,
-      label: nn.label || (nn.id || `n${i}`),
-      cbc: nn.cbc|0,
-      oa: !!nn.oa,
-      year: Number.isFinite(+nn.year) ? +nn.year : NaN,
-      hasAbs: !!nn.hasAbs,
-        hasFullText: !!nn.hasFullText,
-      idStr: (nn.id || '').replace(/^https?:\/\/openalex\.org\//i, '') || null,        // ← used for lazy detail fetch
-        intIn: (Number.isFinite(+nn.intIn) ? (+nn.intIn|0) : undefined),  // ← NEW
+for (let i = 0; i < N; i++) {
+  const nn = indexObj.nodes[i] || {};
+  const rawYear = Number(nn.year);
+  const y = (Number.isFinite(rawYear) && rawYear >= 1000 && rawYear <= 3000)
+    ? rawYear
+    : NaN;
 
-    
-    };
+  nodes[i] = {
+    idx: i,
+    x: +nn.x, y: +nn.y,
+    r: nn.r || 3,
+    label: nn.label || (nn.id || `n${i}`),
+    cbc: nn.cbc|0,
+    oa: !!nn.oa,
+    year: y,
+    hasAbs: !!nn.hasAbs,
+    hasFullText: !!nn.hasFullText,
+    idStr: (nn.id || '').replace(/^https?:\/\/openalex\.org\//i, '') || null,
+    intIn: (Number.isFinite(+nn.intIn) ? (+nn.intIn|0) : undefined),
+  };
     // Minimal stub so InfoPanel doesn't crash if remote is unavailable
     itemsData[i] = { openalex: { id: nn.id || null, cited_by_count: nn.cbc|0,
                                  open_access: { is_oa: !!nn.oa } },
@@ -12867,7 +13062,9 @@ function makeScopeNoteFromDoc(d, maxWords = 22) {
 
 function groupIntoYearWindows(corpus, span = 5) {
   const windows = [];
-  const years = corpus.map(d => Number.isFinite(d.year) ? d.year : null).filter(y => y != null);
+  const years = corpus
+  .map(d => Number.isFinite(d.year) ? d.year : null)
+  .filter(y => y != null && y >= 1000 && y <= 3000);
   if (!years.length) return [{ start: 'earliest', end: 'latest', docs: corpus.slice() }];
 
   const minY = Math.min(...years);
@@ -13740,16 +13937,20 @@ function computeCanvasStats() {
     if (hasAbs) withAbs++;
 
     // Full text presence (either cached flag or text)
-    const hasFT = !!(nodes?.[i]?.hasFullText || (typeof it.fulltext === 'string' && it.fulltext.trim()));
-    if (hasFT) withFT++;
+const hasFT = !!(nodes?.[i]?.hasFullText || (typeof it.fulltext === 'string' && it.fulltext.trim()));
+if (hasFT) withFT++;
 
-    // Year histogram
-    const y = Number.isFinite(+w.publication_year) ? +w.publication_year : Number(nodes?.[i]?.year);
-    if (Number.isFinite(y)) {
-      yearCounts.set(y, (yearCounts.get(y) || 0) + 1);
-      if (y < yMin) yMin = y;
-      if (y > yMax) yMax = y;
-    }
+// Year histogram (ignore 0/garbage, prefer OpenAlex → node.year)
+let yRaw = Number.isFinite(+w.publication_year)
+  ? +w.publication_year
+  : Number(nodes?.[i]?.year);
+
+if (Number.isFinite(yRaw) && yRaw >= 1000 && yRaw <= 3000) {
+  const y = yRaw;
+  yearCounts.set(y, (yearCounts.get(y) || 0) + 1);
+  if (y < yMin) yMin = y;
+  if (y > yMax) yMax = y;
+}
   }
 
   const clusters =
