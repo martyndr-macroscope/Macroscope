@@ -1534,10 +1534,15 @@ const SYNTH_BODY_MAX_TOKENS = 2200;  // per chunk output cap
 const SYNTH_META_MAX_TOKENS = 2600;  // final merge output cap
 const USE_INLINE_CITATIONS  = true; // large-scale: omit inline [n] to avoid conflicts
 
-
+if (window.p5) {
+  window.p5.disableFriendlyErrors = true;
+}
 
 // --- p5 lifecycle ------------------------------------------------------------
 function setup() {
+
+   // Force 1× pixel density so Chrome isn’t rendering at 4× pixels on Retina
+  pixelDensity(1);
   //createCanvas(windowWidth, windowHeight);
   const cnv = createCanvas(windowWidth, windowHeight);
   noLoop(); // draw only when we have data or on resize
