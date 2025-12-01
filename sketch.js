@@ -38,6 +38,9 @@ function setClusterMin(v) {
   initClusterFilterUI?.();   // refresh slider/input/label bounds+value
 }
 
+// --- Invisible University lens config ---
+const INV_UNI_MAX_ITEMS    = 120;  // max abstracts to send in one go
+const INV_UNI_ABS_CHARS    = 800;  // per-abstract character budget in the prompt
 
 
 let FORCE_TICKS_PER_FRAME = 3; // try 3–5 on desktop GPUs
@@ -5018,6 +5021,7 @@ function createAIMenuButton() {
   addItem('Multi Cluster Review', () => openMultiClusterLitDialog?.());
   addItem('Label clusters',     () => runLabelClustersAI?.());
   addItem('Synthesise abstracts',() => runSynthesisAbstracts?.());
+  addItem('Invisible University (themes)…', () => runInvisibleUniversityLens?.());
   addItem('Chronological review',() => runChronologicalReview?.());
   addItem('Open question…',          () => runOpenQuestion?.());
 
@@ -14568,4 +14572,350 @@ function clearDimensionSelection() {
 }
 function isDimFocused(k) {
   return (focusedDimSet && focusedDimSet.has(k)) || (focusedDimIndex === k);
+}
+
+// ---- Invisible University helpers -----------------------------------------
+
+function extractInvisibleUniJson(raw) {
+  if (!raw) return null;
+  let t = String(raw).trim();
+
+  // 1) direct JSON
+  try {
+    const j = JSON.parse(t);
+    if (j && Array.isArray(j.clusters)) return j;
+  } catch (_) {}
+
+  // 2) fenced ```json block
+  const fence = t.match(/```json([\s\S]*?)```/i);
+  if (fence && fence[1]) {
+    try {
+      const j = JSON.parse(fence[1]);
+      if (j && Array.isArray(j.clusters)) return j;
+    } catch (_) {}
+  }
+
+  // 3) first {...} block
+  const block = t.match(/\{[\s\S]*\}/);
+  if (block && block[0]) {
+    try {
+      const j = JSON.parse(block[0]);
+      if (j && Array.isArray(j.clusters)) return j;
+    } catch (_) {}
+  }
+
+  return null;
+}
+
+// Compute simple author frequency stats for a set of docs
+function computeInvisibleUniAuthorStats(docs) {
+  const counts = new Map();
+  for (const d of docs) {
+    const arr = Array.isArray(d.authors) ? d.authors : [];
+    for (const nameRaw of arr) {
+      const name = String(nameRaw || '').trim();
+      if (!name) continue;
+      counts.set(name, (counts.get(name) || 0) + 1);
+    }
+  }
+  const out = Array.from(counts.entries()).map(([name, count]) => ({ name, count }));
+  out.sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+  return out;
+}
+// ============================================================================
+//  Invisible University Lens
+//  - Clusters visible abstracts into thematic groups
+//  - Suggests research-group style handles and members
+//  - Adds one AI footprint per cluster (AI Dimensions)
+// ============================================================================
+
+async function runInvisibleUniversityLens() {
+  try {
+    if (!OPENAI_API_KEY) {
+      openApiKeyModal?.();
+      return;
+    }
+
+    // 1) Collect visible items with abstracts (institution slice + filters)
+    const corpusItems = collectVisibleForSynthesis(INV_UNI_MAX_ITEMS);
+    const totalVisible = Array.isArray(visibleMask)
+      ? visibleMask.reduce((a,b)=>a+(b?1:0),0)
+      : nodes.length;
+
+    if (!corpusItems.length) {
+      openSynthPanel('Invisible University — no abstracts available');
+      setSynthHtml('<div style="opacity:.8">No visible publications with abstracts were found. Try widening your filters.</div>');
+      setSynthBodyText('', 'invisible_university.md');
+      return;
+    }
+
+    // 2) Number items so we can refer to them compactly
+    const numbered = corpusItems.map((it, idx) => ({
+      n: idx + 1,
+      ...it
+    }));
+    const byN = new Map(numbered.map(it => [it.n, it]));
+
+    // 3) Build compact corpus text for the prompt
+    const corpusLines = numbered.map(it => {
+      const auth = Array.isArray(it.authors) ? it.authors.join(', ') : (it.authors || '');
+      const absShort = String(it.abstract || '')
+        .slice(0, INV_UNI_ABS_CHARS)
+        .replace(/\s+/g, ' ')
+        .trim();
+      const yearStr = it.year ? ` (${it.year})` : '';
+      const venueStr = it.venue ? ` — ${it.venue}` : '';
+      return `[${it.n}] ${it.title || 'Untitled'}${yearStr}${venueStr}
+Authors: ${auth || 'Unknown'}
+Abstract: ${absShort}`;
+    }).join('\n\n');
+
+    const header = `Invisible University — clustering ${numbered.length} abstracts (from ${totalVisible} visible nodes).`;
+    openSynthPanel(header);
+    setSynthHtml('<div style="opacity:.8">Analysing abstracts and authors to infer thematic research groupings…</div>');
+    setSynthBodyText('', 'invisible_university.md');
+
+    // 4) Call OpenAI to create thematic clusters
+    const systemPrompt =
+`You are analysing a university's publication corpus to uncover "Invisible University" research groupings.
+
+You receive a numbered list of publications with titles, authors, venues and abstracts.
+Your job is to:
+
+1. Group the publications into a SMALL number of thematic clusters (typically 3–12).
+2. Each cluster should be defined primarily by topic, but you should also
+   notice overlapping authorships (people who appear on multiple papers) and
+   favour putting related work by overlapping teams into the same cluster when sensible.
+3. For each cluster, you will:
+   - Assign a short "theme_label" (e.g. "Synthetic Biology for the Built Environment").
+   - Write a 2–4 sentence "theme_summary" capturing what the cluster is about.
+   - Suggest a "suggested_group_name" that could be used as a research group or lab name.
+   - Write a 2–4 sentence "suggested_group_summary" describing that hypothetical group.
+   - List the member_indices: the [n] ids of the publications that belong to this cluster.
+4. Also provide one short "global_notes" string capturing any cross-cutting themes or gaps.
+
+Return STRICT JSON only, with this shape:
+
+{
+  "clusters": [
+    {
+      "id": 1,
+      "theme_label": "…",
+      "theme_summary": "…",
+      "suggested_group_name": "…",
+      "suggested_group_summary": "…",
+      "member_indices": [1, 4, 7, 8]
+    }
+  ],
+  "global_notes": "…"
+}
+
+Rules:
+- Do NOT invent new publication ids; use only the given [n] numbers.
+- Every used id must correspond to at least one abstract in the input.
+- It is acceptable for some publications to be unassigned if they do not clearly fit (simply omit them).
+- Use between 3 and 12 clusters unless the corpus is extremely small.`;
+
+    const userPrompt =
+`Corpus of ${numbered.length} publications:
+
+${corpusLines}
+
+Now perform the clustering and return ONLY the JSON object, no explanation.`;
+
+    const messages = [
+      { role: 'system', content: systemPrompt },
+      { role: 'user',   content: userPrompt }
+    ];
+
+    const raw = await openaiChatDirect(messages, {
+      temperature: 0.25,
+      max_tokens: 2400
+    });
+
+    const parsed = extractInvisibleUniJson(raw);
+    if (!parsed || !Array.isArray(parsed.clusters) || !parsed.clusters.length) {
+      const safeOut = esc(String(raw || '')).slice(0, 4000);
+      const html = `
+        <div style="margin-bottom:8px;font-weight:600">Invisible University — AI output could not be parsed as JSON.</div>
+        <div style="opacity:.8;margin-bottom:8px">
+          You can copy the raw text below and inspect it manually. Try re-running the lens if this persists.
+        </div>
+        <pre style="white-space:pre-wrap;font-size:12px;line-height:1.4;border:1px solid rgba(255,255,255,0.2);padding:8px;border-radius:6px;max-height:320px;overflow:auto;">
+${safeOut}
+        </pre>
+      `;
+      setSynthHtml(html);
+      setSynthBodyText(String(raw || ''), 'invisible_university_raw.md');
+      return;
+    }
+
+    const clusters = parsed.clusters;
+    const globalNotes = String(parsed.global_notes || parsed.globalNotes || '').trim();
+
+    // 5) Build markdown + HTML summary
+    const bodyLines = [];
+    bodyLines.push('# Invisible University — Thematic Research Groups');
+    bodyLines.push('');
+    bodyLines.push(`Analysed **${numbered.length}** abstracts (from **${totalVisible}** visible nodes) to infer thematic clusters driven by text similarity and overlapping authorships.`);
+    bodyLines.push('');
+
+    if (globalNotes) {
+      bodyLines.push('> ' + globalNotes.replace(/\n+/g, ' ').trim());
+      bodyLines.push('');
+    }
+
+    const allClusterDocs = []; // for optional global footprint if ever needed
+
+    const clustersHtmlChunks = [];
+
+    clusters.forEach((c, idx) => {
+      const rawIndices = Array.isArray(c.member_indices) ? c.member_indices
+                        : Array.isArray(c.members) ? c.members
+                        : [];
+      const memberNs = rawIndices
+        .map(x => Number(x))
+        .filter(n => Number.isFinite(n) && n >= 1 && n <= numbered.length);
+
+      const docs = [];
+      for (const n of memberNs) {
+        const d = byN.get(n);
+        if (d) docs.push(d);
+      }
+      if (!docs.length) return; // skip empty clusters
+
+      allClusterDocs.push(...docs);
+
+      const themeLabel   = String(c.theme_label || '').trim() || `Cluster ${idx + 1}`;
+      const themeSummary = String(c.theme_summary || '').trim();
+      const groupName    = String(c.suggested_group_name || '').trim() || `Research Group ${idx + 1}`;
+      const groupSummary = String(c.suggested_group_summary || '').trim();
+
+      // Author stats (top 10)
+      const authorStats = computeInvisibleUniAuthorStats(docs).slice(0, 10);
+
+      // Markdown body
+      bodyLines.push(`## ${groupName}`);
+      bodyLines.push('');
+      bodyLines.push(`**Theme label:** ${themeLabel}`);
+      bodyLines.push('');
+      if (themeSummary) {
+        bodyLines.push(themeSummary);
+        bodyLines.push('');
+      }
+      if (groupSummary) {
+        bodyLines.push(groupSummary);
+        bodyLines.push('');
+      }
+
+      if (authorStats.length) {
+        bodyLines.push('**Key contributors (by number of publications in this cluster):**');
+        bodyLines.push('');
+        for (const a of authorStats) {
+          bodyLines.push(`- ${a.name} (${a.count} publication${a.count === 1 ? '' : 's'})`);
+        }
+        bodyLines.push('');
+      }
+
+      bodyLines.push('**Representative publications:**');
+      bodyLines.push('');
+      docs.slice(0, 12).forEach(d => {
+        const mainAuthor = Array.isArray(d.authors) && d.authors.length
+          ? d.authors[0]
+          : 'Anonymous';
+        const yr = d.year || '';
+        bodyLines.push(`- ${mainAuthor} ${yr ? '(' + yr + ')' : ''}: ${d.title}`);
+      });
+      bodyLines.push('');
+
+      // HTML fragment for the panel
+      const repHtml = docs.slice(0, 8).map(d => {
+        const mainAuthor = Array.isArray(d.authors) && d.authors.length
+          ? d.authors[0]
+          : 'Anonymous';
+        const yr = d.year || '';
+        const titleEsc = esc(d.title || 'Untitled');
+        const authEsc  = esc(mainAuthor);
+        const yrEsc    = esc(yr);
+        return `<li><span style="font-weight:500">${authEsc}${yr ? ' ('+yrEsc+')' : ''}</span>: ${titleEsc}</li>`;
+      }).join('');
+
+      const authorsHtml = authorStats.length
+        ? ('<ul style="margin:4px 0 0 16px;padding:0;">' +
+           authorStats.map(a => `<li>${esc(a.name)} <span style="opacity:.75">(x${a.count})</span></li>`).join('') +
+           '</ul>')
+        : '<div style="opacity:.7">No recurring authors detected in this cluster.</div>';
+
+      clustersHtmlChunks.push(`
+        <div style="margin-bottom:14px;padding:10px;border-radius:8px;border:1px solid rgba(255,255,255,0.15);background:rgba(0,0,0,0.35);">
+          <div style="font-weight:600;font-size:14px;margin-bottom:4px;">Group ${idx+1}: ${esc(groupName)}</div>
+          <div style="opacity:.85;font-size:12px;margin-bottom:4px;">
+            <span style="font-weight:500;">Theme:</span> ${esc(themeLabel)}
+          </div>
+          ${themeSummary ? `<div style="opacity:.85;font-size:12px;margin-bottom:4px;">${esc(themeSummary)}</div>` : ''}
+          ${groupSummary ? `<div style="opacity:.85;font-size:12px;margin-bottom:6px;">${esc(groupSummary)}</div>` : ''}
+          <div style="font-size:12px;font-weight:500;margin-bottom:2px;">Key contributors</div>
+          ${authorsHtml}
+          <div style="font-size:12px;font-weight:500;margin-top:6px;margin-bottom:2px;">Representative publications</div>
+          <ul style="margin:0 0 0 16px;padding:0;font-size:12px;line-height:1.4;">${repHtml}</ul>
+        </div>
+      `);
+
+      // 6) One AI footprint per cluster
+      try {
+        const footprintMd = [
+          `# ${groupName}`,
+          '',
+          `**Theme label:** ${themeLabel}`,
+          '',
+          themeSummary || '',
+          '',
+          groupSummary ? `**Group summary:** ${groupSummary}` : '',
+          '',
+          '**Representative publications:**',
+          '',
+          docs.slice(0, 12).map(d => {
+            const mainAuthor = Array.isArray(d.authors) && d.authors.length
+              ? d.authors[0]
+              : 'Anonymous';
+            const yr = d.year || '';
+            return `- ${mainAuthor}${yr ? ' ('+yr+')' : ''}: ${d.title}`;
+          }).join('\n'),
+          '',
+          authorStats.length ? '**Key contributors:**' : '',
+          authorStats.length ? '' : '',
+          authorStats.map(a => `- ${a.name} (${a.count} publication${a.count === 1 ? '' : 's'})`).join('\n')
+        ].join('\n');
+
+        addAIFootprintFromItems(
+          'invisible-university',
+          docs,
+          footprintMd,
+          groupName
+        );
+      } catch (e) {
+        console.warn('Invisible University: footprint failed for cluster', idx, e);
+      }
+    });
+
+    const bodyMd = bodyLines.join('\n');
+    const clustersHtml = clustersHtmlChunks.join('');
+
+    const panelHtml = `
+      <div style="margin-bottom:8px;font-weight:600;">${esc(header)}</div>
+      ${globalNotes ? `<div style="opacity:.8;margin-bottom:8px;font-size:12px;">${esc(globalNotes)}</div>` : ''}
+      ${clustersHtml}
+    `;
+
+    setSynthHtml(panelHtml);
+    setSynthBodyText(bodyMd, 'invisible_university.md');
+
+    // final redraw so footprints + new AI dimensions appear
+    redraw?.();
+  } catch (err) {
+    console.error('Invisible University lens failed:', err);
+    openSynthPanel('Invisible University — error');
+    setSynthHtml(`<div style="opacity:.85">The lens failed with an error: ${esc(err.message || String(err))}</div>`);
+    setSynthBodyText('', 'invisible_university_error.md');
+  }
 }
