@@ -51,7 +51,7 @@ const INV_UNI_BATCH_SIZE       = 80;   // abstracts per API call (per concept ba
 const INV_UNI_ABS_CHARS        = 800;  // per-abstract character budget in prompt
 const INV_UNI_MIN_CONCEPT_SIZE = 10;   // buckets smaller than this → misc
 const INV_UNI_MAX_BATCHES      = 500;  // hard safety cap (just in case)
-
+const INV_UNI_DEFAULT_MIN_CLUSTER_SIZE = 10;   // default minimum publications per cluster
 // Backwards-compat alias (no longer used as a global cap)
 const INV_UNI_MAX_ITEMS = INV_UNI_BATCH_SIZE;
 
@@ -14653,7 +14653,22 @@ function computeInvisibleUniAuthorStats(docs) {
 
 async function runInvisibleUniversityLens() {
   try {
-
+    // Ask user for a minimum cluster size (optional)
+    let minClusterSize = INV_UNI_DEFAULT_MIN_CLUSTER_SIZE || 10;
+    try {
+      const input = window.prompt(
+        'Invisible University: minimum cluster size (publications per research theme)?',
+        String(minClusterSize)
+      );
+      if (input !== null) {
+        const v = parseInt(String(input).trim(), 10);
+        if (Number.isFinite(v) && v > 0) {
+          minClusterSize = v;
+        }
+      }
+    } catch (e) {
+      console.warn('Invisible University: prompt for min cluster size failed, using default.', e);
+    }
 
     // 1) Collect *all* visible items with abstracts (institution slice + filters)
     const corpusItems = collectVisibleForSynthesis(Infinity);
@@ -14846,11 +14861,12 @@ Return STRICT JSON only, with this shape:
   "global_notes": "…"
 }
 
+// (inside the systemPrompt template literal)
 Rules:
 - Do NOT invent new publication ids; use only the given [n] numbers.
 - Every used id must correspond to at least one abstract in the input.
 - It is acceptable for some publications to be unassigned if they do not clearly fit (simply omit them).
-- Use between 2 and 8 clusters unless the subset is extremely small.`;
+- Aim for clusters of size at least ${minClusterSize} where possible, and use between 2 and ${Math.max(2, Math.round(numbered.length / minClusterSize))} clusters unless the subset is extremely small.`;
 
       const userPrompt =
 `Subset corpus (${numbered.length} publications) for concept "${conceptLabel}":
@@ -14916,12 +14932,13 @@ Now perform the clustering and return ONLY the JSON object, no explanation.`;
           .map(x => Number(x))
           .filter(n => Number.isFinite(n) && n >= 1 && n <= numbered.length);
 
-        const docs = [];
-        for (const n of memberNs) {
-          const d = byN.get(n);
-          if (d) docs.push(d);
-        }
-        if (!docs.length) return; // skip empty clusters
+const docs = [];
+for (const n of memberNs) {
+  const d = byN.get(n);
+  if (d) docs.push(d);
+}
+if (!docs.length || docs.length < minClusterSize) return; // skip empty or too-small clusters
+
 
         const themeLabel   = String(c.theme_label || '').trim() || `Cluster ${idx + 1}`;
         const themeSummary = String(c.theme_summary || '').trim();
