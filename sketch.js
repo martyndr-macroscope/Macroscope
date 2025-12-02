@@ -14652,11 +14652,6 @@ function computeInvisibleUniAuthorStats(docs) {
 // ============================================================================
 
 async function runInvisibleUniversityLens() {
-  try {
-    if (!OPENAI_API_KEY) {
-      openApiKeyModal?.();
-      return;
-    }
 
     // 1) Collect *all* visible items with abstracts (institution slice + filters)
     const corpusItems = collectVisibleForSynthesis(Infinity);
