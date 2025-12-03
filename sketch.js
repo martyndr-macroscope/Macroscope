@@ -40,18 +40,24 @@ function setClusterMin(v) {
 
 // --- Invisible University lens config ---
 //
-// We now:
-//   1) Collect *all* visible abstracts.
-//   2) Group them by primary OpenAlex concept.
-//   3) Turn each concept bucket into one or more batches.
-//   4) Call the model once per batch.
+// --- Invisible University lens config ---------------------------------------
 //
-// Tweak these if needed.
-const INV_UNI_BATCH_SIZE       = 80;   // abstracts per API call (per concept batch)
-const INV_UNI_ABS_CHARS        = 800;  // per-abstract character budget in prompt
-const INV_UNI_MIN_CONCEPT_SIZE = 10;   // buckets smaller than this → misc
-const INV_UNI_MAX_BATCHES      = 500;  // hard safety cap (just in case)
-const INV_UNI_DEFAULT_MIN_CLUSTER_SIZE = 10;   // default minimum publications per cluster
+// New pipeline (HDBSCAN-style / density-based):
+//   1) Collect *all* visible abstracts.
+//   2) Build a local TF–IDF embedding (no API calls).
+//   3) Cluster with a simple density-based algorithm (no k required).
+//   4) Call the model once per cluster to name/summarise.
+//
+// These values are deliberately conservative so we don't freeze the browser.
+// You can push them up on a powerful machine.
+
+const INV_UNI_MAX_DOCS              = 800;    // hard cap of docs to cluster per run
+const INV_UNI_TFIDF_VOCAB           = 500;    // max vocabulary size
+const INV_UNI_MIN_DF                = 2;      // ignore terms that appear in < 2 docs
+const INV_UNI_MAX_DF_FRAC           = 0.65;   // ignore terms in > 65% docs
+const INV_UNI_SIM_THRESHOLD         = 0.35;   // cosine similarity for edges (0–1)
+const INV_UNI_DEFAULT_MIN_CLUSTER_SIZE = 8;   // default minimum publications per group
+
 // Backwards-compat alias (no longer used as a global cap)
 const INV_UNI_MAX_ITEMS = INV_UNI_BATCH_SIZE;
 
@@ -14651,423 +14657,476 @@ function computeInvisibleUniAuthorStats(docs) {
 //  - Adds one AI footprint per resulting cluster
 // ============================================================================
 
-async function runInvisibleUniversityLens() {
-  try {
-    // Ask user for a minimum cluster size (optional)
-    let minClusterSize = INV_UNI_DEFAULT_MIN_CLUSTER_SIZE || 10;
-    try {
-      const input = window.prompt(
-        'Invisible University: minimum cluster size (publications per research theme)?',
-        String(minClusterSize)
-      );
-      if (input !== null) {
-        const v = parseInt(String(input).trim(), 10);
-        if (Number.isFinite(v) && v > 0) {
-          minClusterSize = v;
+// Build TF–IDF vectors for Invisible University clustering
+function buildInvisibleUniTfIdf(docs) {
+  const N = docs.length | 0;
+  const df = new Map();
+  const perDocTokens = new Array(N);
+
+  for (let i = 0; i < N; i++) {
+    const text = String(docs[i].text || '').toLowerCase();
+    const toks = tokenize(text);
+    perDocTokens[i] = toks;
+
+    const seen = new Set();
+    for (const t of toks) {
+      if (seen.has(t)) continue;
+      seen.add(t);
+      df.set(t, (df.get(t) || 0) + 1);
+    }
+  }
+
+  const minDf    = INV_UNI_MIN_DF || 2;
+  const maxDfFrac = INV_UNI_MAX_DF_FRAC || 0.65;
+  const maxVocab = INV_UNI_TFIDF_VOCAB || 500;
+
+  let vocab = [];
+  df.forEach((count, term) => {
+    if (count < minDf) return;
+    if (count > maxDfFrac * N) return;
+    vocab.push({ term, count });
+  });
+
+  // frequent → less frequent; tie-break by alpha
+  vocab.sort((a, b) => b.count - a.count || a.term.localeCompare(b.term));
+  if (vocab.length > maxVocab) vocab = vocab.slice(0, maxVocab);
+
+  const vocabTerms = vocab.map(v => v.term);
+  const termIndex = new Map();
+  for (let i = 0; i < vocabTerms.length; i++) termIndex.set(vocabTerms[i], i);
+
+  const V = vocabTerms.length;
+  const idf = new Float32Array(V);
+  for (let i = 0; i < V; i++) {
+    const c = df.get(vocabTerms[i]) || 1;
+    idf[i] = Math.log(1 + N / (1 + c));
+  }
+
+  const matrix = new Array(N);
+  for (let i = 0; i < N; i++) {
+    const vec = new Float32Array(V);
+    const counts = new Map();
+    for (const t of perDocTokens[i]) {
+      const idx = termIndex.get(t);
+      if (idx == null) continue;
+      counts.set(idx, (counts.get(idx) || 0) + 1);
+    }
+
+    let norm2 = 0;
+    counts.forEach((tf, idx) => {
+      const val = Math.sqrt(tf) * idf[idx];
+      vec[idx] = val;
+      norm2 += val * val;
+    });
+
+    if (norm2 > 0) {
+      const inv = 1 / Math.sqrt(norm2);
+      for (let j = 0; j < V; j++) vec[j] *= inv;
+    }
+
+    matrix[i] = vec;
+  }
+
+  return { matrix, vocab: vocabTerms };
+}
+
+// Cosine similarity for already normalised TF–IDF vectors
+function cosineSimVec(a, b) {
+  let s = 0;
+  const L = a.length | 0;
+  for (let i = 0; i < L; i++) s += a[i] * b[i];
+  return s;
+}
+
+// Simple density-based clustering over TF–IDF with fixed similarity threshold.
+// This behaves like a lightweight HDBSCAN/DBSCAN: clusters emerge where
+// points have enough high-similarity neighbours, no k is required.
+function clusterInvisibleUniBySimilarity(matrix, minClusterSize) {
+  const n = matrix.length | 0;
+  const labels = new Array(n).fill(-1);
+  if (!n) return labels;
+
+  const MIN = Math.max(3, minClusterSize | 0);
+  const SIM = (typeof INV_UNI_SIM_THRESHOLD === 'number' ? INV_UNI_SIM_THRESHOLD : 0.35);
+
+  let cid = 0;
+
+  for (let i = 0; i < n; i++) {
+    if (labels[i] !== -1) continue; // already assigned
+
+    // Find neighbours of i
+    const neighbours = [];
+    for (let j = 0; j < n; j++) {
+      if (j === i) continue;
+      const sim = cosineSimVec(matrix[i], matrix[j]);
+      if (sim >= SIM) neighbours.push(j);
+    }
+
+    if (neighbours.length + 1 < MIN) {
+      // treat as noise for now
+      labels[i] = -1;
+      continue;
+    }
+
+    // Seed a new cluster
+    labels[i] = cid;
+    const stack = neighbours.slice();
+    for (const nb of neighbours) labels[nb] = cid;
+
+    // Grow cluster by density reachability
+    while (stack.length) {
+      const p = stack.pop();
+      for (let q = 0; q < n; q++) {
+        if (q === p) continue;
+        if (labels[q] === cid) continue;  // already in cluster
+        const s = cosineSimVec(matrix[p], matrix[q]);
+        if (s >= SIM) {
+          labels[q] = cid;
+          stack.push(q);
         }
+      }
+    }
+
+    cid++;
+  }
+
+  // Drop tiny clusters (safety double-check)
+  const counts = new Map();
+  for (let i = 0; i < n; i++) {
+    const lab = labels[i];
+    if (lab < 0) continue;
+    counts.set(lab, (counts.get(lab) || 0) + 1);
+  }
+  for (let i = 0; i < n; i++) {
+    const lab = labels[i];
+    if (lab < 0) continue;
+    if ((counts.get(lab) || 0) < MIN) labels[i] = -1;
+  }
+
+  return labels;
+}
+
+
+
+
+async function runInvisibleUniversityLens() {
+  if (!itemsData || !nodes || !nodes.length) {
+    alert('No graph loaded yet – load an institutional dataset first.');
+    return;
+  }
+
+  const totalVisible = (visibleMask && visibleMask.length)
+    ? visibleMask.reduce((a, b) => a + (b ? 1 : 0), 0)
+    : nodes.length;
+
+  if (!totalVisible) {
+    alert('No visible publications to cluster. Check your filters and try again.');
+    return;
+  }
+
+  // --- Ask for minimum cluster size -----------------------------------------
+  const defMin = window.INV_UNI_DEFAULT_MIN_CLUSTER_SIZE || 8;
+  const ans = window.prompt(
+    `Invisible University\n\n` +
+    `We will cluster visible abstracts into thematic "research groups".\n` +
+    `Minimum publications per group (>=3 recommended):`,
+    String(defMin)
+  );
+  if (ans === null) return;
+
+  let minClusterSize = Number(ans);
+  if (!Number.isFinite(minClusterSize) || minClusterSize < 3) minClusterSize = 3;
+
+  // --- Collect corpus -------------------------------------------------------
+  const allItems = collectVisibleForSynthesis(Infinity) || [];
+  if (!allItems.length) {
+    alert('No abstracts available for the visible publications.');
+    return;
+  }
+
+  // Hard cap to avoid O(N²) explosion
+  const maxDocs = window.INV_UNI_MAX_DOCS || 800;
+
+  // Bias towards more "central" / cited publications if we need to trim
+  const sorted = allItems.slice().sort((a, b) => {
+    const ia = a.idx ?? a.id ?? 0;
+    const ib = b.idx ?? b.id ?? 0;
+    const na = nodes[ia] || {};
+    const nb = nodes[ib] || {};
+    const ca = Number(na.cbc || 0);
+    const cb = Number(nb.cbc || 0);
+    return cb - ca;
+  });
+  const usedItems = sorted.slice(0, maxDocs);
+
+  openSynthPanel(
+    `Invisible University — clustering ${usedItems.length.toLocaleString()} of ` +
+    `${allItems.length.toLocaleString()} visible works`
+  );
+  setSynthHtml(
+    `<p>Building local TF–IDF vectors and clustering abstracts with a density-based algorithm (no k required)…</p>`
+  );
+  setSynthBodyText('');
+
+  showLoading('Invisible University: building vectors…', 0.05);
+  if (typeof nextTick === 'function') await nextTick();
+
+  // --- Build enriched document descriptors ----------------------------------
+  const docs = [];
+  for (const it of usedItems) {
+    const idx = it.idx ?? it.id;
+    const item = itemsData?.[idx] || {};
+    const w = item.openalex || {};
+
+    const primaryConcept = getPrimaryConceptForItem(it);
+    const allConcepts = Array.isArray(w.concepts)
+      ? w.concepts.map(c => c?.display_name).filter(Boolean)
+      : [];
+
+    const conceptText = [primaryConcept, ...allConcepts].filter(Boolean).join(' ');
+    const venue = inferVenueNameFromWork(w, it.venue || item.venue_name || '');
+    const authors = Array.isArray(it.authors) && it.authors.length
+      ? it.authors
+      : Array.isArray(w.authorships)
+        ? Array.from(new Set(
+            w.authorships
+              .map(a => a?.author?.display_name)
+              .filter(Boolean)
+          ))
+        : [];
+
+    const rawAbs = (it.abstract ||
+                    item.openalex_abstract ||
+                    getAbstract(w) ||
+                    '');
+
+    const year = Number(
+      it.year ||
+      item.year ||
+      w.publication_year ||
+      (w.from_publication_date || '').slice(0, 4)
+    ) || null;
+
+    const textParts = [
+      it.title || w.display_name || '',
+      conceptText || '',
+      venue || '',
+      rawAbs || ''
+    ];
+    const txt = textParts.join(' . ').trim();
+
+    docs.push({
+      ...it,
+      idx,
+      x: nodes[idx]?.x,
+      y: nodes[idx]?.y,
+      authors,
+      primaryConcept,
+      allConcepts,
+      venue,
+      abstract: rawAbs,
+      year,
+      text: txt
+    });
+  }
+
+  // --- TF–IDF + clustering ---------------------------------------------------
+  const { matrix } = buildInvisibleUniTfIdf(docs);
+
+  showLoading('Invisible University: clustering abstracts…', 0.35);
+  if (typeof nextTick === 'function') await nextTick();
+
+  const labels = clusterInvisibleUniBySimilarity(matrix, minClusterSize);
+
+  // Assemble clusters from labels
+  const tmpClusters = new Map();   // label -> { id, docs: [] }
+  for (let i = 0; i < labels.length; i++) {
+    const lab = labels[i];
+    if (lab < 0) continue;
+    if (!tmpClusters.has(lab)) tmpClusters.set(lab, { id: lab, docs: [] });
+    tmpClusters.get(lab).docs.push(docs[i]);
+  }
+
+  // Filter by minClusterSize (double-safety)
+  let clusters = Array.from(tmpClusters.values())
+    .filter(c => c.docs.length >= minClusterSize);
+
+  if (!clusters.length) {
+    hideLoading();
+    setSynthHtml(
+      `<p>No stable thematic groups found with min size ` +
+      `${minClusterSize}. Try lowering the minimum size or widening your filters.</p>`
+    );
+    setSynthBodyText('No Invisible University clusters found.');
+    return;
+  }
+
+  // Largest clusters first
+  clusters.sort((a, b) => b.docs.length - a.docs.length);
+
+  // --- Summarise each cluster via GPT (names + descriptions) -----------------
+  const usedNames = new Set();
+  const mdPieces = [];
+  const htmlPieces = [];
+
+  for (let k = 0; k < clusters.length; k++) {
+    const c = clusters[k];
+    const clusterDocs = c.docs;
+
+    // Top OpenAlex concepts within this cluster
+    const conceptCounts = new Map();
+    for (const d of clusterDocs) {
+      if (d.primaryConcept) {
+        conceptCounts.set(d.primaryConcept, (conceptCounts.get(d.primaryConcept) || 0) + 1);
+      }
+    }
+    const topConcepts = Array.from(conceptCounts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 3)
+      .map(([name]) => name);
+    const conceptStr = topConcepts.join(', ');
+
+    // Frequent authors
+    const authorStats = computeInvisibleUniAuthorStats(clusterDocs);
+    const topAuthors = authorStats.slice(0, 8);
+
+    // Compact payload for the LLM (cap docs and abstract length)
+    const llmDocs = clusterDocs.slice(0, 40);
+    const docLines = llmDocs.map(d => {
+      const abs = String(
+        d.abstract ||
+        itemsData[d.idx]?.openalex_abstract ||
+        ''
+      ).replace(/\s+/g, ' ').slice(0, 400);
+
+      const vname = d.venue || inferVenueNameFromWork(itemsData[d.idx]?.openalex || {}, '');
+      const authStr = Array.isArray(d.authors) && d.authors.length
+        ? d.authors.join(', ')
+        : 'Unknown';
+
+      return `- "${d.title || '(no title)'}" (${d.year || 'n.d.'}) by ${authStr}; ` +
+             `venue: ${vname || 'n/a'}; ` +
+             `primary concept: ${d.primaryConcept || 'n/a'}; ` +
+             `abstract: ${abs}`;
+    }).join('\n');
+
+    const prompt =
+      `You are helping to map the "invisible university" of an institution.\n\n` +
+      `Given the following publications, propose a distinctive research group name ` +
+      `and a concise thematic description.\n\n` +
+      `Avoid generic names like "Innovative Materials Research Group" unless you ` +
+      `qualify them (e.g. "Innovative Living Materials for Architecture"). ` +
+      `Make the name specific to the focus and applications you see.\n\n` +
+      `Return JSON ONLY, with this exact shape:\n` +
+      `{\n` +
+      `  "group_name": string,\n` +
+      `  "theme_label": string,\n` +
+      `  "theme_summary": string,\n` +
+      `  "notes": string\n` +
+      `}\n\n` +
+      `Publications:\n` +
+      docLines;
+
+    let group = {
+      group_name: `Cluster ${k + 1}`,
+      theme_label: conceptStr || `Cluster ${k + 1}`,
+      theme_summary: '',
+      notes: ''
+    };
+
+    try {
+      const raw = await openaiChatDirect(
+        [
+          {
+            role: 'system',
+            content: 'You are an expert research strategist mapping institutional research themes.'
+          },
+          {
+            role: 'user',
+            content: prompt
+          }
+        ],
+        { temperature: 0.3, max_tokens: 420 }
+      );
+
+      const parsed = extractJson(raw) || {};
+      if (parsed && typeof parsed === 'object') {
+        group = { ...group, ...parsed };
       }
     } catch (e) {
-      console.warn('Invisible University: prompt for min cluster size failed, using default.', e);
+      console.warn('Invisible University lens: LLM labelling error', e);
     }
 
-    // 1) Collect *all* visible items with abstracts (institution slice + filters)
-    const corpusItems = collectVisibleForSynthesis(Infinity);
-    const totalVisible = Array.isArray(visibleMask)
-      ? visibleMask.reduce((a, b) => a + (b ? 1 : 0), 0)
-      : nodes.length;
-
-    if (!corpusItems.length) {
-      openSynthPanel('Invisible University — no abstracts available');
-      setSynthHtml('<div style="opacity:.8">No visible publications with abstracts were found. Try widening your filters.</div>');
-      setSynthBodyText('', 'invisible_university.md');
-      return;
+    // De-duplicate generic / repeated names
+    let gName = String(group.group_name || group.theme_label || '').trim() || `Cluster ${k + 1}`;
+    let norm = gName.toLowerCase();
+    if (usedNames.has(norm)) {
+      const suffix = conceptStr ? ` — ${conceptStr}` : ` — ${k + 1}`;
+      gName = gName + suffix;
+      norm = gName.toLowerCase();
     }
+    usedNames.add(norm);
 
-    // Helper: primary OpenAlex concept (highest score, then lowest level)
-    function getPrimaryConceptForItem(it) {
-      const idx = it.idx ?? it.id;
-      const item = itemsData?.[idx] || {};
-      const w = item.openalex || {};
-      const arr = Array.isArray(w.concepts) ? w.concepts : [];
-      if (!arr.length) return null;
+    const label = String(group.theme_label || conceptStr || gName).trim();
+    const shortSummary = String(group.theme_summary || group.notes || '').trim();
 
-      let best = null;
-      for (const c of arr) {
-        if (!c) continue;
-        if (!best) { best = c; continue; }
-        const sA = Number(c.score || 0);
-        const sB = Number(best.score || 0);
-        if (sA > sB) { best = c; continue; }
-        if (sA === sB) {
-          const la = Number.isFinite(c.level) ? c.level : 99;
-          const lb = Number.isFinite(best.level) ? best.level : 99;
-          if (la < lb) best = c;
-        }
-      }
-      if (!best) return null;
-      return String(best.display_name || best.id || '').trim() || null;
-    }
+    const authorList = topAuthors.length
+      ? topAuthors.map(a => `${esc(a.name)} (${a.count})`).join(', ')
+      : '—';
 
-    // 2) Group all items into buckets by primary concept
-    const byConcept = new Map();  // conceptName -> item[]
-    const miscBucket = [];        // items with no concept or tiny buckets
+    const conceptHtml = conceptStr
+      ? `<p><strong>Top OpenAlex concepts:</strong> ${esc(conceptStr)}</p>`
+      : '';
 
-    for (const it of corpusItems) {
-      const concept = getPrimaryConceptForItem(it);
-      if (!concept) {
-        miscBucket.push(it);
-        continue;
-      }
-      if (!byConcept.has(concept)) byConcept.set(concept, []);
-      byConcept.get(concept).push(it);
-    }
+    const authorHtml = `<p><strong>Frequent authors in this cluster:</strong> ${authorList}</p>`;
 
-    // 3) Move small concept buckets into misc
-    for (const [concept, arr] of Array.from(byConcept.entries())) {
-      if (arr.length < INV_UNI_MIN_CONCEPT_SIZE) {
-        miscBucket.push(...arr);
-        byConcept.delete(concept);
-      }
-    }
-
-    // Helper: turn a list into one or more sorted batches
-    const batches = [];
-    function addBatchesFromList(label, arr) {
-      if (!arr || !arr.length) return;
-      // Sort by centrality so the most "important" items go first
-      arr.sort((a, b) => {
-        const ia = a.idx ?? a.id;
-        const ib = b.idx ?? b.id;
-        return (nodes[ib]?.cbc || 0) - (nodes[ia]?.cbc || 0);
-      });
-      for (let off = 0; off < arr.length; off += INV_UNI_BATCH_SIZE) {
-        if (batches.length >= INV_UNI_MAX_BATCHES) break;
-        const slice = arr.slice(off, off + INV_UNI_BATCH_SIZE);
-        batches.push({ label, items: slice });
-      }
-    }
-
-    for (const [concept, arr] of byConcept.entries()) {
-      addBatchesFromList(concept, arr);
-    }
-    if (miscBucket.length) {
-      addBatchesFromList('Miscellaneous / weak or missing concepts', miscBucket);
-    }
-
-    // Fallback: if everything somehow got filtered out
-    if (!batches.length) {
-      addBatchesFromList('All visible abstracts', corpusItems);
-    }
-
-    const headerGlobal =
-      `Invisible University — processed ${corpusItems.length} abstracts ` +
-      `(from ${totalVisible} visible nodes) in ${batches.length} concept-guided batch${batches.length === 1 ? '' : 'es'}.`;
-
-    openSynthPanel(headerGlobal);
-    setSynthHtml('<div style="opacity:.8">Analysing abstracts by OpenAlex concept buckets…</div>');
-    setSynthBodyText('', 'invisible_university.md');
-
-    // 4) Set up global markdown + HTML accumulators
-    const bodyLines = [];
-    bodyLines.push('# Invisible University — Thematic Research Groups');
-    bodyLines.push('');
-    bodyLines.push(
-      `Analysed **${corpusItems.length}** abstracts (from **${totalVisible}** visible nodes), ` +
-      `grouped first by primary OpenAlex concept and then clustered with the AI lens.`
+    htmlPieces.push(
+      `<h3>${esc(gName)}</h3>` +
+      `<p><em>${esc(label)}</em></p>` +
+      (shortSummary ? `<p>${esc(shortSummary)}</p>` : '') +
+      conceptHtml +
+      authorHtml +
+      `<p><strong>Cluster size:</strong> ${clusterDocs.length} publications.</p>`
     );
-    bodyLines.push('');
-    bodyLines.push(
-      `Concept buckets smaller than **${INV_UNI_MIN_CONCEPT_SIZE}** items are merged into a miscellaneous group.`
+
+    const mdLines = [];
+    mdLines.push(`### ${gName}`);
+    if (label) mdLines.push(`*Theme:* ${label}`);
+    if (shortSummary) mdLines.push(`*Summary:* ${shortSummary}`);
+    if (conceptStr) mdLines.push(`*Top OpenAlex concepts:* ${conceptStr}`);
+    if (topAuthors.length) {
+      mdLines.push(
+        `*Frequent authors:* ` +
+        topAuthors.map(a => `${a.name} (${a.count})`).join(', ')
+      );
+    }
+    mdLines.push('');
+    mdPieces.push(mdLines.join('\n'));
+
+    // Place an AI footprint for this cluster
+    addAIFootprintFromItems?.(
+      'invisible_university',
+      clusterDocs,
+      mdLines.join('\n'),
+      gName
     );
-    bodyLines.push('');
 
-    const clustersHtmlChunks = [];
-
-    // Little UI helper to show progress
-    function updateProgress(batchIdx) {
-      const done = batchIdx + 1;
-      const total = batches.length;
-      const msg =
-        `<div style="opacity:.8;font-size:12px;margin-bottom:6px">` +
-        `Processing batch ${done} of ${total}…</div>`;
-      setSynthHtml(msg);
-    }
-
-    // 5) Process each concept batch in turn
-    for (let bi = 0; bi < batches.length; bi++) {
-      const { label: conceptLabel, items } = batches[bi];
-      if (!items.length) continue;
-
-      updateProgress(bi);
-
-      // Number items for compact references in this batch
-      const numbered = items.map((it, idx) => ({
-        n: idx + 1,
-        ...it
-      }));
-      const byN = new Map(numbered.map(it => [it.n, it]));
-
-      // Build compact corpus text
-      const corpusLines = numbered.map(it => {
-        const auth = Array.isArray(it.authors) ? it.authors.join(', ') : (it.authors || '');
-        const absShort = String(it.abstract || '')
-          .slice(0, INV_UNI_ABS_CHARS)
-          .replace(/\s+/g, ' ')
-          .trim();
-        const yearStr  = it.year ? ` (${it.year})` : '';
-        const venueStr = it.venue ? ` — ${it.venue}` : '';
-        return `[${it.n}] ${it.title || 'Untitled'}${yearStr}${venueStr}
-Authors: ${auth || 'Unknown'}
-Abstract: ${absShort}`;
-      }).join('\n\n');
-
-      const batchHeader = `Concept: ${conceptLabel} — ${numbered.length} abstracts (batch ${bi + 1}/${batches.length})`;
-
-      const systemPrompt =
-`You are analysing a subset of a university's publication corpus to uncover "Invisible University" research groupings.
-
-All publications in this subset are loosely connected by a primary OpenAlex concept:
-  "${conceptLabel}"
-
-You receive a numbered list of publications with titles, authors, venues and abstracts.
-Your job is to:
-
-1. Group the publications into a SMALL number of thematic clusters (typically 3–8 in this subset).
-2. Each cluster should be defined primarily by topic, but you should also
-   notice overlapping authorships (people who appear on multiple papers) and
-   favour putting related work by overlapping teams into the same cluster when sensible.
-3. For each cluster, you will:
-   - Assign a short "theme_label" (e.g. "Synthetic Biology for the Built Environment").
-   - Write a 2–4 sentence "theme_summary" capturing what the cluster is about.
-   - Suggest a "suggested_group_name" that could be used as a research group or lab name.
-   - Write a 2–4 sentence "suggested_group_summary" describing that hypothetical group.
-   - List the member_indices: the [n] ids of the publications that belong to this cluster.
-4. Also provide one short "global_notes" string capturing any cross-cutting themes or gaps
-   you notice within THIS subset.
-
-Return STRICT JSON only, with this shape:
-
-{
-  "clusters": [
-    {
-      "id": 1,
-      "theme_label": "…",
-      "theme_summary": "…",
-      "suggested_group_name": "…",
-      "suggested_group_summary": "…",
-      "member_indices": [1, 4, 7, 8]
-    }
-  ],
-  "global_notes": "…"
-}
-
-// (inside the systemPrompt template literal)
-Rules:
-- Do NOT invent new publication ids; use only the given [n] numbers.
-- Every used id must correspond to at least one abstract in the input.
-- It is acceptable for some publications to be unassigned if they do not clearly fit (simply omit them).
-- Aim for clusters of size at least ${minClusterSize} where possible, and use between 2 and ${Math.max(2, Math.round(numbered.length / minClusterSize))} clusters unless the subset is extremely small.`;
-
-      const userPrompt =
-`Subset corpus (${numbered.length} publications) for concept "${conceptLabel}":
-
-${corpusLines}
-
-Now perform the clustering and return ONLY the JSON object, no explanation.`;
-
-      const messages = [
-        { role: 'system', content: systemPrompt },
-        { role: 'user',   content: userPrompt }
-      ];
-
-      let raw;
-      try {
-        raw = await openaiChatDirect(messages, {
-          temperature: 0.25,
-          max_tokens: 2200
-        });
-      } catch (err) {
-        console.error('Invisible University batch failed (API error):', err);
-        // Continue to next batch but record the failure
-        bodyLines.push(`### ${batchHeader}`);
-        bodyLines.push('');
-        bodyLines.push(`> Batch failed with an API error: ${String(err.message || err)}`);
-        bodyLines.push('');
-        continue;
-      }
-
-      const parsed = extractInvisibleUniJson(raw);
-      if (!parsed || !Array.isArray(parsed.clusters) || !parsed.clusters.length) {
-        const safeOut = esc(String(raw || '')).slice(0, 2000);
-        bodyLines.push(`### ${batchHeader}`);
-        bodyLines.push('');
-        bodyLines.push('> AI output for this batch could not be parsed as JSON. The raw text is available in the saved synthesis panel.');
-        bodyLines.push('');
-        // Keep the raw around for debugging
-        setSynthBodyText(String(raw || ''), 'invisible_university_raw_batch.md');
-        continue;
-      }
-
-      const clusters = parsed.clusters;
-      const globalNotes = String(parsed.global_notes || parsed.globalNotes || '').trim();
-
-      if (globalNotes) {
-        bodyLines.push(`> [${conceptLabel}] ${globalNotes.replace(/\n+/g, ' ').trim()}`);
-        bodyLines.push('');
-      }
-
-      // For HTML grouping, add a concept header once per batch
-      clustersHtmlChunks.push(`
-        <div style="margin:10px 0 4px 0;font-weight:600;font-size:13px;opacity:.9">
-          ${esc(conceptLabel)} — batch ${bi + 1}/${batches.length}
-        </div>
-      `);
-
-      // 6) For each cluster in this batch, build markdown + HTML + AI footprints
-      clusters.forEach((c, idx) => {
-        const rawIndices = Array.isArray(c.member_indices) ? c.member_indices
-                          : Array.isArray(c.members) ? c.members
-                          : [];
-        const memberNs = rawIndices
-          .map(x => Number(x))
-          .filter(n => Number.isFinite(n) && n >= 1 && n <= numbered.length);
-
-const docs = [];
-for (const n of memberNs) {
-  const d = byN.get(n);
-  if (d) docs.push(d);
-}
-if (!docs.length || docs.length < minClusterSize) return; // skip empty or too-small clusters
-
-
-        const themeLabel   = String(c.theme_label || '').trim() || `Cluster ${idx + 1}`;
-        const themeSummary = String(c.theme_summary || '').trim();
-        const groupName    = String(c.suggested_group_name || '').trim() || `Research Group ${idx + 1}`;
-        const groupSummary = String(c.suggested_group_summary || '').trim();
-
-        // Author stats (top 10)
-        const authorStats = computeInvisibleUniAuthorStats(docs).slice(0, 10);
-
-        // Markdown body
-        bodyLines.push(`## ${groupName}`);
-        bodyLines.push('');
-        bodyLines.push(`**Theme label:** ${themeLabel}`);
-        bodyLines.push('');
-        if (themeSummary) {
-          bodyLines.push(themeSummary);
-          bodyLines.push('');
-        }
-        if (groupSummary) {
-          bodyLines.push(groupSummary);
-          bodyLines.push('');
-        }
-
-        if (authorStats.length) {
-          bodyLines.push('**Key contributors:**');
-          authorStats.forEach(a => {
-            bodyLines.push(`- ${a.name} (${a.count} publication${a.count === 1 ? '' : 's'})`);
-          });
-          bodyLines.push('');
-        }
-
-        bodyLines.push('**Representative publications:**');
-        docs.slice(0, 12).forEach(d => {
-          const mainAuthor = Array.isArray(d.authors) && d.authors.length
-            ? d.authors[0]
-            : 'Anonymous';
-          const yr = d.year || '';
-          bodyLines.push(`- ${mainAuthor}${yr ? ' (' + yr + ')' : ''}: ${d.title}`);
-        });
-        bodyLines.push('');
-
-        // HTML card for this cluster
-        const repsHtml = docs.slice(0, 8).map(d => {
-          const mainAuthor = Array.isArray(d.authors) && d.authors.length
-            ? d.authors[0]
-            : 'Anonymous';
-          const yr = d.year || '';
-          return `<li>${esc(mainAuthor)}${yr ? ' (' + yr + ')' : ''}: ${esc(d.title || '')}</li>`;
-        }).join('');
-
-        const authorsHtml = authorStats.length
-          ? '<ul style="margin:0 0 0 16px;padding:0;font-size:12px;line-height:1.4;">' +
-              authorStats.map(a => `<li>${esc(a.name)} (${a.count})</li>`).join('') +
-            '</ul>'
-          : '<div style="opacity:.7;font-size:12px;">(No clear repeat authors in this cluster.)</div>';
-
-        clustersHtmlChunks.push(`
-          <div style="margin:6px 0 10px 0;padding:8px 10px;border-radius:8px;border:1px solid rgba(255,255,255,0.12);background:rgba(0,0,0,0.35);">
-            <div style="font-weight:600;font-size:13px;margin-bottom:2px;">${esc(groupName)}</div>
-            <div style="opacity:.8;font-size:12px;margin-bottom:2px;">${esc(themeLabel)}</div>
-            ${themeSummary ? `<div style="opacity:.85;font-size:12px;margin-bottom:4px;">${esc(themeSummary)}</div>` : ''}
-            ${groupSummary ? `<div style="opacity:.85;font-size:12px;margin-bottom:6px;">${esc(groupSummary)}</div>` : ''}
-            <div style="font-size:12px;font-weight:500;margin-bottom:2px;">Key contributors</div>
-            ${authorsHtml}
-            <div style="font-size:12px;font-weight:500;margin-top:6px;margin-bottom:2px;">Representative publications</div>
-            <ul style="margin:0 0 0 16px;padding:0;font-size:12px;line-height:1.4;">${repsHtml}</ul>
-          </div>
-        `);
-
-        // 7) One AI footprint per cluster
-        try {
-          const footprintMd = [
-            `# ${groupName}`,
-            '',
-            `**Concept bucket:** ${conceptLabel}`,
-            '',
-            `**Theme label:** ${themeLabel}`,
-            '',
-            themeSummary || '',
-            '',
-            groupSummary ? `**Group summary:** ${groupSummary}` : '',
-            '',
-            '**Representative publications:**',
-            '',
-            docs.slice(0, 12).map(d => {
-              const mainAuthor = Array.isArray(d.authors) && d.authors.length
-                ? d.authors[0]
-                : 'Anonymous';
-              const yr = d.year || '';
-              return `- ${mainAuthor}${yr ? ' (' + yr + ')' : ''}: ${d.title}`;
-            }).join('\n'),
-            '',
-            authorStats.length ? '**Key contributors:**' : '',
-            authorStats.length ? '' : '',
-            authorStats.map(a => `- ${a.name} (${a.count} publication${a.count === 1 ? '' : 's'})`).join('\n')
-          ].join('\n');
-
-          addAIFootprintFromItems(
-            'invisible-university',
-            docs,
-            footprintMd,
-            groupName
-          );
-        } catch (e) {
-          console.warn('Invisible University: footprint failed for batch cluster', idx, e);
-        }
-      });
-    }
-
-    // 8) Final panel + markdown
-    const bodyMd = bodyLines.join('\n');
-    const clustersHtml = clustersHtmlChunks.join('');
-
-    const panelHtml = `
-      <div style="margin-bottom:8px;font-weight:600;">${esc(headerGlobal)}</div>
-      <div style="opacity:.8;margin-bottom:8px;font-size:12px;">
-        Clusters are inferred in batches grouped by primary OpenAlex concept. Smaller concept buckets are merged into a miscellaneous group.
-      </div>
-      ${clustersHtml}
-    `;
-
-    setSynthHtml(panelHtml);
-    setSynthBodyText(bodyMd, 'invisible_university.md');
-    redraw?.();
-
-  } catch (err) {
-    console.error('Invisible University lens failed:', err);
-    openSynthPanel('Invisible University — error');
-    setSynthHtml(`<div style="opacity:.85">The lens failed with an error: ${esc(err.message || String(err))}</div>`);
-    setSynthBodyText('', 'invisible_university_error.md');
+    showLoading(
+      `Invisible University: labelled ${k + 1}/${clusters.length} clusters…`,
+      0.4 + 0.5 * ((k + 1) / clusters.length)
+    );
+    if (typeof nextTick === 'function') await nextTick();
   }
+
+  hideLoading();
+
+  const headerHtml =
+    `<h2>Invisible University</h2>` +
+    `<p>Clustered ${usedItems.length.toLocaleString()} of ` +
+    `${allItems.length.toLocaleString()} visible works into ` +
+    `${clusters.length} research groups (minimum ${minClusterSize} publications per group).</p>`;
+
+  setSynthHtml(headerHtml + htmlPieces.join('<hr/>'));
+  setSynthBodyText(mdPieces.join('\n\n---\n\n'));
 }
+
