@@ -51,7 +51,7 @@ function setClusterMin(v) {
 // These values are deliberately conservative so we don't freeze the browser.
 // You can push them up on a powerful machine.
 
-const INV_UNI_MAX_DOCS              = 12000;    // hard cap of docs to cluster per run
+const INV_UNI_MAX_DOCS              = 15000;    // hard cap of docs to cluster per run
 const INV_UNI_TFIDF_VOCAB           = 500;    // max vocabulary size
 const INV_UNI_MIN_DF                = 2;      // ignore terms that appear in < 2 docs
 const INV_UNI_MAX_DF_FRAC           = 0.65;   // ignore terms in > 65% docs
@@ -14777,73 +14777,118 @@ function cosineSimVec(a, b) {
   return s;
 }
 
-// Simple density-based clustering over TF–IDF with fixed similarity threshold.
-// This behaves like a lightweight HDBSCAN/DBSCAN: clusters emerge where
-// points have enough high-similarity neighbours, no k is required.
-function clusterInvisibleUniBySimilarity(matrix, densityMin) {
-const n = matrix.length | 0;
+// K-means style clustering over TF–IDF vectors.
+// - Chooses k automatically based on corpus size and desired group size.
+// - Returns an array of labels (0..k-1) and marks tiny clusters as noise (-1).
+function clusterInvisibleUniBySimilarity(matrix, minClusterSize) {
+  const n = matrix.length | 0;
   const labels = new Array(n).fill(-1);
   if (!n) return labels;
 
-  const MIN = Math.max(3, densityMin | 0);
-  const SIM = (typeof INV_UNI_SIM_THRESHOLD === 'number' ? INV_UNI_SIM_THRESHOLD : 0.35);
+  const dim = (matrix[0] && matrix[0].length) | 0;
+  if (!dim) return labels;
 
-  let cid = 0;
+  const MIN = Math.max(3, minClusterSize | 0);
 
-  for (let i = 0; i < n; i++) {
-    if (labels[i] !== -1) continue; // already assigned
+  // Choose k so that average cluster size is around 2–4× the requested minimum,
+  // but keep k in a sensible range.
+  const targetSize = Math.max(MIN * 3, 30); // aim for ~30+ docs per cluster
+  let k = Math.round(n / targetSize);
+  if (!Number.isFinite(k) || k < 2) k = 2;
+  if (k > 80) k = 80;
+  if (k > n) k = n;
 
-    // Find neighbours of i
-    const neighbours = [];
-    for (let j = 0; j < n; j++) {
-      if (j === i) continue;
-      const sim = cosineSimVec(matrix[i], matrix[j]);
-      if (sim >= SIM) neighbours.push(j);
+  // Initialise centroids by sampling along the dataset (deterministic-ish)
+  const centroids = new Array(k);
+  for (let c = 0; c < k; c++) {
+    const idx = Math.floor((c + 0.5) * n / k);
+    const src = matrix[idx];
+    const centroid = new Float32Array(dim);
+    for (let d = 0; d < dim; d++) centroid[d] = src[d];
+    centroids[c] = centroid;
+  }
+
+  const maxIter = 25;
+  const counts = new Array(k);
+  const sums = new Array(k);
+  for (let c = 0; c < k; c++) sums[c] = new Float32Array(dim);
+
+  let changed = 0;
+
+  for (let iter = 0; iter < maxIter; iter++) {
+    changed = 0;
+
+    // Reset accumulators
+    for (let c = 0; c < k; c++) {
+      counts[c] = 0;
+      const s = sums[c];
+      for (let d = 0; d < dim; d++) s[d] = 0;
     }
 
-    if (neighbours.length + 1 < MIN) {
-      // treat as noise for now
-      labels[i] = -1;
-      continue;
-    }
+    // Assign each point to nearest centroid
+    for (let i = 0; i < n; i++) {
+      const v = matrix[i];
+      let bestC = 0;
+      let bestDist = Infinity;
 
-    // Seed a new cluster
-    labels[i] = cid;
-    const stack = neighbours.slice();
-    for (const nb of neighbours) labels[nb] = cid;
-
-    // Grow cluster by density reachability
-    while (stack.length) {
-      const p = stack.pop();
-      for (let q = 0; q < n; q++) {
-        if (q === p) continue;
-        if (labels[q] === cid) continue;  // already in cluster
-        const s = cosineSimVec(matrix[p], matrix[q]);
-        if (s >= SIM) {
-          labels[q] = cid;
-          stack.push(q);
+      for (let c = 0; c < k; c++) {
+        const cent = centroids[c];
+        let dist = 0;
+        for (let d = 0; d < dim; d++) {
+          const diff = v[d] - cent[d];
+          dist += diff * diff;
+        }
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestC = c;
         }
       }
+
+      if (labels[i] !== bestC) {
+        labels[i] = bestC;
+        changed++;
+      }
+
+      // accumulate for centroid recomputation
+      const s = sums[bestC];
+      for (let d = 0; d < dim; d++) s[d] += v[d];
+      counts[bestC]++;
     }
 
-    cid++;
+    // Recompute centroids
+    for (let c = 0; c < k; c++) {
+      const count = counts[c];
+      const cent = centroids[c];
+      if (!count) {
+        // Empty cluster: reinitialise to a random point
+        const idx = (Math.random() * n) | 0;
+        const v = matrix[idx];
+        for (let d = 0; d < dim; d++) cent[d] = v[d];
+        continue;
+      }
+      const s = sums[c];
+      const inv = 1 / count;
+      for (let d = 0; d < dim; d++) cent[d] = s[d] * inv;
+    }
+
+    // Early stop if nothing moved
+    if (!changed) break;
   }
 
-  // Drop tiny clusters (safety double-check)
-  const counts = new Map();
+  // Mark clusters smaller than MIN as noise (-1)
+  const clusterSizes = new Array(k).fill(0);
   for (let i = 0; i < n; i++) {
-    const lab = labels[i];
-    if (lab < 0) continue;
-    counts.set(lab, (counts.get(lab) || 0) + 1);
+    const c = labels[i];
+    if (c >= 0) clusterSizes[c]++;
   }
   for (let i = 0; i < n; i++) {
-    const lab = labels[i];
-    if (lab < 0) continue;
-    if ((counts.get(lab) || 0) < MIN) labels[i] = -1;
+    const c = labels[i];
+    if (c >= 0 && clusterSizes[c] < MIN) labels[i] = -1;
   }
 
   return labels;
 }
+
 
 
 
@@ -14884,7 +14929,7 @@ async function runInvisibleUniversityLens() {
   }
 
   // Hard cap to avoid O(N²) explosion
-  const maxDocs = window.INV_UNI_MAX_DOCS || 2000;
+  const maxDocs = window.INV_UNI_MAX_DOCS || 15000;
 
   // Bias towards more "central" / cited publications if we need to trim
   const sorted = allItems.slice().sort((a, b) => {
@@ -14897,6 +14942,14 @@ async function runInvisibleUniversityLens() {
     return cb - ca;
   });
   const usedItems = sorted.slice(0, maxDocs);
+
+    console.log(
+    'Invisible University: using',
+    usedItems.length,
+    'of',
+    allItems.length,
+    'visible works for k-means clustering'
+  );
 
   openSynthPanel(
     `Invisible University — clustering ${usedItems.length.toLocaleString()} of ` +
