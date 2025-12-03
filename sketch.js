@@ -14884,7 +14884,7 @@ async function runInvisibleUniversityLens() {
   }
 
   // Hard cap to avoid O(N²) explosion
-  const maxDocs = window.INV_UNI_MAX_DOCS || 800;
+  const maxDocs = window.INV_UNI_MAX_DOCS || 2000;
 
   // Bias towards more "central" / cited publications if we need to trim
   const sorted = allItems.slice().sort((a, b) => {
