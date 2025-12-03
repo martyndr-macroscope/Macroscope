@@ -59,7 +59,7 @@ const INV_UNI_SIM_THRESHOLD         = 0.35;   // cosine similarity for edges (0â
 const INV_UNI_DEFAULT_MIN_CLUSTER_SIZE = 8;   // default minimum publications per group
 
 // Backwards-compat alias (no longer used as a global cap)
-const INV_UNI_MAX_ITEMS = INV_UNI_BATCH_SIZE;
+//const INV_UNI_MAX_ITEMS = INV_UNI_BATCH_SIZE;
 
 
 let FORCE_TICKS_PER_FRAME = 3; // try 3â€“5 on desktop GPUs
