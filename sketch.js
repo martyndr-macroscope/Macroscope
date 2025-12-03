@@ -14641,6 +14641,45 @@ function computeInvisibleUniAuthorStats(docs) {
   out.sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
   return out;
 }
+// Primary OpenAlex concept helper used by Invisible University
+// Picks the concept with highest score, breaking ties by lowest level.
+function getPrimaryConceptForItem(it) {
+  const idx = it.idx ?? it.id;
+  const item = itemsData?.[idx] || {};
+  const w = item.openalex || {};
+  const arr = Array.isArray(w.concepts) ? w.concepts : [];
+  if (!arr.length) return null;
+
+  let best = null;
+  for (const c of arr) {
+    if (!c) continue;
+    if (!best) { 
+      best = c; 
+      continue; 
+    }
+
+    const sA = Number(c.score || 0);
+    const sB = Number(best.score || 0);
+
+    // Prefer higher score…
+    if (sA > sB) { 
+      best = c; 
+      continue; 
+    }
+
+    // …and on score ties, prefer more specific (lower level)
+    if (sA === sB) {
+      const la = Number.isFinite(c.level) ? c.level : 99;
+      const lb = Number.isFinite(best.level) ? best.level : 99;
+      if (la < lb) best = c;
+    }
+  }
+
+  if (!best) return null;
+  return String(best.display_name || best.id || '').trim() || null;
+}
+
+
 // ============================================================================
 //  Invisible University Lens
 //  - Clusters visible abstracts into thematic groups
