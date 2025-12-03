@@ -55,7 +55,7 @@ const INV_UNI_MAX_DOCS              = 2000;    // hard cap of docs to cluster pe
 const INV_UNI_TFIDF_VOCAB           = 500;    // max vocabulary size
 const INV_UNI_MIN_DF                = 2;      // ignore terms that appear in < 2 docs
 const INV_UNI_MAX_DF_FRAC           = 0.65;   // ignore terms in > 65% docs
-const INV_UNI_SIM_THRESHOLD         = 0.25;   // cosine similarity for edges (0–1)
+const INV_UNI_SIM_THRESHOLD         = 0.48;   // cosine similarity for edges (0–1)
 const INV_UNI_DEFAULT_MIN_CLUSTER_SIZE = 8;   // default minimum publications per group
 
 // Backwards-compat alias (no longer used as a global cap)
@@ -14780,12 +14780,12 @@ function cosineSimVec(a, b) {
 // Simple density-based clustering over TF–IDF with fixed similarity threshold.
 // This behaves like a lightweight HDBSCAN/DBSCAN: clusters emerge where
 // points have enough high-similarity neighbours, no k is required.
-function clusterInvisibleUniBySimilarity(matrix, minClusterSize) {
-  const n = matrix.length | 0;
+function clusterInvisibleUniBySimilarity(matrix, densityMin) {
+const n = matrix.length | 0;
   const labels = new Array(n).fill(-1);
   if (!n) return labels;
 
-  const MIN = Math.max(3, minClusterSize | 0);
+  const MIN = Math.max(3, densityMin | 0);
   const SIM = (typeof INV_UNI_SIM_THRESHOLD === 'number' ? INV_UNI_SIM_THRESHOLD : 0.35);
 
   let cid = 0;
@@ -14971,6 +14971,9 @@ async function runInvisibleUniversityLens() {
 
   // --- TF–IDF + clustering ---------------------------------------------------
   const { matrix } = buildInvisibleUniTfIdf(docs);
+
+// Use a softer density requirement: roughly half the requested group size
+const densityMin = Math.max(3, Math.round(minClusterSize / 2));
 
   showLoading('Invisible University: clustering abstracts…', 0.35);
   if (typeof nextTick === 'function') await nextTick();
