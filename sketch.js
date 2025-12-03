@@ -51,11 +51,11 @@ function setClusterMin(v) {
 // These values are deliberately conservative so we don't freeze the browser.
 // You can push them up on a powerful machine.
 
-const INV_UNI_MAX_DOCS              = 800;    // hard cap of docs to cluster per run
+const INV_UNI_MAX_DOCS              = 2000;    // hard cap of docs to cluster per run
 const INV_UNI_TFIDF_VOCAB           = 500;    // max vocabulary size
 const INV_UNI_MIN_DF                = 2;      // ignore terms that appear in < 2 docs
 const INV_UNI_MAX_DF_FRAC           = 0.65;   // ignore terms in > 65% docs
-const INV_UNI_SIM_THRESHOLD         = 0.35;   // cosine similarity for edges (0–1)
+const INV_UNI_SIM_THRESHOLD         = 0.25;   // cosine similarity for edges (0–1)
 const INV_UNI_DEFAULT_MIN_CLUSTER_SIZE = 8;   // default minimum publications per group
 
 // Backwards-compat alias (no longer used as a global cap)
@@ -14985,11 +14985,20 @@ async function runInvisibleUniversityLens() {
     if (!tmpClusters.has(lab)) tmpClusters.set(lab, { id: lab, docs: [] });
     tmpClusters.get(lab).docs.push(docs[i]);
   }
+  // DEBUG: log how many ended up where
+const noiseCount = labels.filter(l => l < 0).length;
+console.log('Invisible University:',
+  'docs:', docs.length,
+  'clusters before size filter:', tmpClusters.size,
+  'noise points:', noiseCount
+);
 
   // Filter by minClusterSize (double-safety)
   let clusters = Array.from(tmpClusters.values())
     .filter(c => c.docs.length >= minClusterSize);
-
+console.log('Invisible University: clusters after min size filter:',
+  clusters.map(c => c.docs.length)
+);
   if (!clusters.length) {
     hideLoading();
     setSynthHtml(
