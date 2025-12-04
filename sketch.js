@@ -51,12 +51,19 @@ function setClusterMin(v) {
 // These values are deliberately conservative so we don't freeze the browser.
 // You can push them up on a powerful machine.
 
-const INV_UNI_MAX_DOCS              = 15000;    // hard cap of docs to cluster per run
-const INV_UNI_TFIDF_VOCAB           = 500;    // max vocabulary size
-const INV_UNI_MIN_DF                = 2;      // ignore terms that appear in < 2 docs
-const INV_UNI_MAX_DF_FRAC           = 0.65;   // ignore terms in > 65% docs
-const INV_UNI_SIM_THRESHOLD         = 0.48;   // cosine similarity for edges (0–1)
-const INV_UNI_DEFAULT_MIN_CLUSTER_SIZE = 8;   // default minimum publications per group
+// --- Invisible University lens config ---------------------------------------
+
+const INV_UNI_MAX_DOCS                 = 15000; // hard cap of docs to cluster per run
+const INV_UNI_TFIDF_VOCAB              = 500;   // max vocabulary size
+const INV_UNI_MIN_DF                   = 2;     // ignore terms that appear in < 2 docs
+const INV_UNI_MAX_DF_FRAC              = 0.65;  // ignore terms in > 65% docs
+const INV_UNI_DEFAULT_MIN_CLUSTER_SIZE = 8;     // minimum publications per group (UI default)
+
+// New: target cluster size and purity controls for k-means pipeline
+const INV_UNI_TARGET_CLUSTER_SIZE      = 40;    // aim for ~40 docs per theme on average
+const INV_UNI_MIN_PURITY_SIM           = 0.12;  // floor for doc–centroid similarity
+const INV_UNI_PURITY_STD_MULT          = 0.5;   // how aggressively to prune (μ - 0.5σ)
+
 
 // Backwards-compat alias (no longer used as a global cap)
 //const INV_UNI_MAX_ITEMS = INV_UNI_BATCH_SIZE;
@@ -14732,6 +14739,23 @@ function parseInvisibleTopicsResponse(raw) {
 async function ensureInvisibleUniTopicsForItems(items) {
   if (!Array.isArray(items) || !items.length || !itemsData) return;
 
+    // Fast path: if almost all items already have fingerprints, skip
+  let withTopics = 0;
+  for (const it of items) {
+    const idx = it.idx ?? it.id;
+    if (!Number.isFinite(idx)) continue;
+    const meta = itemsData?.[idx];
+    if (meta && Array.isArray(meta.invisibleUniTopics) && meta.invisibleUniTopics.length) {
+      withTopics++;
+    }
+  }
+  if (withTopics && withTopics >= 0.98 * items.length) {
+    console.log('Invisible University: reusing existing topic fingerprints for',
+      withTopics, 'of', items.length, 'items');
+    return;
+  }
+
+
   const toProcess = [];
 
   for (const it of items) {
@@ -14917,6 +14941,7 @@ function buildInvisibleUniTfIdf(docs) {
 }
 
 // Cosine similarity for already normalised TF–IDF vectors
+// Cosine similarity for already normalised TF–IDF vectors
 function cosineSimVec(a, b) {
   let s = 0;
   const L = a.length | 0;
@@ -14924,9 +14949,10 @@ function cosineSimVec(a, b) {
   return s;
 }
 
-// K-means style clustering over TF–IDF vectors.
-// - Chooses k automatically based on corpus size and desired group size.
-// - Returns an array of labels (0..k-1) and marks tiny clusters as noise (-1).
+// K-means style clustering over TF–IDF vectors with per-cluster purity pruning.
+// - Chooses k so that average cluster size ~ INV_UNI_TARGET_CLUSTER_SIZE.
+// - Drops clusters smaller than minClusterSize.
+// - Within each cluster, drops docs that are too far from the centroid.
 function clusterInvisibleUniBySimilarity(matrix, minClusterSize) {
   const n = matrix.length | 0;
   const labels = new Array(n).fill(-1);
@@ -14936,13 +14962,11 @@ function clusterInvisibleUniBySimilarity(matrix, minClusterSize) {
   if (!dim) return labels;
 
   const MIN = Math.max(3, minClusterSize | 0);
+  const targetSize = Math.max(INV_UNI_TARGET_CLUSTER_SIZE || 40, MIN * 2);
 
-  // Choose k so that average cluster size is around 2–4× the requested minimum,
-  // but keep k in a sensible range.
-  const targetSize = Math.max(MIN * 3, 30); // aim for ~30+ docs per cluster
   let k = Math.round(n / targetSize);
   if (!Number.isFinite(k) || k < 2) k = 2;
-  if (k > 80) k = 80;
+  if (k > 120) k = 120;
   if (k > n) k = n;
 
   // Initialise centroids by sampling along the dataset (deterministic-ish)
@@ -14960,10 +14984,8 @@ function clusterInvisibleUniBySimilarity(matrix, minClusterSize) {
   const sums = new Array(k);
   for (let c = 0; c < k; c++) sums[c] = new Float32Array(dim);
 
-  let changed = 0;
-
   for (let iter = 0; iter < maxIter; iter++) {
-    changed = 0;
+    let changed = 0;
 
     // Reset accumulators
     for (let c = 0; c < k; c++) {
@@ -14996,7 +15018,6 @@ function clusterInvisibleUniBySimilarity(matrix, minClusterSize) {
         changed++;
       }
 
-      // accumulate for centroid recomputation
       const s = sums[bestC];
       for (let d = 0; d < dim; d++) s[d] += v[d];
       counts[bestC]++;
@@ -15018,23 +15039,74 @@ function clusterInvisibleUniBySimilarity(matrix, minClusterSize) {
       for (let d = 0; d < dim; d++) cent[d] = s[d] * inv;
     }
 
-    // Early stop if nothing moved
-    if (!changed) break;
+    if (!changed) break; // converged
   }
 
-  // Mark clusters smaller than MIN as noise (-1)
-  const clusterSizes = new Array(k).fill(0);
+  // Compute per-cluster similarity distribution and prune outliers
+  const simLists = new Array(k);
+  for (let c = 0; c < k; c++) simLists[c] = [];
+
   for (let i = 0; i < n; i++) {
     const c = labels[i];
-    if (c >= 0) clusterSizes[c]++;
+    if (c < 0) continue;
+    const sim = cosineSimVec(matrix[i], centroids[c]);
+    simLists[c].push(sim);
+  }
+
+  const minPuritySim = INV_UNI_MIN_PURITY_SIM ?? 0.12;
+  const stdMult = INV_UNI_PURITY_STD_MULT ?? 0.5;
+
+  const keepCluster = new Array(k).fill(true);
+
+  for (let c = 0; c < k; c++) {
+    const sims = simLists[c];
+    if (!sims.length) {
+      keepCluster[c] = false;
+      continue;
+    }
+    // Drop clusters that are tiny from the outset
+    if (sims.length < MIN) {
+      keepCluster[c] = false;
+      continue;
+    }
+
+    let sum = 0;
+    for (const s of sims) sum += s;
+    const mean = sum / sims.length;
+
+    let varSum = 0;
+    for (const s of sims) {
+      const diff = s - mean;
+      varSum += diff * diff;
+    }
+    const std = sims.length > 1 ? Math.sqrt(varSum / (sims.length - 1)) : 0;
+
+    const thresh = Math.max(minPuritySim, mean - stdMult * std);
+
+    // Mark outliers as noise
+    for (let i = 0; i < n; i++) {
+      if (labels[i] !== c) continue;
+      const sim = cosineSimVec(matrix[i], centroids[c]);
+      if (sim < thresh) labels[i] = -1;
+    }
+  }
+
+  // Second pass: drop any clusters that fell below MIN after pruning
+  const counts2 = new Map();
+  for (let i = 0; i < n; i++) {
+    const lab = labels[i];
+    if (lab < 0) continue;
+    counts2.set(lab, (counts2.get(lab) || 0) + 1);
   }
   for (let i = 0; i < n; i++) {
-    const c = labels[i];
-    if (c >= 0 && clusterSizes[c] < MIN) labels[i] = -1;
+    const lab = labels[i];
+    if (lab < 0) continue;
+    if ((counts2.get(lab) || 0) < MIN) labels[i] = -1;
   }
 
   return labels;
 }
+
 
 
 
@@ -15108,7 +15180,7 @@ async function runInvisibleUniversityLens() {
     `${allItems.length.toLocaleString()} visible works`
   );
   setSynthHtml(
-    `<p>Building local TF–IDF vectors and clustering abstracts with a density-based algorithm (no k required)…</p>`
+    `<p>Building local TF–IDF vectors over LLM topics and clustering with a k-means style algorithm (auto-chosen k with purity pruning)…</p>`
   );
   setSynthBodyText('');
 
@@ -15116,7 +15188,7 @@ async function runInvisibleUniversityLens() {
   if (typeof nextTick === 'function') await nextTick();
 
   // --- Build enriched document descriptors ----------------------------------
-    const docs = [];
+      const docs = [];
   for (const it of usedItems) {
     const idx = it.idx ?? it.id;
     const item = itemsData?.[idx] || {};
@@ -15151,7 +15223,7 @@ async function runInvisibleUniversityLens() {
       (w.from_publication_date || '').slice(0, 4)
     ) || null;
 
-    // NEW: LLM-generated topical fingerprints (if present)
+    // LLM-generated topical fingerprints (if present)
     const aiTopics = Array.isArray(item.invisibleUniTopics)
       ? item.invisibleUniTopics
           .map(s => String(s || '').trim())
@@ -15159,13 +15231,12 @@ async function runInvisibleUniversityLens() {
       : [];
 
     const topicsText = aiTopics.join(' . ');
+    const titleText  = it.title || w.display_name || '';
 
+    // For clustering geometry, we focus on topics + (optionally) title.
     const textParts = [
-      topicsText,                            // ← highest-signal, LLM-derived
-      it.title || w.display_name || '',
-      conceptText || '',
-      venue || '',
-      rawAbs || ''
+      topicsText,
+      titleText
     ];
     const txt = textParts
       .filter(Boolean)
@@ -15187,6 +15258,7 @@ async function runInvisibleUniversityLens() {
       text: txt
     });
   }
+
 
 
   // --- TF–IDF + clustering ---------------------------------------------------
