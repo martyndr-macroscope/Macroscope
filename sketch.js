@@ -15001,8 +15001,8 @@ async function runInvisibleUniversityLens() {
 
     const textParts = [
       it.title || w.display_name || '',
-      conceptText || '',
-      venue || '',
+      //conceptText || '',
+      //venue || '',
       rawAbs || ''
     ];
     const txt = textParts.join(' . ').trim();
@@ -15095,7 +15095,7 @@ console.log('Invisible University: clusters after min size filter:',
     const topAuthors = authorStats.slice(0, 8);
 
     // Compact payload for the LLM (cap docs and abstract length)
-    const llmDocs = clusterDocs.slice(0, 40);
+    const llmDocs = sampleInvisibleUniDocsEvenly(clusterDocs, 40);
     const docLines = llmDocs.map(d => {
       const abs = String(
         d.abstract ||
@@ -15234,3 +15234,17 @@ console.log('Invisible University: clusters after min size filter:',
   setSynthBodyText(mdPieces.join('\n\n---\n\n'));
 }
 
+// Helper: take up to k docs spread evenly across the cluster,
+// so the LLM sees a representative slice rather than just the first few.
+function sampleInvisibleUniDocsEvenly(docs, k) {
+  const n = docs.length | 0;
+  if (n <= k) return docs.slice();
+
+  const out = [];
+  const step = n / k;
+  for (let i = 0; i < k; i++) {
+    const idx = Math.floor((i + 0.5) * step);
+    out.push(docs[idx]);
+  }
+  return out;
+}
