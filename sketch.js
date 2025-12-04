@@ -14695,6 +14695,153 @@ function getPrimaryConceptForItem(it) {
 //    to the model and infers thematic clusters
 //  - Adds one AI footprint per resulting cluster
 // ============================================================================
+// --- Invisible University: LLM topic fingerprints --------------------------
+
+// How many papers per LLM batch when generating per-doc topics
+window.INV_UNI_FP_BATCH_SIZE     = window.INV_UNI_FP_BATCH_SIZE     || 80;
+// How many topical phrases per paper
+window.INV_UNI_FP_TOPICS_PER_DOC = window.INV_UNI_FP_TOPICS_PER_DOC || 8;
+
+// Parse JSON for the topic-fingerprint response: {"papers":[{"id":123,"topics":[...]}]}
+function parseInvisibleTopicsResponse(raw) {
+  const t = String(raw || '').trim();
+  if (!t) return null;
+
+  let jsonText = t;
+
+  // ```json ... ```
+  const fenced = t.match(/```json([\s\S]*?)```/i);
+  if (fenced) {
+    jsonText = fenced[1];
+  } else {
+    // try “largest” JSON object from the last { ... }
+    const block = t.match(/\{[\s\S]*\}$/);
+    if (block) jsonText = block[0];
+  }
+
+  try {
+    const obj = JSON.parse(jsonText);
+    if (obj && typeof obj === 'object') return obj;
+  } catch (e) {
+    console.warn('Invisible University: failed to parse topics JSON', e, raw);
+  }
+  return null;
+}
+
+// Generate / ensure per-doc topical phrases for a set of items
+async function ensureInvisibleUniTopicsForItems(items) {
+  if (!Array.isArray(items) || !items.length || !itemsData) return;
+
+  const toProcess = [];
+
+  for (const it of items) {
+    const idx = it.idx ?? it.id;
+    if (!Number.isFinite(idx)) continue;
+
+    let meta = itemsData[idx];
+    if (!meta) meta = itemsData[idx] = {};
+
+    // Already have fingerprints? Skip.
+    if (Array.isArray(meta.invisibleUniTopics) && meta.invisibleUniTopics.length) {
+      continue;
+    }
+
+    const w = meta.openalex || {};
+    const title = it.title || w.display_name || w.title || 'Untitled';
+
+    const rawAbs = (
+      it.abstract ||
+      meta.openalex_abstract ||
+      (typeof getAbstract === 'function' ? getAbstract(w) : '') ||
+      ''
+    );
+
+    // keep the abstract short for token control
+    const absWords = String(rawAbs).split(/\s+/).slice(0, 80).join(' ');
+
+    toProcess.push({
+      id: idx,
+      title,
+      abstract: absWords
+    });
+  }
+
+  if (!toProcess.length) return;
+
+  const batchSize = window.INV_UNI_FP_BATCH_SIZE || 80;
+  const topicsPerDoc = window.INV_UNI_FP_TOPICS_PER_DOC || 8;
+
+  for (let start = 0; start < toProcess.length; start += batchSize) {
+    const batch = toProcess.slice(start, start + batchSize);
+
+    showLoading(
+      `Invisible University: generating topical fingerprints (${start + batch.length}/${toProcess.length})…`,
+      0.01 + 0.14 * ((start + batch.length) / toProcess.length)
+    );
+    if (typeof nextTick === 'function') await nextTick();
+
+    const lines = batch.map((p, i) => {
+      return [
+        `${i + 1}. ID=${p.id}`,
+        `Title: ${p.title}`,
+        p.abstract ? `Summary: ${p.abstract}` : ''
+      ].filter(Boolean).join('\n');
+    }).join('\n\n');
+
+    const systemMsg = {
+      role: 'system',
+      content:
+        'You are an expert research librarian. ' +
+        'For each paper you receive, you assign concise topical key-phrases ' +
+        'describing methods, materials, phenomena, and application domains.'
+    };
+
+    const userMsg = {
+      role: 'user',
+      content:
+        `For each numbered publication below, generate ${topicsPerDoc} short topical key-phrases.\n` +
+        `Focus on: discipline, sub-field, methods, materials, organisms, systems, and application domains.\n` +
+        `Avoid generic words such as "study", "paper", "research", "analysis".\n\n` +
+        `Return STRICT JSON of the form:\n` +
+        `{"papers":[{"id":123,"topics":["topic one","topic two", ...]}, ...]}\n\n` +
+        `Publications:\n\n` + lines
+    };
+
+    let raw;
+    try {
+      raw = await openaiChatDirect([systemMsg, userMsg], {
+        model: window.INV_UNI_MODEL || undefined,
+        max_tokens: 1200,
+        temperature: 0.3
+      });
+    } catch (err) {
+      console.error('Invisible University: topic batch call failed', err);
+      continue;
+    }
+
+    const parsed = parseInvisibleTopicsResponse(raw);
+    if (!parsed || !Array.isArray(parsed.papers)) {
+      console.warn('Invisible University: no usable topics in response', raw);
+      continue;
+    }
+
+    for (const p of parsed.papers) {
+      const idx = Number(p.id);
+      if (!Number.isFinite(idx)) continue;
+
+      const meta = itemsData[idx] || (itemsData[idx] = {});
+      const topics = Array.isArray(p.topics)
+        ? p.topics.map(s => String(s || '').trim()).filter(Boolean)
+        : [];
+
+      if (!topics.length) continue;
+      meta.invisibleUniTopics = topics;
+    }
+  }
+}
+
+
+
 
 // Build TF–IDF vectors for Invisible University clustering
 function buildInvisibleUniTfIdf(docs) {
@@ -14943,6 +15090,9 @@ async function runInvisibleUniversityLens() {
   });
   const usedItems = sorted.slice(0, maxDocs);
 
+
+  await ensureInvisibleUniTopicsForItems(usedItems);
+
     console.log(
     'Invisible University: using',
     usedItems.length,
@@ -14950,6 +15100,8 @@ async function runInvisibleUniversityLens() {
     allItems.length,
     'visible works for k-means clustering'
   );
+
+
 
   openSynthPanel(
     `Invisible University — clustering ${usedItems.length.toLocaleString()} of ` +
@@ -14964,7 +15116,7 @@ async function runInvisibleUniversityLens() {
   if (typeof nextTick === 'function') await nextTick();
 
   // --- Build enriched document descriptors ----------------------------------
-  const docs = [];
+    const docs = [];
   for (const it of usedItems) {
     const idx = it.idx ?? it.id;
     const item = itemsData?.[idx] || {};
@@ -14989,7 +15141,7 @@ async function runInvisibleUniversityLens() {
 
     const rawAbs = (it.abstract ||
                     item.openalex_abstract ||
-                    getAbstract(w) ||
+                    (typeof getAbstract === 'function' ? getAbstract(w) : '') ||
                     '');
 
     const year = Number(
@@ -14999,13 +15151,26 @@ async function runInvisibleUniversityLens() {
       (w.from_publication_date || '').slice(0, 4)
     ) || null;
 
+    // NEW: LLM-generated topical fingerprints (if present)
+    const aiTopics = Array.isArray(item.invisibleUniTopics)
+      ? item.invisibleUniTopics
+          .map(s => String(s || '').trim())
+          .filter(Boolean)
+      : [];
+
+    const topicsText = aiTopics.join(' . ');
+
     const textParts = [
+      topicsText,                            // ← highest-signal, LLM-derived
       it.title || w.display_name || '',
-      //conceptText || '',
-      //venue || '',
+      conceptText || '',
+      venue || '',
       rawAbs || ''
     ];
-    const txt = textParts.join(' . ').trim();
+    const txt = textParts
+      .filter(Boolean)
+      .join(' . ')
+      .trim();
 
     docs.push({
       ...it,
@@ -15018,9 +15183,11 @@ async function runInvisibleUniversityLens() {
       venue,
       abstract: rawAbs,
       year,
+      aiTopics,
       text: txt
     });
   }
+
 
   // --- TF–IDF + clustering ---------------------------------------------------
   const { matrix } = buildInvisibleUniTfIdf(docs);
