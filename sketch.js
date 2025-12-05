@@ -444,7 +444,11 @@ const COLOR_CLUSTER_MIN_SIZE = 10;
 const OPENAI_MIN_INTERVAL_MS = 1100; // hard gap between requests (ms)
 
 let __OPENAI_NEXT_OK_TS = 0; 
+
 let clusterSizesTotal = [];
+// Hard timeout for each OpenAI call (ms) – prevents hangs on the proxy/fetch
+const OPENAI_FETCH_TIMEOUT_MS = window.OPENAI_FETCH_TIMEOUT_MS || 120000; // 120s default
+
 
 // Tuned for biggish maps; tweak carefully
 const physics = {
@@ -6526,6 +6530,7 @@ function partition(arr, size) {
 
 // Accepts either (messages, 700) or (messages, { max_tokens: 700, temperature: 0.2 })
 // ---- client (sketch.js) ----
+// ---- client (sketch.js) ----
 const OPENAI_PROXY = `${FETCH_PROXY}/openai/chat`; // reuse your existing FETCH_PROXY base
 
 async function openaiChatDirect(messages, opts = {}) {
@@ -6547,16 +6552,34 @@ async function openaiChatDirect(messages, opts = {}) {
   if (gap > 0) await new Promise(r => setTimeout(r, gap));
 
   let delay = 900; // starting backoff (ms)
+
   for (let attempt = 0; attempt <= retries; attempt++) {
+    let controller;
+    let timer = null;
+
     try {
-const r = await fetch(OPENAI_PROXY, {
-  method: 'POST',
-  headers: {
-    'Content-Type': 'application/json'
-    // No Authorization header here – the proxy adds the API key server-side
-  },
-  body: JSON.stringify(body)
-});
+      controller = new AbortController();
+      const timeoutMs = OPENAI_FETCH_TIMEOUT_MS || 120000;
+
+      timer = setTimeout(() => {
+        try { controller.abort(); } catch (_) {}
+      }, timeoutMs);
+
+      const r = await fetch(OPENAI_PROXY, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+          // No Authorization header here – the proxy adds the API key server-side
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal
+      });
+
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+
       if (!r.ok) {
         const ra = Number(r.headers.get('retry-after')) || 0;
         const err = new Error(`OpenAI ${r.status}`);
@@ -6564,6 +6587,7 @@ const r = await fetch(OPENAI_PROXY, {
         err.retryAfter = ra;
         throw err;
       }
+
       const j = await r.json();
 
       // after a *successful* call: set next-allowed time (global) + optional per-call idle
@@ -6572,31 +6596,44 @@ const r = await fetch(OPENAI_PROXY, {
 
       return j?.choices?.[0]?.message?.content || '';
     } catch (e) {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+
+      // Normalise timeout/abort into a "status 0" style error
+      if (e && e.name === 'AbortError') {
+        e.status = e.status || 0;
+        e.message = e.message || 'OpenAI fetch timeout';
+      }
+
       const status = e && e.status;
       const last = (attempt === retries);
 
       // adaptive wait (respect Retry-After on 429; longer waits for 5xx)
       let wait = delay;
       if (status === 429) {
-        wait = (e.retryAfter ? e.retryAfter * 1000 : delay) + Math.round(Math.random()*400);
+        wait = (e.retryAfter ? e.retryAfter * 1000 : delay) + Math.round(Math.random() * 400);
       } else if (status === 502 || status === 503 || status === 504) {
-        wait = delay + Math.round(Math.random()*600);
+        wait = delay + Math.round(Math.random() * 600);
       } else {
-        wait = 800 + Math.round(Math.random()*400);
+        wait = 800 + Math.round(Math.random() * 400);
       }
 
       if (typeof onRetry === 'function') {
-        try { onRetry(status || 0, wait, attempt); } catch(_) {}
+        try { onRetry(status || 0, wait, attempt); } catch (_) {}
       }
 
       if (last) throw e;
-      // push the global gate forward too (keeps bursts tamed after errors)
+
+      // push the global gate forward too (keeps bursts tamed after errors/timeouts)
       __OPENAI_NEXT_OK_TS = Date.now() + wait + (OPENAI_MIN_INTERVAL_MS || 0);
       await new Promise(res => setTimeout(res, wait));
       delay = Math.min(Math.round(delay * 1.8), 20000);
     }
   }
 }
+
 
 
 
