@@ -3613,6 +3613,9 @@ const refsTotal = Array.isArray(w.referenced_works)
     const clean = typeof cleanDOI === 'function' ? cleanDOI(doi) : doi.replace(/^https?:\/\/doi\.org\//,'');
     const doiUrl = clean ? `https://doi.org/${clean}` : '';
     const bestUrl = typeof pickBestUrl === 'function' ? pickBestUrl(w, doiUrl) : (doiUrl || w?.id || '');
+        const iuTopics = Array.isArray(item.invisibleUniTopics)
+      ? item.invisibleUniTopics.map(s => String(s || '').trim()).filter(Boolean)
+      : [];
 
     const oaObj = w.open_access || {};
     const isOA = !!oaObj.is_oa;
@@ -3798,7 +3801,9 @@ console.log('Pill counts updated', { i, refs: it.refsCount, citedBy: it.cbc });
     const abstractFull  = (d.abstract || '').toString();
     const hasAbstract   = abstractFull.trim().length > 0;
     const abstractShort = abstractFull.length > 1000 ? abstractFull.slice(0,1000)+'…' : abstractFull;
-
+const iuTopics = Array.isArray(d.invisibleUniTopics)
+      ? d.invisibleUniTopics.map(s => String(s || '').trim()).filter(Boolean)
+      : [];
     const absId      = `abs_${i}_${Date.now()}`;
     const absToggleId= `absTgl_${i}_${Date.now()}`;
 
@@ -3838,6 +3843,27 @@ console.log('Pill counts updated', { i, refs: it.refsCount, citedBy: it.cbc });
           `
           : `<div style="opacity:.7;font-size:13px">No abstract available</div>`
       }
+
+${
+        iuTopics.length
+          ? `
+            <div style="font-weight:600;font-size:13px;margin:10px 0 4px;">Topics (Invisible University)</div>
+            <div style="opacity:.9;font-size:12px;margin-bottom:4px;">
+              ${iuTopics.map(t => `
+                <span style="
+                  display:inline-block;
+                  background:rgba(255,255,255,0.06);
+                  border-radius:12px;
+                  padding:2px 8px;
+                  margin:0 6px 4px 0;
+                  white-space:nowrap;
+                ">${safe(t)}</span>
+              `).join('')}
+            </div>
+          `
+          : ''
+      }
+
     `);
 
     // expand/collapse abstract (same behaviour as local)
@@ -5047,6 +5073,9 @@ function createAIMenuButton() {
   addItem('Multi Cluster Review', () => openMultiClusterLitDialog?.());
   addItem('Label clusters',     () => runLabelClustersAI?.());
   addItem('Synthesise abstracts',() => runSynthesisAbstracts?.());
+
+  addItem('Apply Fingerprints', () => runApplyFingerprintsOnly?.());
+
   addItem('Invisible University (themes)…', () => runInvisibleUniversityLens?.());
   addItem('Chronological review',() => runChronologicalReview?.());
   addItem('Open question…',          () => runOpenQuestion?.());
@@ -12509,6 +12538,7 @@ function buildViewerDetailsObject(i) {
     doi: doiClean || null,
     url: bestUrl || null,
     openalex: oaLink,
+    invisibleUniTopics: iuTopics,
     abstract: abs,
     is_oa: !!(w.open_access?.is_oa),
     oa_status: oaStatus || null,
@@ -15486,4 +15516,56 @@ function sampleInvisibleUniDocsEvenly(docs, k) {
     out.push(docs[idx]);
   }
   return out;
+}
+
+async function runApplyFingerprintsOnly() {
+  if (!itemsData || !nodes || !nodes.length) {
+    alert('No graph loaded yet – load a dataset first.');
+    return;
+  }
+
+  // Use the same helper as other lenses to respect visibility filters
+  const items = collectVisibleForSynthesis(Infinity) || [];
+  const totalVisible = (visibleMask || []).reduce((a, b) => a + (b ? 1 : 0), 0);
+  const totalWithAbs = items.length;
+
+  openSynthPanel('Applying Invisible University fingerprints…');
+
+  if (!totalWithAbs) {
+    setSynthHtml('<div style="padding:8px;opacity:.85">No visible papers have abstracts.</div>');
+    setSynthBodyText('');
+    return;
+  }
+
+  setSynthHtml(`
+    <div style="font-size:13px;line-height:1.4;opacity:.9">
+      <p>Generating / updating topic fingerprints for 
+        <b>${totalWithAbs.toLocaleString()}</b> of 
+        <b>${totalVisible.toLocaleString()}</b> visible publications with abstracts.</p>
+      <p>This runs the same per-paper labelling used by the Invisible University lens, 
+         but <b>without</b> building clusters or research groups.</p>
+    </div>
+  `);
+  setSynthBodyText('');
+
+  // This function already:
+  //  - detects existing fingerprints and skips
+  //  - short-circuits if ~98% done
+  await ensureInvisibleUniTopicsForItems(items);
+
+  setSynthHtml(`
+    <div style="font-size:13px;line-height:1.4;opacity:.92">
+      <p>Done. Topic fingerprints are stored on each publication as 
+         <code>invisibleUniTopics</code>.</p>
+      <p>They are saved in project JSON and exported “Published” files, and are
+         shown in the Info panel as <b>“Topics (Invisible University)”</b>.</p>
+    </div>
+  `);
+  setSynthBodyText('Invisible University topic fingerprints applied.');
+
+  // If you currently have an item selected, refresh its panel so the new topics show up
+  if (infoPanel && typeof infoPanel.setItemIndex === 'function' &&
+      Number.isFinite(selectedIndex) && selectedIndex >= 0) {
+    infoPanel.setItemIndex(selectedIndex);
+  }
 }
