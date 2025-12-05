@@ -14805,6 +14805,17 @@ function parseInvisibleTopicsResponse(raw) {
   const t = String(raw || '').trim();
   if (!t) return null;
 
+  // Helper to attempt a direct parse
+  function tryParseObj(s) {
+    try {
+      const obj = JSON.parse(s);
+      if (obj && typeof obj === 'object') return obj;
+    } catch (e) {
+      // swallow here, we have salvage logic below
+    }
+    return null;
+  }
+
   let jsonText = t;
 
   // 1) Strip ```json fences if present
@@ -14817,42 +14828,56 @@ function parseInvisibleTopicsResponse(raw) {
     if (block) jsonText = block[0];
   }
 
-  let obj = null;
-  try {
-    obj = JSON.parse(jsonText);
-  } catch (e) {
-    console.warn('Invisible University: failed to parse topics JSON', e, raw);
+  // --- First attempt: parse the whole thing -------------------------------
+  let obj = tryParseObj(jsonText);
+
+  // --- Fallback: salvage individual paper objects if parse failed ---------
+  if (!obj) {
+    // We expect many substrings of the form:
+    // {"id":123,"topics":[ ... ]}
+    //
+    // This regex grabs each { ... } that includes an "id" and a "topics":[...]
+    const matches = jsonText.match(
+      /\{[^{}]*"id"\s*:\s*[^,{}]+,[^{}]*"topics"\s*:\s*\[[^\]]*\][^{}]*\}/g
+    );
+
+    if (matches && matches.length) {
+      const papers = [];
+      for (const m of matches) {
+        const p = tryParseObj(m);
+        if (!p) continue;
+        if (p.id === undefined) continue;
+        if (!Array.isArray(p.topics)) continue;
+        papers.push(p);
+      }
+      if (papers.length) {
+        // Normalised structure
+        return { papers };
+      }
+    }
+
+    console.warn('Invisible University: failed to parse topics JSON', raw);
     return null;
   }
-  if (!obj) return null;
 
-  // ---- Normalise into { papers: [ {id, topics}, ... ] } -------------------
+  // --- Normalise into { papers: [...] } -----------------------------------
   let papers = null;
 
-  // Case A: top-level already an array of {id, topics}
   if (Array.isArray(obj)) {
     papers = obj;
-  }
-  // Case B: { papers: [ ... ] }
-  else if (Array.isArray(obj.papers)) {
+  } else if (Array.isArray(obj.papers)) {
     papers = obj.papers;
-  }
-  // Case C: { docs: [ ... ] } or { items: [ ... ] }
-  else if (Array.isArray(obj.docs)) {
+  } else if (Array.isArray(obj.docs)) {
     papers = obj.docs;
   } else if (Array.isArray(obj.items)) {
     papers = obj.items;
-  }
-  // Case D: { papers: { "12": ["a","b"], "34": ["c"] } }
-  else if (obj.papers && typeof obj.papers === 'object') {
+  } else if (obj.papers && typeof obj.papers === 'object') {
     const entries = Object.entries(obj.papers);
     papers = entries.map(([id, topics]) => ({
       id,
       topics: topics && topics.topics ? topics.topics : topics
     }));
-  }
-  // Case E: object map id -> { topics: [...] } or id -> [...]
-  else if (obj && typeof obj === 'object') {
+  } else if (obj && typeof obj === 'object') {
     const keys = Object.keys(obj);
     if (keys.length && keys.every(k => typeof obj[k] === 'object' || Array.isArray(obj[k]))) {
       papers = keys.map(k => {
@@ -14870,9 +14895,9 @@ function parseInvisibleTopicsResponse(raw) {
     return null;
   }
 
-  // Final normalised structure
   return { papers };
 }
+
 
 
 // Generate / ensure per-doc topical phrases for a set of items
