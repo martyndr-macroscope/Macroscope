@@ -14827,10 +14827,11 @@ function parseInvisibleTopicsResponse(raw) {
 }
 
 // Generate / ensure per-doc topical phrases for a set of items
+// Generate / ensure per-doc topical phrases for a set of items
 async function ensureInvisibleUniTopicsForItems(items) {
   if (!Array.isArray(items) || !items.length || !itemsData) return;
 
-    // Fast path: if almost all items already have fingerprints, skip
+  // --- 1) Fast path: if almost all items already have fingerprints, skip ----
   let withTopics = 0;
   for (const it of items) {
     const idx = it.idx ?? it.id;
@@ -14842,11 +14843,14 @@ async function ensureInvisibleUniTopicsForItems(items) {
   }
 
   if (withTopics && withTopics >= 0.98 * items.length) {
-    console.log('Invisible University: reusing existing topic fingerprints for',
-      withTopics, 'of', items.length, 'items');
+    console.log(
+      'Invisible University: reusing existing topic fingerprints for',
+      withTopics, 'of', items.length, 'items'
+    );
     return;
   }
 
+  // --- 2) Build the list of items that actually need processing -------------
   const toProcess = [];
 
   for (const it of items) {
@@ -14854,7 +14858,7 @@ async function ensureInvisibleUniTopicsForItems(items) {
     if (!Number.isFinite(idx)) continue;
 
     let meta = itemsData[idx];
-    if (!meta) meta = itemsData[idx] = {};
+    if (!meta) meta = (itemsData[idx] = {});
 
     // Already have fingerprints? Skip.
     if (Array.isArray(meta.invisibleUniTopics) && meta.invisibleUniTopics.length) {
@@ -14875,16 +14879,25 @@ async function ensureInvisibleUniTopicsForItems(items) {
     const absWords = String(rawAbs).split(/\s+/).slice(0, 80).join(' ');
 
     toProcess.push({
-      id: idx,
+      id: idx,          // GLOBAL numeric id (node index)
       title,
       abstract: absWords
     });
   }
 
-  if (!toProcess.length) return;
+  if (!toProcess.length) {
+    console.log('Invisible University: no new items need topic fingerprints.');
+    return;
+  }
 
-  const batchSize = window.INV_UNI_FP_BATCH_SIZE || 80;
-  const topicsPerDoc = window.INV_UNI_FP_TOPICS_PER_DOC || 8;
+  // --- 3) Batch and call the model ------------------------------------------
+  const batchSize     = window.INV_UNI_FP_BATCH_SIZE     || 40;  // slightly smaller to avoid truncation
+  const topicsPerDoc  = window.INV_UNI_FP_TOPICS_PER_DOC || 8;
+
+  console.log(
+    'Invisible University: generating topic fingerprints for',
+    toProcess.length, 'items in batches of', batchSize
+  );
 
   for (let start = 0; start < toProcess.length; start += batchSize) {
     const batch = toProcess.slice(start, start + batchSize);
@@ -14897,7 +14910,7 @@ async function ensureInvisibleUniTopicsForItems(items) {
 
     const lines = batch.map((p, i) => {
       return [
-        `${i + 1}. ID=${p.id}`,
+        `${i + 1}. ID=${p.id}`,            // local row + GLOBAL_ID
         `Title: ${p.title}`,
         p.abstract ? `Summary: ${p.abstract}` : ''
       ].filter(Boolean).join('\n');
@@ -14919,7 +14932,8 @@ async function ensureInvisibleUniTopicsForItems(items) {
         `Avoid generic words such as "study", "paper", "research", "analysis".\n\n` +
         `Return STRICT JSON of the form:\n` +
         `{"papers":[{"id":123,"topics":["topic one","topic two", ...]}, ...]}\n\n` +
-        `Use as "id" the numeric GLOBAL_ID that appears after "ID=" for each publication.\n\n` + lines
+        `Use as "id" the numeric GLOBAL_ID that appears after "ID=" for each publication.\n\n` +
+        `Publications:\n\n` + lines
     };
 
     let raw;
@@ -14936,15 +14950,14 @@ async function ensureInvisibleUniTopicsForItems(items) {
 
     const parsed = parseInvisibleTopicsResponse(raw);
     if (!parsed || !Array.isArray(parsed.papers)) {
-      console.warn('Invisible University: no usable topics in response', raw);
+      console.warn('Invisible University: no usable topics in response for this batch', raw);
       continue;
     }
 
-    // Map model "id" field back to the correct item in this batch.
-    // The model sometimes uses the global id we give it (e.g. 1234),
-    // and sometimes uses the local row number (1..batch.length).
-    const batchGlobalIds = batch.map(p => p.id);
-    const globalIdSet = new Set(batchGlobalIds);
+    // --- 4) Robustly map model ids back to the correct global indices -------
+    const batchGlobalIds = batch.map(p => p.id);   // [GLOBAL_ID...]
+    const globalIdSet    = new Set(batchGlobalIds);
+    let wroteForBatch    = 0;
 
     for (const p of parsed.papers) {
       let rawId = p.id;
@@ -14965,7 +14978,7 @@ async function ensureInvisibleUniTopicsForItems(items) {
 
       let globalIdx = null;
 
-      // Case 1: model echoed the global id we supplied.
+      // Case 1: model echoed the GLOBAL_ID we supplied.
       if (globalIdSet.has(idNum)) {
         globalIdx = idNum;
       }
@@ -14984,11 +14997,17 @@ async function ensureInvisibleUniTopicsForItems(items) {
 
       if (!topics.length) continue;
       meta.invisibleUniTopics = topics;
+      wroteForBatch++;
     }
 
-
+    console.log(
+      'Invisible University: wrote topics for',
+      wroteForBatch, 'of', batch.length, 'items in this batch'
+    );
   }
-try {
+
+  // --- 5) Final tally for all items passed in --------------------------------
+  try {
     let totalWithTopics = 0;
     for (const it of items) {
       const idx = it.idx ?? it.id;
@@ -15009,6 +15028,7 @@ try {
     console.warn('Invisible University: error while counting fingerprints', e);
   }
 }
+
 
 
 
