@@ -15314,6 +15314,253 @@ function pruneConceptInventoryByDf() {
   return conceptMapState;
 }
 
+// Build a co-occurrence graph over the *kept* concepts.
+//
+// For each document, we look at the concepts that survived DF pruning,
+// then for each unordered pair (A,B) that co-occurs in that document we
+// increment a co-occurrence count. These are converted into Jaccard
+// similarities, then pruned to top-k neighbours per concept.
+//
+// Results are stored on conceptMapState as:
+//   - coOccurEdges: array of { aId, bId, count, jaccard }
+//   - coOccurAdj:   map conceptId -> array of { id, jaccard, count }
+//   - coOccurStats: summary statistics for logging / debugging
+function buildConceptCooccurrenceGraph() {
+  if (!conceptMapState || !Array.isArray(conceptMapState.keptConcepts) || !conceptMapState.keptConcepts.length) {
+    console.log('ConceptMap (Co-Occ): no kept concepts – run rebuildConceptInventoryFromFingerprints() and pruneConceptInventoryByDf() first.');
+    return null;
+  }
+  if (!itemsData || !itemsData.length) {
+    console.log('ConceptMap (Co-Occ): no itemsData – load a dataset first.');
+    return null;
+  }
+
+  const kept = conceptMapState.keptConcepts;
+  const docCount = itemsData.length;
+
+  // Map conceptId -> concept object, and make a quick lookup for DF.
+  const conceptById = Object.create(null);
+  const dfById = Object.create(null);
+  const keptIdSet = new Set();
+
+  for (const c of kept) {
+    conceptById[c.id] = c;
+    dfById[c.id] = c.df;
+    keptIdSet.add(c.id);
+  }
+
+  // docConcepts[d] = array of kept conceptIds present in doc d
+  const docConcepts = new Array(docCount);
+  for (let i = 0; i < docCount; i++) {
+    docConcepts[i] = [];
+  }
+
+  // Fill docConcepts using the concept -> papers lists
+  for (const c of kept) {
+    const cid = c.id;
+    const papers = Array.isArray(c.papers) ? c.papers : [];
+    for (const d of papers) {
+      if (d >= 0 && d < docCount) {
+        docConcepts[d].push(cid);
+      }
+    }
+  }
+
+  // Now accumulate co-occurrence counts for each unordered pair (a,b) with a<b
+  const pairCounts = Object.create(null);
+  let rawPairInstances = 0;
+  let docsWithPairs = 0;
+
+  for (let d = 0; d < docCount; d++) {
+    const arr = docConcepts[d];
+    if (!arr || arr.length < 2) continue;
+
+    docsWithPairs++;
+
+    // Ensure uniqueness per doc (in case of duplication).
+    const uniqueIds = Array.from(new Set(arr));
+    const len = uniqueIds.length;
+
+    for (let i = 0; i < len; i++) {
+      const a = uniqueIds[i];
+      for (let j = i + 1; j < len; j++) {
+        const b = uniqueIds[j];
+        const lo = a < b ? a : b;
+        const hi = a < b ? b : a;
+        const key = lo + '|' + hi;
+
+        const prev = pairCounts[key] || 0;
+        pairCounts[key] = prev + 1;
+        rawPairInstances++;
+      }
+    }
+  }
+
+  const distinctPairCount = Object.keys(pairCounts).length;
+
+  console.log(
+    `ConceptMap (Co-Occ): scanning ${docCount} docs → ` +
+    `${docsWithPairs} had ≥2 kept concepts`
+  );
+  console.log(
+    `ConceptMap (Co-Occ): found ${distinctPairCount} distinct concept–concept pairs ` +
+    `(${rawPairInstances} raw pair instances)`
+  );
+
+  // Convert counts to Jaccard similarities and build initial edge list
+  const edges = [];
+  let jSum = 0;
+  let jCount = 0;
+  let jValuesSample = [];
+
+  for (const key in pairCounts) {
+    const count = pairCounts[key];
+    const [aStr, bStr] = key.split('|');
+    const aId = Number(aStr);
+    const bId = Number(bStr);
+
+    const dfA = dfById[aId] || 0;
+    const dfB = dfById[bId] || 0;
+
+    if (!dfA || !dfB) continue;
+
+    const denom = dfA + dfB - count;
+    if (denom <= 0) continue;
+
+    const jaccard = count / denom;
+
+    edges.push({ aId, bId, count, jaccard });
+
+    jSum += jaccard;
+    jCount++;
+    if (jValuesSample.length < 5000) {
+      jValuesSample.push(jaccard);
+    }
+  }
+
+  if (!edges.length) {
+    console.log('ConceptMap (Co-Occ): no valid edges after Jaccard computation.');
+    conceptMapState.coOccurEdges = [];
+    conceptMapState.coOccurAdj = Object.create(null);
+    conceptMapState.coOccurStats = {
+      docCount,
+      docsWithPairs,
+      distinctPairCount,
+      rawPairInstances,
+      edgeCount: 0,
+      avgDegree: 0,
+      meanJaccard: 0,
+      medianJaccard: 0
+    };
+    return conceptMapState;
+  }
+
+  // Compute basic Jaccard stats for logging
+  jValuesSample.sort((a, b) => a - b);
+  const meanJaccard = jCount ? jSum / jCount : 0;
+  const mid = Math.floor(jValuesSample.length / 2);
+  const medianJaccard = jValuesSample.length
+    ? (jValuesSample.length % 2
+        ? jValuesSample[mid]
+        : 0.5 * (jValuesSample[mid - 1] + jValuesSample[mid]))
+    : 0;
+
+  console.log(
+    `ConceptMap (Co-Occ): raw Jaccard stats – ` +
+    `mean = ${meanJaccard.toFixed(4)}, median = ${medianJaccard.toFixed(4)}, ` +
+    `edges (pre-prune) = ${edges.length}`
+  );
+
+  // Build adjacency lists: conceptId -> neighbours before pruning
+  const adj = Object.create(null);
+  for (const e of edges) {
+    if (!adj[e.aId]) adj[e.aId] = [];
+    if (!adj[e.bId]) adj[e.bId] = [];
+    adj[e.aId].push({ id: e.bId, jaccard: e.jaccard, count: e.count });
+    adj[e.bId].push({ id: e.aId, jaccard: e.jaccard, count: e.count });
+  }
+
+  const topK = Number.isFinite(window.CONCEPT_COOCC_TOP_K)
+    ? window.CONCEPT_COOCC_TOP_K
+    : 10;
+  const minJ = Number.isFinite(window.CONCEPT_COOCC_MIN_JACCARD)
+    ? window.CONCEPT_COOCC_MIN_JACCARD
+    : 0.05;
+
+  // Apply per-node pruning to top-k neighbours above minJ
+  const finalEdgeMap = Object.create(null);
+  let nodesWithNeighbours = 0;
+
+  for (const c of kept) {
+    const cid = c.id;
+    const list = adj[cid] || [];
+    if (!list.length) continue;
+
+    // Sort by descending Jaccard
+    list.sort((a, b) => b.jaccard - a.jaccard);
+
+    const filtered = list.filter(n => n.jaccard >= minJ).slice(0, topK);
+    if (!filtered.length) continue;
+
+    nodesWithNeighbours++;
+
+    for (const n of filtered) {
+      const a = cid < n.id ? cid : n.id;
+      const b = cid < n.id ? n.id : cid;
+      const key = a + '|' + b;
+
+      // Keep the strongest Jaccard if encountered from both sides
+      const prev = finalEdgeMap[key];
+      if (!prev || n.jaccard > prev.jaccard) {
+        finalEdgeMap[key] = {
+          aId: a,
+          bId: b,
+          jaccard: n.jaccard,
+          count: n.count
+        };
+      }
+    }
+  }
+
+  const finalEdges = Object.values(finalEdgeMap);
+  const avgDegree = finalEdges.length
+    ? (finalEdges.length * 2) / kept.length
+    : 0;
+
+  console.log(
+    `ConceptMap (Co-Occ): after top-${topK} and minJ=${minJ} → ` +
+    `${finalEdges.length} edges, avg degree = ${avgDegree.toFixed(2)}, ` +
+    `${nodesWithNeighbours} of ${kept.length} nodes have neighbours`
+  );
+
+  // Build final adjacency from pruned edges
+  const finalAdj = Object.create(null);
+  for (const e of finalEdges) {
+    if (!finalAdj[e.aId]) finalAdj[e.aId] = [];
+    if (!finalAdj[e.bId]) finalAdj[e.bId] = [];
+    finalAdj[e.aId].push({ id: e.bId, jaccard: e.jaccard, count: e.count });
+    finalAdj[e.bId].push({ id: e.aId, jaccard: e.jaccard, count: e.count });
+  }
+
+  conceptMapState.coOccurEdges = finalEdges;
+  conceptMapState.coOccurAdj = finalAdj;
+  conceptMapState.coOccurStats = {
+    docCount,
+    docsWithPairs,
+    distinctPairCount,
+    rawPairInstances,
+    edgeCount: finalEdges.length,
+    avgDegree,
+    meanJaccard,
+    medianJaccard,
+    topK,
+    minJ
+  };
+
+  return conceptMapState;
+}
+
+
 
 
 
