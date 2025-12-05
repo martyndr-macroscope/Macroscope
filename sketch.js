@@ -14828,75 +14828,70 @@ function parseInvisibleTopicsResponse(raw) {
 
 // Generate / ensure per-doc topical phrases for a set of items
 // Generate / ensure per-doc topical phrases for a set of items
+// Generate / ensure per-doc topical phrases for a set of items
 async function ensureInvisibleUniTopicsForItems(items) {
   if (!Array.isArray(items) || !items.length || !itemsData) return;
 
-  // --- 1) Fast path: if almost all items already have fingerprints, skip ----
-  let withTopics = 0;
-  for (const it of items) {
-    const idx = it.idx ?? it.id;
-    if (!Number.isFinite(idx)) continue;
-    const meta = itemsData?.[idx];
-    if (meta && Array.isArray(meta.invisibleUniTopics) && meta.invisibleUniTopics.length) {
-      withTopics++;
-    }
-  }
-
-  if (withTopics && withTopics >= 0.98 * items.length) {
-    console.log(
-      'Invisible University: reusing existing topic fingerprints for',
-      withTopics, 'of', items.length, 'items'
-    );
-    return;
-  }
-
-  // --- 2) Build the list of items that actually need processing -------------
+  // --- 1) Build a clean "toProcess" list for ALL items ----------------------
   const toProcess = [];
 
   for (const it of items) {
     const idx = it.idx ?? it.id;
     if (!Number.isFinite(idx)) continue;
 
+    // Always make sure there is a metadata object
     let meta = itemsData[idx];
-    if (!meta) meta = (itemsData[idx] = {});
-
-    // Already have fingerprints? Skip.
-    if (Array.isArray(meta.invisibleUniTopics) && meta.invisibleUniTopics.length) {
-      continue;
-    }
+    if (!meta) meta = itemsData[idx] = {};
 
     const w = meta.openalex || {};
-    const title = it.title || w.display_name || w.title || 'Untitled';
+    const title =
+      it.title ||
+      w.display_name ||
+      w.title ||
+      'Untitled';
 
-    const rawAbs = (
+    const rawAbs =
       it.abstract ||
       meta.openalex_abstract ||
       (typeof getAbstract === 'function' ? getAbstract(w) : '') ||
-      ''
-    );
+      '';
 
-    // keep the abstract short for token control
-    const absWords = String(rawAbs).split(/\s+/).slice(0, 80).join(' ');
+    // If we *really* don't have an abstract, skip – nothing useful to label
+    const absStr = String(rawAbs || '').trim();
+    if (!absStr) continue;
+
+    // Keep things short to avoid truncation in the LLM call
+    const absWords = absStr.split(/\s+/).slice(0, 60).join(' ');
 
     toProcess.push({
-      id: idx,          // GLOBAL numeric id (node index)
+      id: idx,          // GLOBAL_ID == graph index
       title,
       abstract: absWords
     });
   }
 
+  console.log(
+    'Invisible University: fingerprinting',
+    toProcess.length,
+    'of',
+    items.length,
+    'items (have abstracts)'
+  );
+
   if (!toProcess.length) {
-    console.log('Invisible University: no new items need topic fingerprints.');
+    console.log('Invisible University: no valid items to fingerprint.');
     return;
   }
 
-  // --- 3) Batch and call the model ------------------------------------------
-  const batchSize     = window.INV_UNI_FP_BATCH_SIZE     || 40;  // slightly smaller to avoid truncation
-  const topicsPerDoc  = window.INV_UNI_FP_TOPICS_PER_DOC || 8;
+  // --- 2) Batch and call the model -----------------------------------------
+  const batchSize    = window.INV_UNI_FP_BATCH_SIZE || 32;  // conservative batch size
+  const topicsPerDoc = window.INV_UNI_FP_TOPICS_PER_DOC || 8;
 
   console.log(
     'Invisible University: generating topic fingerprints for',
-    toProcess.length, 'items in batches of', batchSize
+    toProcess.length,
+    'items in batches of',
+    batchSize
   );
 
   for (let start = 0; start < toProcess.length; start += batchSize) {
@@ -14906,8 +14901,8 @@ async function ensureInvisibleUniTopicsForItems(items) {
       `Invisible University: generating topical fingerprints (${start + batch.length}/${toProcess.length})…`,
       0.01 + 0.14 * ((start + batch.length) / toProcess.length)
     );
-    if (typeof nextTick === 'function') await nextTick();
 
+    // Build the prompt
     const lines = batch.map((p, i) => {
       return [
         `${i + 1}. ID=${p.id}`,            // local row + GLOBAL_ID
@@ -14921,7 +14916,7 @@ async function ensureInvisibleUniTopicsForItems(items) {
       content:
         'You are an expert research librarian. ' +
         'For each paper you receive, you assign concise topical key-phrases ' +
-        'describing methods, materials, phenomena, and application domains.'
+        'describing methods, materials, organisms, systems, and application domains.'
     };
 
     const userMsg = {
@@ -14940,12 +14935,12 @@ async function ensureInvisibleUniTopicsForItems(items) {
     try {
       raw = await openaiChatDirect([systemMsg, userMsg], {
         model: window.INV_UNI_MODEL || undefined,
-        max_tokens: 1200,
+        max_tokens: 1500,
         temperature: 0.3
       });
     } catch (err) {
       console.error('Invisible University: topic batch call failed', err);
-      continue;
+      continue; // try the next batch
     }
 
     const parsed = parseInvisibleTopicsResponse(raw);
@@ -14954,59 +14949,51 @@ async function ensureInvisibleUniTopicsForItems(items) {
       continue;
     }
 
-    // --- 4) Robustly map model ids back to the correct global indices -------
-    const batchGlobalIds = batch.map(p => p.id);   // [GLOBAL_ID...]
-    const globalIdSet    = new Set(batchGlobalIds);
-    let wroteForBatch    = 0;
+    // --- 3) Map model ids back to the correct global indices ----------------
+    const batchMap = new Map();   // GLOBAL_ID -> true
+    for (const p of batch) {
+      batchMap.set(p.id, true);
+    }
 
-    for (const p of parsed.papers) {
-      let rawId = p.id;
+    let wroteForBatch = 0;
+
+    for (const paper of parsed.papers) {
+      let rawId = paper.id;
       let idNum = Number(rawId);
 
-      // Be tolerant of things like "ID=12" or "paper-5"
+      // Tolerate e.g. "ID=12" or "paper-5"
       if (!Number.isFinite(idNum)) {
-        const m = String(rawId).match(/(\d+)/g);
-        if (m && m.length) {
-          idNum = Number(m[m.length - 1]);
-        }
+        const m = String(rawId).match(/(\d+)/);
+        if (!m) continue;
+        idNum = Number(m[1]);
       }
 
-      if (!Number.isFinite(idNum)) {
-        console.warn('Invisible University: could not interpret paper id', p.id);
+      if (!batchMap.has(idNum)) {
+        // Not one of the items in this batch – ignore
         continue;
       }
 
-      let globalIdx = null;
-
-      // Case 1: model echoed the GLOBAL_ID we supplied.
-      if (globalIdSet.has(idNum)) {
-        globalIdx = idNum;
-      }
-      // Case 2: model used local numbering (1..batch.length).
-      else if (idNum >= 1 && idNum <= batch.length) {
-        globalIdx = batch[idNum - 1].id;
-      } else {
-        console.warn('Invisible University: id not recognised in this batch', p.id);
-        continue;
-      }
-
-      const meta = itemsData[globalIdx] || (itemsData[globalIdx] = {});
-      const topics = Array.isArray(p.topics)
-        ? p.topics.map(s => String(s || '').trim()).filter(Boolean)
+      const topics = Array.isArray(paper.topics)
+        ? paper.topics.map(s => String(s || '').trim()).filter(Boolean)
         : [];
 
       if (!topics.length) continue;
+
+      let meta = itemsData[idNum];
+      if (!meta) meta = itemsData[idNum] = {};
+
       meta.invisibleUniTopics = topics;
       wroteForBatch++;
     }
 
     console.log(
-      'Invisible University: wrote topics for',
-      wroteForBatch, 'of', batch.length, 'items in this batch'
+      `Invisible University: wrote topics for ${wroteForBatch} of ${batch.length} items in this batch`
     );
   }
 
-  // --- 5) Final tally for all items passed in --------------------------------
+  hideLoading();
+
+  // --- 4) Final tally for all items passed in -------------------------------
   try {
     let totalWithTopics = 0;
     for (const it of items) {
@@ -15028,6 +15015,7 @@ async function ensureInvisibleUniTopicsForItems(items) {
     console.warn('Invisible University: error while counting fingerprints', e);
   }
 }
+
 
 
 
