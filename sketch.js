@@ -14840,20 +14840,12 @@ async function ensureInvisibleUniTopicsForItems(items) {
       withTopics++;
     }
   }
-console.log(
-    'Invisible University: fingerprints now present for',
-    totalWithTopics,
-    'of',
-    items.length,
-    'items'
-  );
 
   if (withTopics && withTopics >= 0.98 * items.length) {
     console.log('Invisible University: reusing existing topic fingerprints for',
       withTopics, 'of', items.length, 'items');
     return;
   }
-
 
   const toProcess = [];
 
@@ -14976,6 +14968,26 @@ for (const p of parsed.papers) {
   meta.invisibleUniTopics = topics;
 }
 
+  }
+try {
+    let totalWithTopics = 0;
+    for (const it of items) {
+      const idx = it.idx ?? it.id;
+      if (!Number.isFinite(idx)) continue;
+      const meta = itemsData?.[idx];
+      if (meta && Array.isArray(meta.invisibleUniTopics) && meta.invisibleUniTopics.length) {
+        totalWithTopics++;
+      }
+    }
+    console.log(
+      'Invisible University: fingerprints now present for',
+      totalWithTopics,
+      'of',
+      items.length,
+      'items'
+    );
+  } catch (e) {
+    console.warn('Invisible University: error while counting fingerprints', e);
   }
 }
 
