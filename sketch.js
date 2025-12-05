@@ -16567,8 +16567,9 @@ function drawConceptMapWorldSpace() {
 
   // Target area within the world: keep it reasonably compact vs main graph.
   // We map the concept-map into a circle around the world centre.
-  const cx = world.w * 0.5;
-  const cy = world.h * 0.5;
+const pubCentre = getPublicationClusterCentre();
+  const cx = pubCentre.x;
+  const cy = pubCentre.y;
 
   // Scale so that the concept bbox fits into ~40% of the smaller world dimension.
   const targetRadius = Math.min(world.w, world.h) * 0.4;
@@ -16631,4 +16632,35 @@ function drawConceptMapWorldSpace() {
   }
 
   pop();
+}
+// Return the centre of the publication cluster in world coordinates.
+// Falls back to world centre if nodes are not ready.
+function getPublicationClusterCentre() {
+  if (!Array.isArray(nodes) || !nodes.length) {
+    return { x: world.w * 0.5, y: world.h * 0.5 };
+  }
+
+  let minX = Infinity, maxX = -Infinity;
+  let minY = Infinity, maxY = -Infinity;
+
+  for (const node of nodes) {
+    if (!node) continue;
+    const x = node.x;
+    const y = node.y;
+    if (typeof x !== 'number' || typeof y !== 'number') continue;
+
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+  }
+
+  if (!isFinite(minX) || !isFinite(maxX) || !isFinite(minY) || !isFinite(maxY)) {
+    return { x: world.w * 0.5, y: world.h * 0.5 };
+  }
+
+  return {
+    x: (minX + maxX) * 0.5,
+    y: (minY + maxY) * 0.5
+  };
 }
