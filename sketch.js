@@ -14919,7 +14919,7 @@ async function ensureInvisibleUniTopicsForItems(items) {
         `Avoid generic words such as "study", "paper", "research", "analysis".\n\n` +
         `Return STRICT JSON of the form:\n` +
         `{"papers":[{"id":123,"topics":["topic one","topic two", ...]}, ...]}\n\n` +
-        `Publications:\n\n` + lines
+        `Use as "id" the numeric GLOBAL_ID that appears after "ID=" for each publication.\n\n` + lines
     };
 
     let raw;
@@ -14940,33 +14940,52 @@ async function ensureInvisibleUniTopicsForItems(items) {
       continue;
     }
 
-for (const p of parsed.papers) {
-  // Be tolerant about how the model encodes IDs
-  let rawId = p.id;
-  let idx = Number(rawId);
+    // Map model "id" field back to the correct item in this batch.
+    // The model sometimes uses the global id we give it (e.g. 1234),
+    // and sometimes uses the local row number (1..batch.length).
+    const batchGlobalIds = batch.map(p => p.id);
+    const globalIdSet = new Set(batchGlobalIds);
 
-  // If it's not a plain number (e.g. "ID=12" or "paper-5"),
-  // try to extract the last integer substring.
-  if (!Number.isFinite(idx)) {
-    const m = String(rawId).match(/(\d+)/g);
-    if (m && m.length) {
-      idx = Number(m[m.length - 1]);
+    for (const p of parsed.papers) {
+      let rawId = p.id;
+      let idNum = Number(rawId);
+
+      // Be tolerant of things like "ID=12" or "paper-5"
+      if (!Number.isFinite(idNum)) {
+        const m = String(rawId).match(/(\d+)/g);
+        if (m && m.length) {
+          idNum = Number(m[m.length - 1]);
+        }
+      }
+
+      if (!Number.isFinite(idNum)) {
+        console.warn('Invisible University: could not interpret paper id', p.id);
+        continue;
+      }
+
+      let globalIdx = null;
+
+      // Case 1: model echoed the global id we supplied.
+      if (globalIdSet.has(idNum)) {
+        globalIdx = idNum;
+      }
+      // Case 2: model used local numbering (1..batch.length).
+      else if (idNum >= 1 && idNum <= batch.length) {
+        globalIdx = batch[idNum - 1].id;
+      } else {
+        console.warn('Invisible University: id not recognised in this batch', p.id);
+        continue;
+      }
+
+      const meta = itemsData[globalIdx] || (itemsData[globalIdx] = {});
+      const topics = Array.isArray(p.topics)
+        ? p.topics.map(s => String(s || '').trim()).filter(Boolean)
+        : [];
+
+      if (!topics.length) continue;
+      meta.invisibleUniTopics = topics;
     }
-  }
 
-  if (!Number.isFinite(idx)) {
-    console.warn('Invisible University: could not interpret paper id', p.id);
-    continue;
-  }
-
-  const meta = itemsData[idx] || (itemsData[idx] = {});
-  const topics = Array.isArray(p.topics)
-    ? p.topics.map(s => String(s || '').trim()).filter(Boolean)
-    : [];
-
-  if (!topics.length) continue;
-  meta.invisibleUniTopics = topics;
-}
 
   }
 try {
