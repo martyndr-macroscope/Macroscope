@@ -15588,7 +15588,12 @@ async function runApplyFingerprintsOnly() {
   // This function already:
   //  - detects existing fingerprints and skips
   //  - short-circuits if ~98% done
-  await ensureInvisibleUniTopicsForItems(items);
+  try {
+    await ensureInvisibleUniTopicsForItems(items);
+  } finally {
+    // Clear any loading overlay left by the fingerprint batches
+    hideLoading();
+  }
 
   setSynthHtml(`
     <div style="font-size:13px;line-height:1.4;opacity:.92">
@@ -15606,3 +15611,4 @@ async function runApplyFingerprintsOnly() {
     infoPanel.setItemIndex(selectedIndex);
   }
 }
+
