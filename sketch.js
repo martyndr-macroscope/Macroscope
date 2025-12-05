@@ -64,6 +64,29 @@ const INV_UNI_TARGET_CLUSTER_SIZE      = 40;    // aim for ~40 docs per theme on
 const INV_UNI_MIN_PURITY_SIM           = 0.12;  // floor for doc–centroid similarity
 const INV_UNI_PURITY_STD_MULT          = 0.5;   // how aggressively to prune (μ - 0.5σ)
 
+// --- Concept map config (hybrid pipeline, stage 1: inventory + DF pruning) --
+
+// Minimum number of *papers* a concept must appear in to be kept.
+window.CONCEPT_MIN_DF = window.CONCEPT_MIN_DF || 2;
+
+// Maximum fraction of papers a concept can appear in before it is treated as
+// too generic (e.g. "numerical methods") and pruned from the map.
+window.CONCEPT_MAX_DF_FRAC = window.CONCEPT_MAX_DF_FRAC || 0.5;
+
+// Runtime state for the concept map pipeline (will be filled later)
+let conceptMapState = {
+  concepts: [],           // array of { id, label, papers: [...], df }
+  byLabel: Object.create(null),
+  stats: {
+    rawTopicCount: 0,
+    uniqueConceptCount: 0,
+    docsWithTopics: 0
+  },
+  keptConcepts: [],
+  droppedLowDf: [],
+  droppedHighDf: [],
+  pruneParams: null
+};
 
 // Backwards-compat alias (no longer used as a global cap)
 //const INV_UNI_MAX_ITEMS = INV_UNI_BATCH_SIZE;
@@ -15120,7 +15143,176 @@ async function ensureInvisibleUniTopicsForItems(items) {
 }
 
 
+// --- Concept map: stage 1 – inventory + DF stats ----------------------------
 
+// Normalise a raw topic label into a canonical "concept label" so that trivial
+// differences in case/whitespace/punctuation don't create separate concepts.
+function normaliseConceptLabel(raw) {
+  if (!raw) return '';
+  let s = String(raw).toLowerCase();
+
+  // Trim whitespace and collapse multiple spaces
+  s = s.trim().replace(/\s+/g, ' ');
+
+  // Strip trivial punctuation at the ends (commas, periods, colons, semicolons)
+  s = s.replace(/^[\s,.;:]+/, '').replace(/[\s,.;:]+$/, '');
+
+  return s;
+}
+
+// Build a concept inventory from invisibleUniTopics on itemsData.
+//
+// This fills conceptMapState.concepts with entries of the form:
+//   { id, label, papers: [docIndex,...], df }
+//
+// and logs summary statistics for debugging.
+function rebuildConceptInventoryFromFingerprints() {
+  if (!itemsData || !itemsData.length) {
+    console.log('ConceptMap: no itemsData yet – load a dataset first.');
+    return null;
+  }
+
+  const nDocs = itemsData.length;
+  const byLabel = Object.create(null);
+  const concepts = [];
+
+  let rawTopics = 0;
+  let docsWithTopics = 0;
+
+  for (let i = 0; i < nDocs; i++) {
+    const meta = itemsData[i];
+    if (!meta) continue;
+
+    const topics = Array.isArray(meta.invisibleUniTopics)
+      ? meta.invisibleUniTopics.map(s => String(s || '').trim()).filter(Boolean)
+      : [];
+
+    if (!topics.length) continue;
+
+    docsWithTopics++;
+
+    // Ensure each concept's DF counts a document only once
+    const seenThisDoc = new Set();
+
+    for (const t of topics) {
+      const label = normaliseConceptLabel(t);
+      if (!label) continue;
+
+      rawTopics++;
+
+      let cid = byLabel[label];
+      if (cid === undefined) {
+        cid = concepts.length;
+        byLabel[label] = cid;
+        concepts.push({
+          id: cid,
+          label,
+          papers: [],
+          df: 0
+        });
+      }
+
+      if (!seenThisDoc.has(cid)) {
+        concepts[cid].papers.push(i);
+        concepts[cid].df++;
+        seenThisDoc.add(cid);
+      }
+    }
+  }
+
+  const uniqueConceptCount = concepts.length;
+  const meanTopicsPerDoc = docsWithTopics ? (rawTopics / docsWithTopics) : 0;
+
+  // DF distribution for debugging
+  let df1 = 0, df2 = 0, df3plus = 0;
+  for (const c of concepts) {
+    if (c.df <= 1) df1++;
+    else if (c.df === 2) df2++;
+    else df3plus++;
+  }
+
+  conceptMapState = {
+    concepts,
+    byLabel,
+    stats: {
+      rawTopicCount: rawTopics,
+      uniqueConceptCount,
+      docsWithTopics
+    },
+    keptConcepts: [],
+    droppedLowDf: [],
+    droppedHighDf: [],
+    pruneParams: null
+  };
+
+  console.log(
+    `ConceptMap: inventory built from ${nDocs} items – ` +
+    `${docsWithTopics} have fingerprints`
+  );
+  console.log(
+    `ConceptMap: collected ${rawTopics} raw topics → ` +
+    `${uniqueConceptCount} unique concepts`
+  );
+  console.log(
+    `ConceptMap: mean topics per labelled paper = ${meanTopicsPerDoc.toFixed(2)}`
+  );
+  console.log(
+    `ConceptMap: DF distribution – df=1: ${df1}, df=2: ${df2}, df≥3: ${df3plus}`
+  );
+
+  return conceptMapState;
+}
+
+// Apply DF-based pruning to the current concept inventory.
+// Uses window.CONCEPT_MIN_DF and window.CONCEPT_MAX_DF_FRAC.
+// Fills conceptMapState.keptConcepts, .droppedLowDf, .droppedHighDf.
+function pruneConceptInventoryByDf() {
+  if (!conceptMapState || !Array.isArray(conceptMapState.concepts)) {
+    console.log('ConceptMap: no concept inventory – run rebuildConceptInventoryFromFingerprints() first.');
+    return null;
+  }
+  if (!itemsData || !itemsData.length) {
+    console.log('ConceptMap: no itemsData – cannot compute DF thresholds.');
+    return null;
+  }
+
+  const concepts = conceptMapState.concepts;
+  const docCount = itemsData.length;
+
+  const minDf = Number.isFinite(window.CONCEPT_MIN_DF) ? window.CONCEPT_MIN_DF : 2;
+  const maxDfFrac = Number.isFinite(window.CONCEPT_MAX_DF_FRAC) ? window.CONCEPT_MAX_DF_FRAC : 0.5;
+  const maxDf = Math.floor(docCount * maxDfFrac);
+
+  const kept = [];
+  const droppedLow = [];
+  const droppedHigh = [];
+
+  for (const c of concepts) {
+    if (c.df < minDf) {
+      droppedLow.push(c);
+    } else if (c.df > maxDf) {
+      droppedHigh.push(c);
+    } else {
+      kept.push(c);
+    }
+  }
+
+  conceptMapState.keptConcepts = kept;
+  conceptMapState.droppedLowDf = droppedLow;
+  conceptMapState.droppedHighDf = droppedHigh;
+  conceptMapState.pruneParams = { minDf, maxDf, maxDfFrac, docCount };
+
+  console.log(
+    `ConceptMap: pruned concepts by DF → kept ${kept.length}, ` +
+    `dropped low-DF: ${droppedLow.length}, dropped high-DF: ${droppedHigh.length}`
+  );
+  console.log(
+    `ConceptMap: DF thresholds – minDf = ${minDf}, maxDf = ${maxDf} ` +
+    `(≈ ${(100 * maxDfFrac).toFixed(1)}% of docs)`
+  );
+
+  return conceptMapState;
+}
 
 
 
