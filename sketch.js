@@ -73,6 +73,32 @@ window.CONCEPT_MIN_DF = window.CONCEPT_MIN_DF || 2;
 // too generic (e.g. "numerical methods") and pruned from the map.
 window.CONCEPT_MAX_DF_FRAC = window.CONCEPT_MAX_DF_FRAC || 0.5;
 
+// --- Concept map: force-directed layout config ------------------------------
+
+// Number of force-iterations to run for the concept graph layout.
+// 300–800 is usually enough for 100–500 nodes.
+window.CONCEPT_LAYOUT_ITERATIONS = window.CONCEPT_LAYOUT_ITERATIONS || 500;
+
+// Overall "time step" (how strongly forces move nodes per iteration).
+window.CONCEPT_LAYOUT_STEP = window.CONCEPT_LAYOUT_STEP || 0.02;
+
+// Global repulsion strength between all nodes.
+window.CONCEPT_LAYOUT_REPULSION = window.CONCEPT_LAYOUT_REPULSION || 400.0;
+
+// Spring strength along edges (attraction).
+window.CONCEPT_LAYOUT_SPRING = window.CONCEPT_LAYOUT_SPRING || 0.05;
+
+// Ideal edge length in layout units.
+window.CONCEPT_LAYOUT_IDEAL_EDGE = window.CONCEPT_LAYOUT_IDEAL_EDGE || 80.0;
+
+// Simple friction factor to damp velocities.
+window.CONCEPT_LAYOUT_FRICTION = window.CONCEPT_LAYOUT_FRICTION || 0.85;
+
+// Slot for layout stats/state
+if (!conceptMapState) conceptMapState = {};
+conceptMapState.layoutStats = conceptMapState.layoutStats || null;
+
+
 // Runtime state for the concept map pipeline (will be filled later)
 let conceptMapState = {
   concepts: [],           // array of { id, label, papers: [...], df }
@@ -16243,3 +16269,221 @@ async function runApplyFingerprintsOnly() {
   }
 }
 
+// --- Concept map: stage 4 – 2D force-directed layout of concept graph -------
+
+// Compute a 2D layout for the concept graph using a simple force-directed model.
+// Reads:
+//   - conceptMapState.keptConcepts  (nodes)
+//   - conceptMapState.coOccurEdges  (edges, with jaccard weight)
+// Writes:
+//   - each concept gains .x and .y coordinates
+//   - conceptMapState.layoutStats summarises the run
+function layoutConceptGraphForce2D() {
+  if (!conceptMapState || !Array.isArray(conceptMapState.keptConcepts) || !conceptMapState.keptConcepts.length) {
+    console.log('ConceptMap (Layout): no kept concepts – run rebuildConceptInventoryFromFingerprints() and pruneConceptInventoryByDf() first.');
+    return null;
+  }
+  if (!Array.isArray(conceptMapState.coOccurEdges) || !conceptMapState.coOccurEdges.length) {
+    console.log('ConceptMap (Layout): no co-occurrence edges – run buildConceptCooccurrenceGraph() first.');
+    return null;
+  }
+
+  const nodes = conceptMapState.keptConcepts;
+  const edges = conceptMapState.coOccurEdges;
+
+  const n = nodes.length;
+  const m = edges.length;
+
+  const iterMax = Number.isFinite(window.CONCEPT_LAYOUT_ITERATIONS)
+    ? window.CONCEPT_LAYOUT_ITERATIONS
+    : 500;
+  const dt = Number.isFinite(window.CONCEPT_LAYOUT_STEP)
+    ? window.CONCEPT_LAYOUT_STEP
+    : 0.02;
+  const repulsion = Number.isFinite(window.CONCEPT_LAYOUT_REPULSION)
+    ? window.CONCEPT_LAYOUT_REPULSION
+    : 400.0;
+  const springK = Number.isFinite(window.CONCEPT_LAYOUT_SPRING)
+    ? window.CONCEPT_LAYOUT_SPRING
+    : 0.05;
+  const idealEdge = Number.isFinite(window.CONCEPT_LAYOUT_IDEAL_EDGE)
+    ? window.CONCEPT_LAYOUT_IDEAL_EDGE
+    : 80.0;
+  const friction = Number.isFinite(window.CONCEPT_LAYOUT_FRICTION)
+    ? window.CONCEPT_LAYOUT_FRICTION
+    : 0.85;
+
+  console.log(
+    `ConceptMap (Layout): starting force layout for ${n} concepts and ${m} edges ` +
+    `(${iterMax} iterations)`
+  );
+
+  // Build a mapping from conceptId -> node index [0..n-1] for efficient lookup
+  const idToIndex = Object.create(null);
+  for (let i = 0; i < n; i++) {
+    idToIndex[nodes[i].id] = i;
+  }
+
+  // Node state arrays
+  const posX = new Float32Array(n);
+  const posY = new Float32Array(n);
+  const velX = new Float32Array(n);
+  const velY = new Float32Array(n);
+
+  // Initial positions: either from existing coords, or random in a small square
+  const R0 = 200;
+  for (let i = 0; i < n; i++) {
+    const c = nodes[i];
+    if (typeof c.x === 'number' && typeof c.y === 'number') {
+      posX[i] = c.x;
+      posY[i] = c.y;
+    } else {
+      const angle = (i / n) * Math.PI * 2;
+      posX[i] = Math.cos(angle) * R0 * (0.5 + Math.random() * 0.5);
+      posY[i] = Math.sin(angle) * R0 * (0.5 + Math.random() * 0.5);
+    }
+    velX[i] = 0;
+    velY[i] = 0;
+  }
+
+  // Edge list in index-space with weight
+  const edgeList = new Array(m);
+  let maxJ = 0;
+  for (let ei = 0; ei < m; ei++) {
+    const e = edges[ei];
+    const aIdx = idToIndex[e.aId];
+    const bIdx = idToIndex[e.bId];
+    if (aIdx === undefined || bIdx === undefined) continue;
+
+    const w = e.jaccard || 0.0;
+    if (w > maxJ) maxJ = w;
+
+    edgeList[ei] = {
+      a: aIdx,
+      b: bIdx,
+      w: w
+    };
+  }
+
+  if (!maxJ) maxJ = 1.0;
+
+  // Main force-iteration loop
+  for (let iter = 0; iter < iterMax; iter++) {
+    // Reset velocities each step to the frictioned values
+    for (let i = 0; i < n; i++) {
+      velX[i] *= friction;
+      velY[i] *= friction;
+    }
+
+    // 1) Repulsive forces between all node pairs (O(n^2), fine for ~few hundred)
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const dx = posX[i] - posX[j];
+        const dy = posY[i] - posY[j];
+        const dist2 = dx * dx + dy * dy + 0.01; // avoid division by zero
+        const dist = Math.sqrt(dist2);
+
+        // Force magnitude inversely proportional to distance
+        const f = repulsion / dist2;
+
+        const fx = (dx / dist) * f;
+        const fy = (dy / dist) * f;
+
+        velX[i] += fx * dt;
+        velY[i] += fy * dt;
+        velX[j] -= fx * dt;
+        velY[j] -= fy * dt;
+      }
+    }
+
+    // 2) Attractive forces along edges (springs)
+    for (let ei = 0; ei < m; ei++) {
+      const e = edgeList[ei];
+      if (!e) continue;
+
+      const i = e.a;
+      const j = e.b;
+
+      const dx = posX[j] - posX[i];
+      const dy = posY[j] - posY[i];
+      const dist = Math.sqrt(dx * dx + dy * dy) + 0.01;
+
+      const desired = idealEdge;
+      const wNorm = (e.w || 0.0) / maxJ; // 0..1
+      const k = springK * (0.5 + 0.5 * wNorm); // stronger springs for stronger edges
+
+      const f = k * (dist - desired);
+
+      const fx = (dx / dist) * f;
+      const fy = (dy / dist) * f;
+
+      velX[i] += fx * dt;
+      velY[i] += fy * dt;
+      velX[j] -= fx * dt;
+      velY[j] -= fy * dt;
+    }
+
+    // 3) Integrate positions
+    for (let i = 0; i < n; i++) {
+      posX[i] += velX[i];
+      posY[i] += velY[i];
+    }
+
+    // Optional: light logging every 100 iterations
+    if ((iter + 1) % 200 === 0 || iter === iterMax - 1) {
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      for (let i = 0; i < n; i++) {
+        if (posX[i] < minX) minX = posX[i];
+        if (posX[i] > maxX) maxX = posX[i];
+        if (posY[i] < minY) minY = posY[i];
+        if (posY[i] > maxY) maxY = posY[i];
+      }
+      console.log(
+        `ConceptMap (Layout): iter ${iter + 1}/${iterMax}, bbox ` +
+        `${(maxX - minX).toFixed(1)}×${(maxY - minY).toFixed(1)}`
+      );
+    }
+  }
+
+  // Write back positions to concepts
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (let i = 0; i < n; i++) {
+    const c = nodes[i];
+    c.x = posX[i];
+    c.y = posY[i];
+    if (posX[i] < minX) minX = posX[i];
+    if (posX[i] > maxX) maxX = posX[i];
+    if (posY[i] < minY) minY = posY[i];
+    if (posY[i] > maxY) maxY = posY[i];
+  }
+
+  // Compute average edge length for a quick sanity check
+  let edgeLenSum = 0;
+  let edgeLenCount = 0;
+  for (const e of edgeList) {
+    if (!e) continue;
+    const dx = posX[e.a] - posX[e.b];
+    const dy = posY[e.a] - posY[e.b];
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    edgeLenSum += dist;
+    edgeLenCount++;
+  }
+  const avgEdgeLen = edgeLenCount ? edgeLenSum / edgeLenCount : 0;
+
+  conceptMapState.layoutStats = {
+    nodeCount: n,
+    edgeCount: m,
+    iterations: iterMax,
+    bboxWidth: maxX - minX,
+    bboxHeight: maxY - minY,
+    avgEdgeLen
+  };
+
+  console.log(
+    `ConceptMap (Layout): finished – ${n} nodes, ${m} edges, ` +
+    `bbox ${(maxX - minX).toFixed(1)}×${(maxY - minY).toFixed(1)}, ` +
+    `avg edge length = ${avgEdgeLen.toFixed(1)}`
+  );
+
+  return conceptMapState;
+}
