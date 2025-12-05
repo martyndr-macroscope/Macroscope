@@ -38,6 +38,52 @@ function setClusterMin(v) {
   initClusterFilterUI?.();   // refresh slider/input/label bounds+value
 }
 
+// --- Concept map: global state container ------------------------------------
+// --- Concept map: force-directed layout config ------------------------------
+
+// Number of force-iterations to run for the concept graph layout.
+// 300–800 is usually enough for 100–500 nodes.
+window.CONCEPT_LAYOUT_ITERATIONS = window.CONCEPT_LAYOUT_ITERATIONS || 500;
+
+// Overall "time step" (how strongly forces move nodes per iteration).
+window.CONCEPT_LAYOUT_STEP = window.CONCEPT_LAYOUT_STEP || 0.02;
+
+// Global repulsion strength between all nodes.
+window.CONCEPT_LAYOUT_REPULSION = window.CONCEPT_LAYOUT_REPULSION || 400.0;
+
+// Spring strength along edges (attraction).
+window.CONCEPT_LAYOUT_SPRING = window.CONCEPT_LAYOUT_SPRING || 0.05;
+
+// Ideal edge length in layout units.
+window.CONCEPT_LAYOUT_IDEAL_EDGE = window.CONCEPT_LAYOUT_IDEAL_EDGE || 80.0;
+
+// Simple friction factor to damp velocities.
+window.CONCEPT_LAYOUT_FRICTION = window.CONCEPT_LAYOUT_FRICTION || 0.85;
+
+// Runtime state for the concept map pipeline (will be filled later)
+let conceptMapState = {
+  concepts: [],           // array of { id, label, papers: [...], df }
+  byLabel: Object.create(null),
+  stats: {
+    rawTopicCount: 0,
+    uniqueConceptCount: 0,
+    docsWithTopics: 0
+  },
+  keptConcepts: [],
+  droppedLowDf: [],
+  droppedHighDf: [],
+  pruneParams: null,
+  // Optional: placeholders, will be overwritten by later stages
+  coOccurEdges: [],
+  coOccurAdj: Object.create(null),
+  coOccurStats: null,
+  layoutStats: null
+};
+
+
+
+
+
 // --- Invisible University lens config ---
 //
 // --- Invisible University lens config ---------------------------------------
@@ -95,24 +141,11 @@ window.CONCEPT_LAYOUT_IDEAL_EDGE = window.CONCEPT_LAYOUT_IDEAL_EDGE || 80.0;
 window.CONCEPT_LAYOUT_FRICTION = window.CONCEPT_LAYOUT_FRICTION || 0.85;
 
 // Slot for layout stats/state
-if (!conceptMapState) conceptMapState = {};
-conceptMapState.layoutStats = conceptMapState.layoutStats || null;
+
 
 
 // Runtime state for the concept map pipeline (will be filled later)
-let conceptMapState = {
-  concepts: [],           // array of { id, label, papers: [...], df }
-  byLabel: Object.create(null),
-  stats: {
-    rawTopicCount: 0,
-    uniqueConceptCount: 0,
-    docsWithTopics: 0
-  },
-  keptConcepts: [],
-  droppedLowDf: [],
-  droppedHighDf: [],
-  pruneParams: null
-};
+
 
 // Backwards-compat alias (no longer used as a global cap)
 //const INV_UNI_MAX_ITEMS = INV_UNI_BATCH_SIZE;
