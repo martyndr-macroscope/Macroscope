@@ -620,6 +620,7 @@ let visAllPubs = 1.0;      // scales ALL publication node alphas
 let visDims    = 1.0;      // scales nodes in *non-AI* dimensions + their handles + their spokes
 let visAIDims  = 1.0;      // scales nodes in *AI* dimensions + their handles + their spokes
 let visEdges   = 1.0;
+let visConceptMap = 0.0;
 
 let ovAbstracts = 0;     // outline ring on docs that have abstracts
 let ovOpenAccess = 0;    // green halo on OA docs
@@ -675,7 +676,8 @@ let dimMembershipDirty = true;
 // ────────────────────────────────────────────────────────────────────────────
 // Node Visibility panel (left column, above Filters)
 // ────────────────────────────────────────────────────────────────────────────
-let nodeVisPanel, allPubsSlider, dimsSlider, aiDimsSlider;
+let nodeVisPanel, allPubsSlider, dimsSlider, aiDimsSlider, conceptMapSlider;
+
 
 function buildNodeVisibilityPanelInto(containerBody) {
   // helper: row with label + short slider
@@ -728,6 +730,14 @@ aiDimsSlider = mkSlider('AI Lenses', Math.round(visAIDims*100), (e) => {
   recomputeVisibility(); 
   redraw();
 });
+
+conceptMapSlider = mkSlider('Concept Map', Math.round(visConceptMap*100), (e) => {
+  visConceptMap = Number(e.target.value)/100;
+  markZeroClass?.({elt:e.target}, visConceptMap===0);
+  // Only affects concept-map overlay; doesn't change node visibility
+  redraw();
+});
+
 
 // Citation Network (edge visibility)
 edgesSlider = mkSlider('Citation Network', Math.round(visEdges*100), (e) => {
@@ -2218,6 +2228,10 @@ if (dimHover < 0 && !uiCapture &&
 
   // Dimension edges in world space (doesn't use push/pop)
   if (typeof drawDimEdges === 'function') drawDimEdges();
+
+  // Concept-map overlay (concept graph in world space)
+if (typeof drawConceptMapWorldSpace === 'function') drawConceptMapWorldSpace();
+
 
   pop();
   // -------------------- END WORLD SPACE --------------------
@@ -16503,14 +16517,19 @@ function layoutConceptGraphForce2D() {
   }
   const avgEdgeLen = edgeLenCount ? edgeLenSum / edgeLenCount : 0;
 
-  conceptMapState.layoutStats = {
-    nodeCount: n,
-    edgeCount: m,
-    iterations: iterMax,
-    bboxWidth: maxX - minX,
-    bboxHeight: maxY - minY,
-    avgEdgeLen
-  };
+conceptMapState.layoutStats = {
+  nodeCount: n,
+  edgeCount: m,
+  iterations: iterMax,
+  bboxWidth: maxX - minX,
+  bboxHeight: maxY - minY,
+  minX,
+  maxX,
+  minY,
+  maxY,
+  avgEdgeLen
+};
+
 
   console.log(
     `ConceptMap (Layout): finished – ${n} nodes, ${m} edges, ` +
@@ -16519,4 +16538,97 @@ function layoutConceptGraphForce2D() {
   );
 
   return conceptMapState;
+}
+
+// Draw the concept-map graph (concept nodes + co-occurrence edges) in world space.
+// Uses conceptMapState.keptConcepts, conceptMapState.coOccurEdges and layoutStats.
+// Controlled by visConceptMap slider (0..1).
+function drawConceptMapWorldSpace() {
+  if (!conceptMapState || !Array.isArray(conceptMapState.keptConcepts) || !conceptMapState.keptConcepts.length) return;
+  if (!conceptMapState.coOccurEdges || !conceptMapState.coOccurEdges.length) return;
+  if (!conceptMapState.layoutStats) return;
+  if (visConceptMap <= 0) return;
+
+  const nodes = conceptMapState.keptConcepts;
+  const edges = conceptMapState.coOccurEdges;
+  const stats = conceptMapState.layoutStats;
+
+  const n = nodes.length;
+  if (!n) return;
+
+  // Layout bbox in layout space
+  const minX = (typeof stats.minX === 'number') ? stats.minX : Math.min(...nodes.map(c => c.x || 0));
+  const maxX = (typeof stats.maxX === 'number') ? stats.maxX : Math.max(...nodes.map(c => c.x || 0));
+  const minY = (typeof stats.minY === 'number') ? stats.minY : Math.min(...nodes.map(c => c.y || 0));
+  const maxY = (typeof stats.maxY === 'number') ? stats.maxY : Math.max(...nodes.map(c => c.y || 0));
+
+  const bboxW = (maxX - minX) || 1;
+  const bboxH = (maxY - minY) || 1;
+
+  // Target area within the world: keep it reasonably compact vs main graph.
+  // We map the concept-map into a circle around the world centre.
+  const cx = world.w * 0.5;
+  const cy = world.h * 0.5;
+
+  // Scale so that the concept bbox fits into ~40% of the smaller world dimension.
+  const targetRadius = Math.min(world.w, world.h) * 0.4;
+  const layoutRadiusX = bboxW * 0.5;
+  const layoutRadiusY = bboxH * 0.5;
+  const scaleFactor = 0.5 * Math.min(targetRadius / layoutRadiusX, targetRadius / layoutRadiusY);
+
+  const midX = (minX + maxX) * 0.5;
+  const midY = (minY + maxY) * 0.5;
+
+  // Precompute a mapping from concept id -> world coordinate
+  const conceptPositions = Object.create(null);
+  for (const c of nodes) {
+    const lx = (typeof c.x === 'number') ? c.x : 0;
+    const ly = (typeof c.y === 'number') ? c.y : 0;
+
+    const wx = cx + (lx - midX) * scaleFactor;
+    const wy = cy + (ly - midY) * scaleFactor;
+
+    conceptPositions[c.id] = { x: wx, y: wy };
+  }
+
+  // --- Draw edges between concepts (co-occurrence links) ---
+  push();
+  // We are already in world-space (cam transform applied in draw()).
+
+  strokeWeight(0.6 / cam.scale);
+
+  for (const e of edges) {
+    const pa = conceptPositions[e.aId];
+    const pb = conceptPositions[e.bId];
+    if (!pa || !pb) continue;
+
+    // Simple weight-based alpha (soft bluish lines)
+    const w = e.jaccard || 0;
+    const a = Math.round(120 * visConceptMap * (0.5 + 0.5 * Math.min(1, w / 0.3)));
+    stroke(120, 120, 200, a);
+
+    line(pa.x, pa.y, pb.x, pb.y);
+  }
+
+  // --- Draw concept nodes and labels ---
+  textAlign(CENTER, CENTER);
+  textSize(10 / cam.scale);
+
+  for (const c of nodes) {
+    const p = conceptPositions[c.id];
+    if (!p) continue;
+
+    const r = 5 / cam.scale;
+
+    fill(20, 20, 40, Math.round(230 * visConceptMap));
+    stroke(240, 240, 255, Math.round(220 * visConceptMap));
+    strokeWeight(1 / cam.scale);
+    circle(p.x, p.y, r * 2);
+
+    noStroke();
+    fill(230, 230, 255, Math.round(255 * visConceptMap));
+    text(c.label || '', p.x, p.y - (10 / cam.scale));
+  }
+
+  pop();
 }
