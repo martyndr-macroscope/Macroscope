@@ -3681,6 +3681,28 @@ const refsTotal = Array.isArray(w.referenced_works)
           : `<div style="opacity:.6;font-size:13px">No abstract</div>`
       }
 
+      ${
+        iuTopics.length
+          ? `
+            <div style="font-weight:600;font-size:13px;margin:10px 0 4px;">
+              Topics (Invisible University)
+            </div>
+            <div style="opacity:.9;font-size:12px;margin-bottom:4px;">
+              ${iuTopics.map(t => `
+                <span style="
+                  display:inline-block;
+                  background:rgba(255,255,255,0.06);
+                  border-radius:12px;
+                  padding:2px 8px;
+                  margin:0 6px 4px 0;
+                  white-space:nowrap;
+                ">${safe(t)}</span>
+              `).join('')}
+            </div>
+          `
+          : ''
+      }
+
       <div style="font-weight:600;font-size:13px;margin:10px 0 4px;">Full text</div>
       ${
         hasFullText
@@ -12553,18 +12575,19 @@ function buildViewerDetailsObject(i) {
       ? cleanDOI(w.doi || it.doi || '')
       : (w.doi || it.doi || '');
 
-  // Pick a good human URL (landing page > PDF > venue > OpenAlex > DOI)
   const doiUrl = doiClean ? `https://doi.org/${doiClean}` : '';
   const bestUrl = (typeof pickBestUrl === 'function') ? pickBestUrl(w, doiUrl) : (doiUrl || w?.id || '');
 
-  // OA flags
   const oaObj = w.open_access || {};
   const oaStatus = oaObj.is_oa ? (oaObj.oa_status || '') : '';
 
-
-
   const oaLink = (typeof normOA === 'function') ? normOA(w.id) : (w.id || null);
   const abs = (it.openalex_abstract || (typeof getAbstract==='function' ? getAbstract(w) : '') || '').toString();
+
+  // NEW: viewer-friendly copy of fingerprints
+  const iuTopics = Array.isArray(it.invisibleUniTopics)
+    ? it.invisibleUniTopics.map(s => String(s || '').trim()).filter(Boolean)
+    : [];
 
   return {
     id,
@@ -12588,6 +12611,7 @@ function buildViewerDetailsObject(i) {
     seed: !!it.isSeed
   };
 }
+
 
 async function exportViewerPackageZip(opts = {}) {
 
