@@ -14807,24 +14807,73 @@ function parseInvisibleTopicsResponse(raw) {
 
   let jsonText = t;
 
-  // ```json ... ```
+  // 1) Strip ```json fences if present
   const fenced = t.match(/```json([\s\S]*?)```/i);
   if (fenced) {
     jsonText = fenced[1];
   } else {
-    // try “largest” JSON object from the last { ... }
+    // 2) Try "largest" JSON-ish block from the last "{"
     const block = t.match(/\{[\s\S]*\}$/);
     if (block) jsonText = block[0];
   }
 
+  let obj = null;
   try {
-    const obj = JSON.parse(jsonText);
-    if (obj && typeof obj === 'object') return obj;
+    obj = JSON.parse(jsonText);
   } catch (e) {
     console.warn('Invisible University: failed to parse topics JSON', e, raw);
+    return null;
   }
-  return null;
+  if (!obj) return null;
+
+  // ---- Normalise into { papers: [ {id, topics}, ... ] } -------------------
+  let papers = null;
+
+  // Case A: top-level already an array of {id, topics}
+  if (Array.isArray(obj)) {
+    papers = obj;
+  }
+  // Case B: { papers: [ ... ] }
+  else if (Array.isArray(obj.papers)) {
+    papers = obj.papers;
+  }
+  // Case C: { docs: [ ... ] } or { items: [ ... ] }
+  else if (Array.isArray(obj.docs)) {
+    papers = obj.docs;
+  } else if (Array.isArray(obj.items)) {
+    papers = obj.items;
+  }
+  // Case D: { papers: { "12": ["a","b"], "34": ["c"] } }
+  else if (obj.papers && typeof obj.papers === 'object') {
+    const entries = Object.entries(obj.papers);
+    papers = entries.map(([id, topics]) => ({
+      id,
+      topics: topics && topics.topics ? topics.topics : topics
+    }));
+  }
+  // Case E: object map id -> { topics: [...] } or id -> [...]
+  else if (obj && typeof obj === 'object') {
+    const keys = Object.keys(obj);
+    if (keys.length && keys.every(k => typeof obj[k] === 'object' || Array.isArray(obj[k]))) {
+      papers = keys.map(k => {
+        const v = obj[k];
+        const topics = Array.isArray(v)
+          ? v
+          : (Array.isArray(v?.topics) ? v.topics : []);
+        return { id: k, topics };
+      });
+    }
+  }
+
+  if (!papers || !papers.length) {
+    console.warn('Invisible University: parsed JSON but found no papers/topics', obj);
+    return null;
+  }
+
+  // Final normalised structure
+  return { papers };
 }
+
 
 // Generate / ensure per-doc topical phrases for a set of items
 // Generate / ensure per-doc topical phrases for a set of items
@@ -14838,26 +14887,28 @@ async function ensureInvisibleUniTopicsForItems(items) {
     meta = meta || itemsData[idx] || {};
     const w = meta.openalex || it.openalex || {};
 
-    // Try all the common abstract fields you use elsewhere
-    let raw =
-      it.abstract ||                       // from collectVisibleForSynthesis()
-      it.openalex_abstract ||              // if we ever stored it on the item
-      meta.openalex_abstract ||            // cached, flattened OpenAlex abstract
-      meta.abstract ||                     // viewer / compact form
-      (typeof abstractForIndex === 'function'
-        ? abstractForIndex(idx)            // generic helper if present
-        : '') ||
-      (typeof getAbstract === 'function'
-        ? getAbstract(w)                   // OpenAlex inverted-index helper
-        : '') ||
-      w.abstract ||                        // direct OpenAlex abstract
+    // 1) If the collectVisibleForSynthesis() item already has an abstract, use it
+    if (it && typeof it.abstract === 'string' && it.abstract.trim()) {
+      return it.abstract.trim();
+    }
+
+    // 2) If we have the global helper, use that – it already folds title+concepts
+    if (typeof abstractForIndex === 'function') {
+      const a = abstractForIndex(idx);
+      if (a && String(a).trim()) return String(a).trim();
+    }
+
+    // 3) Fallback to plain OpenAlex abstract chain
+    const raw =
+      meta.openalex_abstract ||
+      (typeof getAbstract === 'function' ? getAbstract(w) : '') ||
+      w.abstract ||
       '';
 
-    raw = String(raw || '').trim();
-    return raw;
+    return String(raw || '').trim();
   }
 
-  // --- 1) Build a clean "toProcess" list -------------------------------
+  // --- 1) Build a clean "toProcess" list -----------------------------------
   const toProcess = [];
 
   for (const it of items) {
@@ -14873,7 +14924,7 @@ async function ensureInvisibleUniTopicsForItems(items) {
     }
 
     const absStr = bestAbstractFor(idx, it, meta);
-    if (!absStr) continue;  // nothing sensible to label
+    if (!absStr) continue;
 
     const w = meta.openalex || it.openalex || {};
     const title =
@@ -14883,11 +14934,13 @@ async function ensureInvisibleUniTopicsForItems(items) {
       meta.title ||
       'Untitled';
 
+    // Keep things short to avoid truncation in the LLM call
+    const absWords = absStr.split(/\s+/).slice(0, 60).join(' ');
+
     toProcess.push({
-      id: idx,
-      idx,
+      id: idx,          // GLOBAL_ID == graph index
       title,
-      abstract: absStr
+      abstract: absWords
     });
   }
 
@@ -14900,87 +14953,114 @@ async function ensureInvisibleUniTopicsForItems(items) {
   );
 
   if (!toProcess.length) {
-    console.log('Invisible University: nothing to fingerprint (either no abstracts or already done).');
+    console.log('Invisible University: no valid items to fingerprint (all done or no abstracts).');
     return;
   }
 
-  // --- 2) Batch over the LLM ------------------------------------------
-  const batchSize = window.INV_UNI_FP_BATCH_SIZE || 80;
-  const total = toProcess.length;
-  const numBatches = Math.ceil(total / batchSize);
+  // --- 2) Batch and call the model -----------------------------------------
+  const batchSize    = window.INV_UNI_FP_BATCH_SIZE || 32;
+  const topicsPerDoc = window.INV_UNI_FP_TOPICS_PER_DOC || 8;
 
-  for (let batchNum = 0; batchNum < numBatches; batchNum++) {
-    const start = batchNum * batchSize;
+  console.log(
+    'Invisible University: generating topic fingerprints for',
+    toProcess.length,
+    'items in batches of',
+    batchSize
+  );
+
+  for (let start = 0; start < toProcess.length; start += batchSize) {
     const batch = toProcess.slice(start, start + batchSize);
-
-    // Build the prompt content for this batch
-    const sys = [
-      'You are assigning short topical fingerprints to research papers.',
-      'For EACH paper, return JSON ONLY of the form:',
-      '{"papers":[{"id":IDX,"topics":["phrase 1","phrase 2", ...]}, ...]}',
-      'Use the provided id as "id". 1–8 short, specific topic phrases per paper.',
-      'Topics should be concise labels like "bio-based cement", "fire-retardant textiles", etc.'
-    ].join(' ');
-
-    const userLines = batch.map(p =>
-      `ID: ${p.id}\nTITLE: ${p.title}\nABSTRACT: ${p.abstract}`
-    );
-    const user = [
-      'Assign topical fingerprint phrases to each of the following papers.',
-      'Respond with JSON ONLY.',
-      '',
-      userLines.join('\n\n')
-    ].join('\n');
-
-    const messages = [
-      { role: 'system', content: sys },
-      { role: 'user',   content: user }
-    ];
+    const prettyIdx = `${start + 1}-${start + batch.length} of ${toProcess.length}`;
 
     showLoading(
-      `Invisible University: labelling topics (${batchNum + 1}/${numBatches})…`,
-      0.15 + 0.25 * ((batchNum + 1) / numBatches)
+      `Invisible University: generating topical fingerprints (${start + batch.length}/${toProcess.length})…`,
+      0.01 + 0.14 * ((start + batch.length) / toProcess.length)
     );
+
+    // Build the prompt
+    const lines = batch.map((p, i) => {
+      return [
+        `${i + 1}. ID=${p.id}`,            // local row + GLOBAL_ID
+        `Title: ${p.title}`,
+        p.abstract ? `Summary: ${p.abstract}` : ''
+      ].filter(Boolean).join('\n');
+    }).join('\n\n');
+
+    const systemMsg = {
+      role: 'system',
+      content:
+        'You are an expert research librarian. ' +
+        'For each paper you receive, you assign concise topical key-phrases ' +
+        'describing methods, materials, organisms, systems, and application domains. ' +
+        'Respond ONLY with valid JSON, no explanations, no markdown.'
+    };
+
+    const userMsg = {
+      role: 'user',
+      content:
+        `For each numbered publication below, generate ${topicsPerDoc} short topical key-phrases.\n` +
+        `Focus on: discipline, sub-field, methods, materials, organisms, systems, and application domains.\n` +
+        `Avoid generic words such as "study", "paper", "research", "analysis".\n\n` +
+        `Return STRICT JSON of the form:\n` +
+        `{"papers":[{"id":123,"topics":["topic one","topic two", ...]}, ...]}\n\n` +
+        `Use as "id" the numeric GLOBAL_ID that appears after "ID=" for each publication.\n\n` +
+        `Publications:\n\n` + lines
+    };
 
     let raw;
     try {
-      raw = await openaiChatDirect(messages, {
-        max_tokens: 900,
-        temperature: 0.2
+      raw = await openaiChatDirect([systemMsg, userMsg], {
+        max_tokens: 1500,
+        temperature: 0.3
       });
-    } catch (e) {
-      console.warn('Invisible University: topic fingerprint call failed for batch', batchNum + 1, e);
+    } catch (err) {
+      console.error('Invisible University: topic batch call failed', err, 'for docs', prettyIdx);
+      continue; // try the next batch
+    }
+
+    const parsed = parseInvisibleTopicsResponse(raw);
+    if (!parsed || !Array.isArray(parsed.papers)) {
+      console.warn('Invisible University: no usable topics in response for this batch', raw);
       continue;
     }
 
-    const obj = parseInvisibleTopicsResponse(raw);
-    if (!obj || !Array.isArray(obj.papers || obj.docs)) {
-      console.warn('Invisible University: no papers/topics returned for batch', batchNum + 1, 'of', numBatches);
-      continue;
+    // --- 3) Map model ids back to the correct global indices ----------------
+    const batchMap = new Map();   // GLOBAL_ID -> true
+    for (const p of batch) {
+      batchMap.set(p.id, true);
     }
 
-    const list = obj.papers || obj.docs || [];
     let wroteForBatch = 0;
 
-    // Map from id -> source doc (so we only write to in-batch items)
-    const batchMap = new Map(batch.map(p => [p.id, p]));
+    for (const paper of parsed.papers) {
+      if (!paper) continue;
 
-    for (const rec of list) {
-      if (!rec) continue;
-      const idNum = Number(rec.id);
-      if (!Number.isFinite(idNum)) continue;
-      const src = batchMap.get(idNum);
-      if (!src) continue;
+      let rawId = paper.id;
+      let idNum = Number(rawId);
 
-      const meta = itemsData[idNum] || (itemsData[idNum] = {});
-      const topics = Array.isArray(rec.topics)
-        ? rec.topics.map(s => String(s || '').trim()).filter(Boolean)
+      // Tolerate e.g. "ID=12" or "paper-5"
+      if (!Number.isFinite(idNum)) {
+        const m = String(rawId).match(/(\d+)/);
+        if (!m) continue;
+        idNum = Number(m[1]);
+      }
+
+      if (!batchMap.has(idNum)) {
+        // Not one of the items in this batch – ignore
+        continue;
+      }
+
+      const topics = Array.isArray(paper.topics)
+        ? paper.topics.map(s => String(s || '').trim()).filter(Boolean)
         : [];
 
-      if (topics.length) {
-        meta.invisibleUniTopics = topics;
-        wroteForBatch++;
-      }
+      if (!topics.length) continue;
+
+      let meta = itemsData[idNum];
+      if (!meta) meta = itemsData[idNum] = {};
+
+      meta.invisibleUniTopics = topics;
+      wroteForBatch++;
     }
 
     console.log(
@@ -14988,21 +15068,31 @@ async function ensureInvisibleUniTopicsForItems(items) {
     );
   }
 
-  // --- 3) Final summary over all items ---------------------------------
-  let totalWithTopics = 0;
-  for (const it of items) {
-    const idx = it.idx ?? it.id;
-    if (!Number.isFinite(idx)) continue;
-    const meta = itemsData[idx] || {};
-    if (Array.isArray(meta.invisibleUniTopics) && meta.invisibleUniTopics.length) {
-      totalWithTopics++;
-    }
-  }
+  hideLoading();
 
-  console.log(
-    `Invisible University: fingerprints now present for ${totalWithTopics} of ${items.length} items`
-  );
+  // --- 4) Final tally for all items passed in -------------------------------
+  try {
+    let totalWithTopics = 0;
+    for (const it of items) {
+      const idx = it.idx ?? it.id;
+      if (!Number.isFinite(idx)) continue;
+      const meta = itemsData?.[idx];
+      if (meta && Array.isArray(meta.invisibleUniTopics) && meta.invisibleUniTopics.length) {
+        totalWithTopics++;
+      }
+    }
+    console.log(
+      'Invisible University: fingerprints now present for',
+      totalWithTopics,
+      'of',
+      items.length,
+      'items'
+    );
+  } catch (err) {
+    console.warn('Invisible University: error counting final fingerprints', err);
+  }
 }
+
 
 
 
