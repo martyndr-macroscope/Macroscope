@@ -14840,6 +14840,14 @@ async function ensureInvisibleUniTopicsForItems(items) {
       withTopics++;
     }
   }
+console.log(
+    'Invisible University: fingerprints now present for',
+    totalWithTopics,
+    'of',
+    items.length,
+    'items'
+  );
+
   if (withTopics && withTopics >= 0.98 * items.length) {
     console.log('Invisible University: reusing existing topic fingerprints for',
       withTopics, 'of', items.length, 'items');
@@ -14940,18 +14948,34 @@ async function ensureInvisibleUniTopicsForItems(items) {
       continue;
     }
 
-    for (const p of parsed.papers) {
-      const idx = Number(p.id);
-      if (!Number.isFinite(idx)) continue;
+for (const p of parsed.papers) {
+  // Be tolerant about how the model encodes IDs
+  let rawId = p.id;
+  let idx = Number(rawId);
 
-      const meta = itemsData[idx] || (itemsData[idx] = {});
-      const topics = Array.isArray(p.topics)
-        ? p.topics.map(s => String(s || '').trim()).filter(Boolean)
-        : [];
-
-      if (!topics.length) continue;
-      meta.invisibleUniTopics = topics;
+  // If it's not a plain number (e.g. "ID=12" or "paper-5"),
+  // try to extract the last integer substring.
+  if (!Number.isFinite(idx)) {
+    const m = String(rawId).match(/(\d+)/g);
+    if (m && m.length) {
+      idx = Number(m[m.length - 1]);
     }
+  }
+
+  if (!Number.isFinite(idx)) {
+    console.warn('Invisible University: could not interpret paper id', p.id);
+    continue;
+  }
+
+  const meta = itemsData[idx] || (itemsData[idx] = {});
+  const topics = Array.isArray(p.topics)
+    ? p.topics.map(s => String(s || '').trim()).filter(Boolean)
+    : [];
+
+  if (!topics.length) continue;
+  meta.invisibleUniTopics = topics;
+}
+
   }
 }
 
