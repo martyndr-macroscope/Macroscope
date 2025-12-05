@@ -14796,9 +14796,10 @@ function getPrimaryConceptForItem(it) {
 // --- Invisible University: LLM topic fingerprints --------------------------
 
 // How many papers per LLM batch when generating per-doc topics
-window.INV_UNI_FP_BATCH_SIZE     = window.INV_UNI_FP_BATCH_SIZE     || 80;
+window.INV_UNI_FP_BATCH_SIZE     = 12;
+
 // How many topical phrases per paper
-window.INV_UNI_FP_TOPICS_PER_DOC = window.INV_UNI_FP_TOPICS_PER_DOC || 8;
+window.INV_UNI_FP_TOPICS_PER_DOC = 6;
 
 // Parse JSON for the topic-fingerprint response: {"papers":[{"id":123,"topics":[...]}]}
 function parseInvisibleTopicsResponse(raw) {
@@ -14960,7 +14961,7 @@ async function ensureInvisibleUniTopicsForItems(items) {
       'Untitled';
 
     // Keep things short to avoid truncation in the LLM call
-    const absWords = absStr.split(/\s+/).slice(0, 60).join(' ');
+    const absWords = absStr.split(/\s+/).slice(0, 40).join(' ');
 
     toProcess.push({
       id: idx,          // GLOBAL_ID == graph index
