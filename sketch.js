@@ -113,11 +113,11 @@ const INV_UNI_PURITY_STD_MULT          = 0.5;   // how aggressively to prune (μ
 // --- Concept map config (hybrid pipeline, stage 1: inventory + DF pruning) --
 
 // Minimum number of *papers* a concept must appear in to be kept.
-window.CONCEPT_MIN_DF = window.CONCEPT_MIN_DF || 2;
+window.CONCEPT_MIN_DF = window.CONCEPT_MIN_DF || 4;
 
 // Maximum fraction of papers a concept can appear in before it is treated as
 // too generic (e.g. "numerical methods") and pruned from the map.
-window.CONCEPT_MAX_DF_FRAC = window.CONCEPT_MAX_DF_FRAC || 0.5;
+window.CONCEPT_MAX_DF_FRAC = window.CONCEPT_MAX_DF_FRAC || 0.3;
 
 // --- Concept map: force-directed layout config ------------------------------
 
