@@ -960,6 +960,8 @@ binIconImg = loadImage(
     abstracts: loadImage('Icons/Lens_Abstracts.png',  () => {}, () => console.warn('Missing Icons/Lens_Abstracts.png')),
     chrono:    loadImage('Icons/Lens_Chrono.png',     () => {}, () => console.warn('Missing Icons/Lens_Chrono.png')),
     question:  loadImage('Icons/Lens_Question.png',   () => {}, () => console.warn('Missing Icons/Lens_Question.png')),
+    ref:       loadImage('Icons/Lens_REF.png',        () => {}, () => console.warn('Missing Icons/Lens_REF.png')),
+
     // fallback to the generic AI handle if a specific icon is missing
     default:   dimIcons.ai || loadImage('Icons/AI_Dim_Handle.png', () => {}, () => {})
   }; 
@@ -5201,6 +5203,8 @@ function createAIMenuButton() {
   addItem('Invisible University (themes)…', () => runInvisibleUniversityLens?.());
   addItem('Chronological review',() => runChronologicalReview?.());
   addItem('Open question…',          () => runOpenQuestion?.());
+  addItem('REF assessment (full text)', () => runREFLens?.());
+
 
   aiMenuBtn.mousePressed(toggleAIMenu);
 
@@ -6921,6 +6925,10 @@ const itemsForRun = (typeof collectVisibleForSynthesis === 'function')
 
 }
 
+
+
+
+
 // Short label to ground the model during merge (saves tokens)
 function shortRef(it) {
   const au = (it.authors && it.authors[0]) ? it.authors[0] : 'Anon';
@@ -7121,6 +7129,323 @@ if (totalSize < minForAI) {
 addAIFootprintFromItems('reader', _footprintItems, finalReaderText, 'Reader extract');
   updateInfo(); redraw();
 }
+
+// =======================
+// REF AI LENS (full text)
+// =======================
+
+// Keep results from the last run available globally (for debug / re-export)
+window.__refLensLast = window.__refLensLast || null;
+
+// Minimal CSV helper
+function csvEscape(v) {
+  const s = String(v ?? '');
+  if (/[,"\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+  return s;
+}
+function toCSV(rows, headers) {
+  const head = headers.join(',');
+  const body = rows.map(r => headers.map(h => csvEscape(r[h])).join(',')).join('\n');
+  return head + '\n' + body + '\n';
+}
+
+// Download helper with explicit MIME type
+function downloadTextFile(fileName, text, mime = 'text/plain') {
+  try {
+    const blob = new Blob([text], { type: mime + ';charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName || 'download.txt';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 250);
+  } catch (e) {
+    console.warn('downloadTextFile failed:', e);
+  }
+}
+
+// Prompt builder: REF-style scoring + UoA assignment.
+// NOTE: user asked for a 5-point scale; we define a mapping to REF star levels.
+function buildREFPrompt(doc, uoaListText) {
+  const sys =
+`You are acting like a UK REF reviewer.
+Given the paper's metadata + (possibly truncated) full text, you will:
+1) Assign REF-style judgements for Originality, Significance, and Rigour on a 1–5 scale.
+2) Assign the best-matching Unit of Assessment (UoA) from the provided list.
+
+IMPORTANT:
+- Use the 1–5 scale as:
+  5 = world-leading (≈ 4*)
+  4 = internationally excellent (≈ 3*)
+  3 = recognised internationally (≈ 2*)
+  2 = recognised nationally (≈ 1*)
+  1 = unclassified
+- Be conservative if evidence is thin (e.g., truncated text): lower confidence and explain briefly.
+- Return ONLY valid JSON. No prose.`;
+
+  const user =
+`Choose ONE Unit of Assessment from this list (use EXACT number + name):
+${uoaListText}
+
+PAPER METADATA:
+Title: ${doc.title || 'Untitled'}
+Authors: ${doc.authors || 'Unknown'}
+Year: ${doc.year || ''}
+Venue: ${doc.venue || ''}
+DOI: ${doc.doi ? ('https://doi.org/' + doc.doi) : 'n/a'}
+
+FULL TEXT (may be truncated):
+${String(doc.text || '').slice(0, 18000)}
+
+Return ONLY this JSON object (no extra keys):
+{
+  "uoa_number": 0,
+  "uoa_name": "",
+  "originality": 0,
+  "significance": 0,
+  "rigour": 0,
+  "confidence": 0.0,
+  "notes": ""
+}`;
+
+  return [{ role: 'system', content: sys }, { role: 'user', content: user }];
+}
+
+// Robust JSON extraction (handles accidental surrounding text)
+function extractFirstJsonObject(txt) {
+  const s = String(txt || '').trim();
+  // fast path
+  try {
+    const j = JSON.parse(s);
+    if (j && typeof j === 'object') return j;
+  } catch {}
+  // find first {...} block
+  const i0 = s.indexOf('{');
+  const i1 = s.lastIndexOf('}');
+  if (i0 >= 0 && i1 > i0) {
+    const sub = s.slice(i0, i1 + 1);
+    try {
+      const j = JSON.parse(sub);
+      if (j && typeof j === 'object') return j;
+    } catch {}
+  }
+  return null;
+}
+
+function clampInt(x, lo, hi) {
+  const n = Math.round(Number(x));
+  if (!Number.isFinite(n)) return lo;
+  return Math.max(lo, Math.min(hi, n));
+}
+
+function clamp01(x) {
+  const n = Number(x);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(1, n));
+}
+
+// UoA list (REF2021/REF2029 kept same 34; numbers + names)
+// Keep it compact but exact.
+function getUoaListText() {
+  return [
+    "1 Clinical Medicine",
+    "2 Public Health, Health Services and Primary Care",
+    "3 Allied Health Professions, Dentistry, Nursing and Pharmacy",
+    "4 Psychology, Psychiatry and Neuroscience",
+    "5 Biological Sciences",
+    "6 Agriculture, Food and Veterinary Sciences",
+    "7 Earth Systems and Environmental Sciences",
+    "8 Chemistry",
+    "9 Physics",
+    "10 Mathematical Sciences",
+    "11 Computer Science and Informatics",
+    "12 Engineering",
+    "13 Architecture, Built Environment and Planning",
+    "14 Geography and Environmental Studies",
+    "15 Archaeology",
+    "16 Economics and Econometrics",
+    "17 Business and Management Studies",
+    "18 Law",
+    "19 Politics and International Studies",
+    "20 Social Work and Social Policy",
+    "21 Sociology",
+    "22 Anthropology and Development Studies",
+    "23 Education",
+    "24 Sport and Exercise Sciences, Leisure and Tourism",
+    "25 Area Studies",
+    "26 Modern Languages and Linguistics",
+    "27 English Language and Literature",
+    "28 History",
+    "29 Classics",
+    "30 Philosophy",
+    "31 Theology and Religious Studies",
+    "32 Art and Design: History, Practice and Theory",
+    "33 Music, Drama, Dance, Performing Arts, Film and Screen Studies",
+    "34 Communication, Cultural and Media Studies, Library and Information Management"
+  ].join('\n');
+}
+
+// Main entry point (wired from AI dropdown)
+async function runREFLens() {
+  // 0) Collect visible cached full texts (same mechanism as Reader)
+  const docs = (typeof collectVisibleFulltextCorpus === 'function')
+    ? collectVisibleFulltextCorpus()
+    : [];
+  if (!docs.length) { openSynthPanel('No cached full texts visible.'); return; }
+
+  // Open panel + prep
+  openSynthPanel(`REF assessing ${docs.length} full texts…`);
+  setSynthProgressHtml(`<div>Starting REF assessment for ${docs.length} papers…</div>`);
+
+  const uoaListText = getUoaListText();
+
+  const results = [];
+  const CALL_DELAY_MS = 160;
+  const MAX_TOKENS = 260; // JSON only, keep small
+
+  for (let i = 0; i < docs.length; i++) {
+    const d = docs[i];
+    setSynthProgressHtml(`<div>REF assessing ${i + 1}/${docs.length}…</div>`);
+
+    let raw = '';
+    try {
+      const msg = buildREFPrompt(d, uoaListText);
+      raw = await openaiChatDirect(msg, { temperature: 0.2, max_tokens: MAX_TOKENS });
+    } catch (e) {
+      console.warn('REF call failed:', e);
+      raw = '';
+    }
+
+    const j = extractFirstJsonObject(raw) || {};
+
+    const uoa_number = clampInt(j.uoa_number, 1, 34);
+    const uoa_name   = String(j.uoa_name || '').trim();
+
+    const originality  = clampInt(j.originality, 1, 5);
+    const significance = clampInt(j.significance, 1, 5);
+    const rigour       = clampInt(j.rigour, 1, 5);
+    const confidence   = clamp01(j.confidence);
+
+    const notes = String(j.notes || '').trim().slice(0, 600);
+
+    const avg = ((originality + significance + rigour) / 3).toFixed(2);
+
+    results.push({
+      idx: d.idx,
+      title: d.title || '',
+      authors: d.authors || '',
+      year: d.year || '',
+      venue: d.venue || '',
+      doi: d.doi || '',
+      uoa_number,
+      uoa_name,
+      originality,
+      significance,
+      rigour,
+      avg,
+      confidence,
+      notes
+    });
+
+    // gentle pacing
+    if (typeof sleep === 'function') await sleep(CALL_DELAY_MS);
+    else await new Promise(r => setTimeout(r, CALL_DELAY_MS));
+  }
+
+  // Save globally for debug / quick re-export
+  window.__refLensLast = { when: Date.now(), count: results.length, results };
+
+  // Build markdown summary for the panel + AI footprint
+  const top = results
+    .slice()
+    .sort((a,b) => (+b.avg) - (+a.avg))
+    .slice(0, Math.min(12, results.length));
+
+  const mdTable = (rows) => {
+    const header = `| Avg | O | S | R | UoA | Year | Title |\n|---:|---:|---:|---:|---|---:|---|\n`;
+    const lines = rows.map(r => {
+      const u = `${r.uoa_number} ${r.uoa_name || ''}`.trim();
+      const t = String(r.title || '').replace(/\|/g,'—');
+      return `| ${r.avg} | ${r.originality} | ${r.significance} | ${r.rigour} | ${u.replace(/\|/g,'—')} | ${r.year || ''} | ${t} |`;
+    }).join('\n');
+    return header + lines;
+  };
+
+  const outMd =
+`# REF assessment (AI lens)
+
+Processed **${results.length}** visible publications with cached full text.
+
+Scoring scale used:
+- **5** = world-leading (≈ 4*)
+- **4** = internationally excellent (≈ 3*)
+- **3** = recognised internationally (≈ 2*)
+- **2** = recognised nationally (≈ 1*)
+- **1** = unclassified
+
+## Top items (by average O/S/R)
+
+${mdTable(top)}
+
+## Notes
+- These are **AI estimates** based on available full text (often truncated) + metadata.
+- Use *confidence* + *notes* to triage what needs human reading.
+`;
+
+  setSynthProgressHtml('');
+  setSynthBodyText(outMd, 'ref_assessment.md');
+
+  // Add AI footprint linked to the assessed items
+  try {
+    addAIFootprintFromItems('ref', docs, outMd, 'REF assessment (full-text)');
+    redraw();
+  } catch (e) {
+    console.warn('Footprint (ref) failed:', e);
+  }
+
+  // CSV export
+  const headers = [
+    'idx','title','authors','year','venue','doi',
+    'uoa_number','uoa_name',
+    'originality','significance','rigour','avg',
+    'confidence','notes'
+  ];
+  const csv = toCSV(results, headers);
+
+  // Enable “download” via Synth panel download button if your UI uses it,
+  // but also force a direct CSV download link via a small inline button.
+  // (We don’t assume your enableSynthDownload supports CSV MIME types.)
+  try {
+    // If your synth panel has custom HTML, you can add a button there:
+    const btnHtml =
+      `<div style="margin:10px 0 0">
+        <button id="refCsvBtn"
+          style="padding:8px 10px;border-radius:10px;border:1px solid rgba(255,255,255,0.18);
+                 background:rgba(255,255,255,0.08);color:#fff;cursor:pointer;">
+          Download REF CSV
+        </button>
+      </div>`;
+    setSynthHtml(btnHtml);
+    setTimeout(() => {
+      const b = document.getElementById('refCsvBtn');
+      if (b) b.onclick = () => downloadTextFile('ref_assessment.csv', csv, 'text/csv');
+    }, 30);
+  } catch (e) {
+    console.warn('REF CSV button failed:', e);
+    // fallback: just download immediately
+    downloadTextFile('ref_assessment.csv', csv, 'text/csv');
+  }
+}
+
+
+
+
+
+
+
+
 function pointerOverUI() {
   const el = document.elementFromPoint(mouseX, mouseY);
   if (!el) return false;
@@ -13452,6 +13777,10 @@ function aiKindOf(d) {
 
   // Open question
   if (s.includes('question')) return 'question';
+    // REF assessment
+  if (s.includes('ref')) return 'ref';
+  if (s.includes('research excellence')) return 'ref';
+
 
   return null; // unknown → fallback
 }
