@@ -7197,7 +7197,8 @@ Venue: ${doc.venue || ''}
 DOI: ${doc.doi ? ('https://doi.org/' + doc.doi) : 'n/a'}
 
 FULL TEXT (may be truncated):
-${String(doc.text || '').slice(0, 18000)}
+${doc.text_for_ref || String(doc.text || '').slice(0, 80000)}
+
 
 Return ONLY this JSON object (no extra keys):
 {
@@ -7311,6 +7312,47 @@ async function runREFLens() {
 
     let raw = '';
     try {
+
+// If full text is huge, chunk-summarise first to avoid truncation/context overflow
+const rawText = String(d.text || '');
+const CHAR_HARD_CAP = 80000;      // try direct scoring up to this
+const CHUNK_SIZE = 22000;         // chunk size for summariser
+const CHUNK_MAX = 6;              // cap number of chunks (cost control)
+
+if (rawText.length > CHAR_HARD_CAP) {
+  const chunks = [];
+  for (let c = 0; c < Math.min(CHUNK_MAX, Math.ceil(rawText.length / CHUNK_SIZE)); c++) {
+    const start = c * CHUNK_SIZE;
+    const end = start + CHUNK_SIZE;
+    chunks.push(rawText.slice(start, end));
+  }
+
+  // Summarise chunks into a REF-relevant brief
+  let combinedBrief = '';
+  for (let c = 0; c < chunks.length; c++) {
+    const sumMsg = [
+      { role: 'system', content: 'You summarise academic papers for REF-style assessment.' },
+      { role: 'user', content:
+`Summarise this segment of a paper for REF assessment.
+Extract: (1) contribution/novelty, (2) methods/rigour signals, (3) key results, (4) limitations, (5) likely UoA cues.
+Return 5 bullet points, concise.
+
+SEGMENT ${c+1}/${chunks.length}:
+${chunks[c]}`
+      }
+    ];
+    const seg = await openaiChatDirect(sumMsg, { temperature: 0.2, max_tokens: 220 });
+    combinedBrief += `\n\nSEGMENT ${c+1} BRIEF:\n${String(seg || '').trim()}`;
+    // small pacing
+    await new Promise(r => setTimeout(r, 120));
+  }
+
+  // Use the brief as the "text" for REF scoring
+  d.text_for_ref = `NOTE: Full text too long; REF scoring based on chunk-brief summary.\n${combinedBrief}`.slice(0, 80000);
+} else {
+  d.text_for_ref = rawText.slice(0, CHAR_HARD_CAP);
+}
+
       const msg = buildREFPrompt(d, uoaListText);
       raw = await openaiChatDirect(msg, { temperature: 0.2, max_tokens: MAX_TOKENS });
     } catch (e) {
