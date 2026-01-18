@@ -2795,6 +2795,38 @@ function screenToWorld(sx, sy) {
 }
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
+// ---- Numeric clamp helpers (for AI lens scoring) ----
+function clampNum(v, lo, hi) {
+  v = Number(v);
+  if (!Number.isFinite(v)) return lo;
+  return Math.max(lo, Math.min(hi, v));
+}
+function clampInt(v, lo, hi) {
+  return Math.round(clampNum(v, lo, hi));
+}
+
+// REF-like internal proxy scale used in this project:
+// 5 ≈ 4* (world-leading)
+// 4 ≈ 3* (internationally excellent)
+// 3 ≈ 2* (recognised internationally)
+// 2 ≈ 1* (recognised nationally)
+// 1 ≈ Unclassified
+function clampREFScore(v) {
+  return clampInt(v, 1, 5);
+}
+
+// If a model ever returns "4*" / "3*" etc, convert it to the 1–5 proxy
+function parseStarBandToREFScore(x) {
+  const s = String(x || '').trim();
+  const m = s.match(/([0-4])\s*\*/);
+  if (!m) return null;
+  const star = Number(m[1]);
+  if (!Number.isFinite(star)) return null;
+  // 4*->5, 3*->4, 2*->3, 1*->2, 0*->1
+  return clampREFScore(star + 1);
+}
+
+
 function findHoverNode(wx, wy) {
   if (!nodes.length) return -1;
 
@@ -7169,21 +7201,49 @@ function downloadTextFile(fileName, text, mime = 'text/plain') {
 // Prompt builder: REF-style scoring + UoA assignment.
 // NOTE: user asked for a 5-point scale; we define a mapping to REF star levels.
 function buildREFPrompt(doc, uoaListText) {
+    // REF2021-aligned prompt: make 4* rare and require evidence across the paper.
   const sys =
-`You are acting like a UK REF reviewer.
-Given the paper's metadata + (possibly truncated) full text, you will:
-1) Assign REF-style judgements for Originality, Significance, and Rigour on a 1–5 scale.
-2) Assign the best-matching Unit of Assessment (UoA) from the provided list.
+`You are acting as a UK REF 2021 output assessor.
 
-IMPORTANT:
-- Use the 1–5 scale as:
-  5 = world-leading (≈ 4*)
-  4 = internationally excellent (≈ 3*)
-  3 = recognised internationally (≈ 2*)
-  2 = recognised nationally (≈ 1*)
-  1 = unclassified
-- Be conservative if evidence is thin (e.g., truncated text): lower confidence and explain briefly.
-- Return ONLY valid JSON. No prose.`;
+You must assess the work against REF output criteria: Originality, Significance, and Rigour, and assign a likely Unit of Assessment (UoA).
+
+SCORING (use this 5-point proxy aligned to REF stars):
+5 = 4* World-leading
+4 = 3* Internationally excellent
+3 = 2* Recognised internationally
+2 = 1* Recognised nationally
+1 = Unclassified / below threshold / not research
+
+REF2021-ALIGNED DESCRIPTORS (anchors)
+- 5 (≈4*): outstanding originality (new concepts/paradigms/techniques), major significance (field-shaping influence), and exceptional rigour (design/analysis/evidence). Should be rare.
+- 4 (≈3*): highly original and significant with robust rigour; clearly important internationally but short of “field-defining”.
+- 3 (≈2*): solid recognised international contribution; incremental/cumulative advances; appropriate and credible rigour.
+- 2 (≈1*): competent but limited novelty/influence; mainly national-level contribution; basic but acceptable rigour.
+- 1 (Unclassified): below 1*/not meeting research definition and/or insufficient evidence of contribution/rigour.
+
+ANTI-INFLATION / TRUNCATION RULES (VERY IMPORTANT)
+- Do NOT award 5 unless the provided text contains explicit evidence of: (a) what is new, (b) why it matters internationally, and (c) how claims are supported (methods/results/validation).
+- If the provided text is truncated / low coverage OR lacks methods/results/discussion, CAP at 4 and reduce confidence.
+- If the text looks like mostly abstract/intro, CAP at 3.
+- In notes, cite specific evidence you saw (e.g. “evaluation”, “dataset”, “formal proof”, “comparative experiments”, “limitations discussed”). No vibes.
+
+OUTPUT FORMAT
+Return ONLY valid JSON with EXACT keys:
+{
+  "uoa_number": 0,
+  "uoa_name": "",
+  "originality": 0,
+  "significance": 0,
+  "rigour": 0,
+  "confidence": 0.0,
+  "evidence_flags": ["methods_present","results_present","evaluation_present","limitations_discussed","mostly_intro_or_abstract","low_coverage"],
+  "notes": ""
+}`;
+
+  const coverageLine =
+    (doc && doc.ref_total_chars != null && doc.ref_provided_chars != null)
+      ? `EXCERPT COVERAGE: provided_chars=${doc.ref_provided_chars} / total_chars=${doc.ref_total_chars} (coverage≈${doc.ref_coverage || ''})\nChunked_summary_used: ${doc.ref_chunked ? 'yes' : 'no'}\n`
+      : '';
 
   const user =
 `Choose ONE Unit of Assessment from this list (use EXACT number + name):
@@ -7196,23 +7256,14 @@ Year: ${doc.year || ''}
 Venue: ${doc.venue || ''}
 DOI: ${doc.doi ? ('https://doi.org/' + doc.doi) : 'n/a'}
 
-FULL TEXT (may be truncated):
-${doc.text_for_ref || String(doc.text || '').slice(0, 80000)}
-
-
-Return ONLY this JSON object (no extra keys):
-{
-  "uoa_number": 0,
-  "uoa_name": "",
-  "originality": 0,
-  "significance": 0,
-  "rigour": 0,
-  "confidence": 0.0,
-  "notes": ""
-}`;
+${coverageLine}
+TEXT PROVIDED:
+${String(doc.text_for_ref || doc.text || '').slice(0, 120000)}
+`;
 
   return [{ role: 'system', content: sys }, { role: 'user', content: user }];
 }
+
 
 // Robust JSON extraction (handles accidental surrounding text)
 function extractFirstJsonObject(txt) {
@@ -7314,44 +7365,76 @@ async function runREFLens() {
     try {
 
 // If full text is huge, chunk-summarise first to avoid truncation/context overflow
+// If full text is huge, use distributed chunk summaries; otherwise use a representative excerpt.
+// This avoids "intro-only" bias that inflates high scores.
 const rawText = String(d.text || '');
-const CHAR_HARD_CAP = 80000;      // try direct scoring up to this
-const CHUNK_SIZE = 22000;         // chunk size for summariser
-const CHUNK_MAX = 6;              // cap number of chunks (cost control)
+const CHAR_HARD_CAP = 80000;      // beyond this, use chunk summarisation
+const EXCERPT_CAP   = 65000;      // direct excerpt cap (head/mid/tail via makeRepresentativeExcerpt)
+const CHUNK_SIZE    = 22000;      // per-chunk size for summariser
+const CHUNK_MAX     = 6;          // cap number of chunks (cost control)
+
+d.ref_total_chars = rawText.length;
 
 if (rawText.length > CHAR_HARD_CAP) {
-  const chunks = [];
-  for (let c = 0; c < Math.min(CHUNK_MAX, Math.ceil(rawText.length / CHUNK_SIZE)); c++) {
-    const start = c * CHUNK_SIZE;
-    const end = start + CHUNK_SIZE;
-    chunks.push(rawText.slice(start, end));
+  // ---- distributed sampling across the document (NOT just the beginning) ----
+  const total = rawText.length;
+  const starts = [];
+  const slots = Math.min(CHUNK_MAX, Math.max(3, Math.ceil(total / CHUNK_SIZE)));
+
+  // Always include head/middle/tail
+  starts.push(0);
+  starts.push(Math.max(0, Math.floor(total / 2) - Math.floor(CHUNK_SIZE / 2)));
+  starts.push(Math.max(0, total - CHUNK_SIZE));
+
+  // Fill remaining slots evenly
+  while (starts.length < slots) {
+    const t = (starts.length) / (slots - 1);
+    const s = Math.max(0, Math.min(total - CHUNK_SIZE, Math.floor(t * (total - CHUNK_SIZE))));
+    starts.push(s);
   }
 
-  // Summarise chunks into a REF-relevant brief
+  // De-dup and sort
+  const uniq = Array.from(new Set(starts.map(x => Math.max(0, Math.min(total - CHUNK_SIZE, x))))).sort((a,b)=>a-b);
+
+  const chunks = uniq.map(s => rawText.slice(s, s + CHUNK_SIZE));
+
+  // ---- Summarise chunks into a REF-relevant brief ----
   let combinedBrief = '';
   for (let c = 0; c < chunks.length; c++) {
     const sumMsg = [
       { role: 'system', content: 'You summarise academic papers for REF-style assessment.' },
       { role: 'user', content:
-`Summarise this segment of a paper for REF assessment.
-Extract: (1) contribution/novelty, (2) methods/rigour signals, (3) key results, (4) limitations, (5) likely UoA cues.
-Return 5 bullet points, concise.
+`Summarise this excerpt of a paper for REF assessment.
+Extract: (1) contribution/novelty, (2) methods/rigour signals, (3) key results, (4) limitations/weaknesses, (5) likely UoA cues.
+Return 6 bullet points, concise, evidence-led.
 
-SEGMENT ${c+1}/${chunks.length}:
+EXCERPT ${c+1}/${chunks.length} (position=${uniq[c]} chars):
 ${chunks[c]}`
       }
     ];
-    const seg = await openaiChatDirect(sumMsg, { temperature: 0.2, max_tokens: 220 });
-    combinedBrief += `\n\nSEGMENT ${c+1} BRIEF:\n${String(seg || '').trim()}`;
-    // small pacing
+    const seg = await openaiChatDirect(sumMsg, { temperature: 0.2, max_tokens: 260 });
+    combinedBrief += `\n\nEXCERPT ${c+1} BRIEF:\n${String(seg || '').trim()}`;
     await new Promise(r => setTimeout(r, 120));
   }
 
-  // Use the brief as the "text" for REF scoring
-  d.text_for_ref = `NOTE: Full text too long; REF scoring based on chunk-brief summary.\n${combinedBrief}`.slice(0, 80000);
+  d.text_for_ref = `NOTE: Full text too long; REF scoring based on distributed excerpt-briefs.\n${combinedBrief}`.slice(0, 120000);
+  d.ref_chunked = true;
 } else {
-  d.text_for_ref = rawText.slice(0, CHAR_HARD_CAP);
+  // Representative excerpt (head/middle/tail) to reduce truncation bias
+  const ex = makeRepresentativeExcerpt(rawText, EXCERPT_CAP);
+  d.text_for_ref = ex.excerpt || '';
+  d.ref_provided_chars = (ex.providedChars != null) ? ex.providedChars : String(d.text_for_ref).length;
+  d.ref_coverage = ex.coverage;
+  d.ref_chunked = false;
 }
+
+// Ensure coverage stats exist even in chunked mode
+if (d.ref_provided_chars == null) d.ref_provided_chars = String(d.text_for_ref || '').length;
+if (d.ref_coverage == null) {
+  d.ref_coverage = d.ref_total_chars ? (d.ref_provided_chars / d.ref_total_chars) : 0;
+}
+if (typeof d.ref_coverage === 'number') d.ref_coverage = d.ref_coverage.toFixed(3);
+
 
       const msg = buildREFPrompt(d, uoaListText);
       raw = await openaiChatDirect(msg, { temperature: 0.2, max_tokens: MAX_TOKENS });
@@ -17034,4 +17117,35 @@ function getPublicationClusterCentre() {
     x: (minX + maxX) * 0.5,
     y: (minY + maxY) * 0.5
   };
+}
+function makeRepresentativeExcerpt(fullText, capChars = 65000) {
+  const t = String(fullText || '').replace(/\s+/g, ' ').trim();
+  if (!t) return { excerpt: '', providedChars: 0, totalChars: 0, clipped: false, coverage: 0 };
+
+  const total = t.length;
+  if (total <= capChars) {
+    return { excerpt: t, providedChars: total, totalChars: total, clipped: false, coverage: 1.0 };
+  }
+
+  // Base sampling: beginning / middle / end
+  const chunk = Math.max(8000, Math.floor(capChars / 3) - 1000);
+  const a0 = 0;
+  const a1 = Math.min(total, chunk);
+
+  const midStart = Math.max(0, Math.floor(total / 2) - Math.floor(chunk / 2));
+  const midEnd   = Math.min(total, midStart + chunk);
+
+  const endStart = Math.max(0, total - chunk);
+  const endEnd   = total;
+
+  let excerpt =
+    `BEGIN:\n${t.slice(a0, a1)}\n\n` +
+    `MIDDLE:\n${t.slice(midStart, midEnd)}\n\n` +
+    `END:\n${t.slice(endStart, endEnd)}`;
+
+  // If still over cap (because of labels/newlines), trim.
+  if (excerpt.length > capChars) excerpt = excerpt.slice(0, capChars);
+
+  const provided = excerpt.length;
+  return { excerpt, providedChars: provided, totalChars: total, clipped: true, coverage: provided / total };
 }
