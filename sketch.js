@@ -7200,34 +7200,34 @@ function downloadTextFile(fileName, text, mime = 'text/plain') {
 
 // Prompt builder: REF-style scoring + UoA assignment.
 // NOTE: user asked for a 5-point scale; we define a mapping to REF star levels.
+// Prompt builder: REF-style scoring + UoA assignment.
 function buildREFPrompt(doc, uoaListText) {
-    // REF2021-aligned prompt: make 4* rare and require evidence across the paper.
   const sys =
-`You are acting as a UK REF 2021 output assessor.
+`You are a REF reviewer assessing a single research output.
 
-You must assess the work against REF output criteria: Originality, Significance, and Rigour, and assign a likely Unit of Assessment (UoA).
+Assess the output against three criteria:
 
-SCORING (use this 5-point proxy aligned to REF stars):
-5 = 4* World-leading
-4 = 3* Internationally excellent
-3 = 2* Recognised internationally
-2 = 1* Recognised nationally
-1 = Unclassified / below threshold / not research
+Originality: The extent to which the output makes an important and innovative contribution to understanding and knowledge in the field.
 
-REF2021-ALIGNED DESCRIPTORS (anchors)
-- 5 (≈4*): outstanding originality (new concepts/paradigms/techniques), major significance (field-shaping influence), and exceptional rigour (design/analysis/evidence). Should be rare.
-- 4 (≈3*): highly original and significant with robust rigour; clearly important internationally but short of “field-defining”.
-- 3 (≈2*): solid recognised international contribution; incremental/cumulative advances; appropriate and credible rigour.
-- 2 (≈1*): competent but limited novelty/influence; mainly national-level contribution; basic but acceptable rigour.
-- 1 (Unclassified): below 1*/not meeting research definition and/or insufficient evidence of contribution/rigour.
+Significance: The extent to which the work has influenced, or has the capacity to influence, knowledge and scholarly thought.
 
-ANTI-INFLATION / TRUNCATION RULES (VERY IMPORTANT)
-- Do NOT award 5 unless the provided text contains explicit evidence of: (a) what is new, (b) why it matters internationally, and (c) how claims are supported (methods/results/validation).
-- If the provided text is truncated / low coverage OR lacks methods/results/discussion, CAP at 4 and reduce confidence.
-- If the text looks like mostly abstract/intro, CAP at 3.
-- In notes, cite specific evidence you saw (e.g. “evaluation”, “dataset”, “formal proof”, “comparative experiments”, “limitations discussed”). No vibes.
+Rigour: The extent to which the work demonstrates intellectual coherence and integrity, and adopts robust and appropriate concepts, analyses, and methodologies.
 
-OUTPUT FORMAT
+GRADING SCALE (use integers; REF-aligned):
+4 = World-leading: outstanding in originality, significance, and rigour.
+3 = Internationally excellent: very considerable in originality, significance, and rigour, but short of the highest standards.
+2 = Recognised internationally: good quality research recognised internationally.
+1 = Recognised nationally: quality recognised nationally.
+0 = Unclassified: below the standard of nationally recognised work or does not meet the definition of research.
+
+CALIBRATION RULES (VERY IMPORTANT — prevent generosity):
+- Default assumption for strong, competent journal/conference papers is usually 3 or 2, not 4.
+- Award 4 ONLY when there is explicit evidence in the provided text of: (a) important innovation, (b) strong scholarly influence/potential influence beyond a narrow niche, and (c) clearly robust methods/analysis/validation.
+- If methods/results/evaluation are missing or unclear in the provided text, do NOT award 4 for Rigour; likely cap overall at 3 or 2.
+- If the provided text is truncated/partial/low coverage, CAP all scores at 3 and set confidence <= 0.55.
+- If the provided text is mostly abstract/introduction (little methods/results), CAP at 2–3 and include "mostly_intro_or_abstract".
+- Use the whole scale: 3 should be common; 4 should be uncommon.
+
 Return ONLY valid JSON with EXACT keys:
 {
   "uoa_number": 0,
@@ -7236,13 +7236,13 @@ Return ONLY valid JSON with EXACT keys:
   "significance": 0,
   "rigour": 0,
   "confidence": 0.0,
-  "evidence_flags": ["methods_present","results_present","evaluation_present","limitations_discussed","mostly_intro_or_abstract","low_coverage"],
+  "evidence_flags": ["methods_present","results_present","evaluation_present","mostly_intro_or_abstract","low_coverage","theoretical_innovation","dataset_or_resource","replication_or_validation","limitations_discussed"],
   "notes": ""
 }`;
 
   const coverageLine =
-    (doc && doc.ref_total_chars != null && doc.ref_provided_chars != null)
-      ? `EXCERPT COVERAGE: provided_chars=${doc.ref_provided_chars} / total_chars=${doc.ref_total_chars} (coverage≈${doc.ref_coverage || ''})\nChunked_summary_used: ${doc.ref_chunked ? 'yes' : 'no'}\n`
+    (doc && (doc.ref_total_chars != null) && (doc.ref_provided_chars != null))
+      ? `EXCERPT COVERAGE: provided_chars=${doc.ref_provided_chars} / total_chars=${doc.ref_total_chars} (coverage≈${doc.ref_coverage || ''})\n`
       : '';
 
   const user =
@@ -7263,6 +7263,7 @@ ${String(doc.text_for_ref || doc.text || '').slice(0, 120000)}
 
   return [{ role: 'system', content: sys }, { role: 'user', content: user }];
 }
+
 
 
 // Robust JSON extraction (handles accidental surrounding text)
@@ -7437,7 +7438,7 @@ if (typeof d.ref_coverage === 'number') d.ref_coverage = d.ref_coverage.toFixed(
 
 
       const msg = buildREFPrompt(d, uoaListText);
-      raw = await openaiChatDirect(msg, { temperature: 0.2, max_tokens: MAX_TOKENS });
+      raw = await openaiChatDirect(msg, { temperature: 0.1, max_tokens: MAX_TOKENS });
     } catch (e) {
       console.warn('REF call failed:', e);
       raw = '';
@@ -7448,9 +7449,23 @@ if (typeof d.ref_coverage === 'number') d.ref_coverage = d.ref_coverage.toFixed(
     const uoa_number = clampInt(j.uoa_number, 1, 34);
     const uoa_name   = String(j.uoa_name || '').trim();
 
-    const originality  = clampInt(j.originality, 1, 5);
-    const significance = clampInt(j.significance, 1, 5);
-    const rigour       = clampInt(j.rigour, 1, 5);
+let originality  = clampInt(j.originality, 0, 4);
+let significance = clampInt(j.significance, 0, 4);
+let rigour       = clampInt(j.rigour, 0, 4);
+// --- Hard anti-inflation guard ---
+// If we used chunk-briefs or coverage is low, prevent 4s.
+const coverageNum = Number(d.ref_coverage);
+const lowCoverage = Number.isFinite(coverageNum) && coverageNum < 0.45;
+const usedChunkBrief = String(d.text_for_ref || '').startsWith('NOTE: Full text too long;');
+
+if (lowCoverage || usedChunkBrief) {
+  originality  = Math.min(originality, 3);
+  significance = Math.min(significance, 3);
+  rigour       = Math.min(rigour, 3);
+}
+
+
+
     const confidence   = clamp01(j.confidence);
 
     const notes = String(j.notes || '').trim().slice(0, 600);
@@ -7503,12 +7518,12 @@ if (typeof d.ref_coverage === 'number') d.ref_coverage = d.ref_coverage.toFixed(
 
 Processed **${results.length}** visible publications with cached full text.
 
-Scoring scale used:
-- **5** = world-leading (≈ 4*)
-- **4** = internationally excellent (≈ 3*)
-- **3** = recognised internationally (≈ 2*)
-- **2** = recognised nationally (≈ 1*)
-- **1** = unclassified
+Scoring scale used (REF-aligned):
+- **4** = World-leading (4★)
+- **3** = Internationally excellent (3★)
+- **2** = Recognised internationally (2★)
+- **1** = Recognised nationally (1★)
+- **0** = Unclassified
 
 ## Top items (by average O/S/R)
 
