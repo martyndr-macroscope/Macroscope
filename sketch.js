@@ -3769,6 +3769,9 @@ const refsTotal = Array.isArray(w.referenced_works)
     const ftId        = `ft_${i}_${Date.now()}`;
     const ftBtnId     = `ftBtn_${i}_${Date.now()}`;
     const ftLocalId   = `ftLocal_${i}_${Date.now()}`;
+    const ftViewId = `ftView_${i}`;
+    const ftDlId   = `ftDl_${i}`;
+
 
     // --- HTML
     this.div.html(`
@@ -3836,7 +3839,22 @@ const refsTotal = Array.isArray(w.referenced_works)
       <div style="font-weight:600;font-size:13px;margin:10px 0 4px;">Full text</div>
       ${
         hasFullText
-          ? `<div id="${ftId}" style="opacity:.95">Cached ✓</div>`
+          ? `<div id="${ftId}" style="opacity:.95">
+     Cached ✓ <span style="opacity:.65;font-size:12px">(${String(item.fulltext||'').length.toLocaleString()} chars)</span>
+     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">
+       <button id="${ftViewId}" style="background:rgba(255,255,255,0.08);
+         border:1px solid rgba(255,255,255,0.2);color:#fff;padding:6px 10px;
+         border-radius:6px;cursor:pointer;font-size:12px">
+         View extracted text
+       </button>
+       <button id="${ftDlId}" style="background:rgba(255,255,255,0.05);
+         border:1px solid rgba(255,255,255,0.15);color:#fff;padding:6px 10px;
+         border-radius:6px;cursor:pointer;font-size:12px">
+         Download .txt
+       </button>
+     </div>
+   </div>`
+
           : (canExtract
               ? `<div id="${ftId}">
                    <button id="${ftBtnId}" style="background:rgba(255,255,255,0.08);
@@ -3886,6 +3904,17 @@ const refsTotal = Array.isArray(w.referenced_works)
       if (typeof captureUI === 'function') captureUI(ftLocalBtn);
       ftLocalBtn.addEventListener('click', () => promptLocalPdfForIndex(i));
     }
+// View/download extracted text (only appears when cached)
+const ftViewBtn = document.getElementById(ftViewId);
+if (ftViewBtn) {
+  if (typeof captureUI === 'function') captureUI(ftViewBtn);
+  ftViewBtn.addEventListener('click', () => openExtractedFullTextPanel(i));
+}
+const ftDlBtn = document.getElementById(ftDlId);
+if (ftDlBtn) {
+  if (typeof captureUI === 'function') captureUI(ftDlBtn);
+  ftDlBtn.addEventListener('click', () => downloadExtractedFullText(i));
+}
   }
 async _renderRemoteNode(i) {
   try {
@@ -6359,6 +6388,60 @@ function setSynthBodyText(text, filename = 'synthesis.md') {
     };
   }
 }
+// ---- [ADD] Inspect extracted full text for a single item ----
+function openExtractedFullTextPanel(i) {
+  const it = itemsData?.[i] || {};
+  const txt = String(it.fulltext || '');
+  if (!txt.trim()) {
+    openSynthPanel?.('No extracted text cached for this item.');
+    return;
+  }
+
+  const title = it.title || it.openalex?.title || `Item ${i}`;
+  const heading = `${title} — Extracted text`;
+  openSynthPanel?.(heading);
+
+  ensureReviewStyles?.();
+
+  const esc = (s) => String(s ?? '').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+  const meta =
+`Source: ${it.fulltext_source || '-'}
+Extracted: ${it.fulltext_extracted_at || '-'}
+Chars: ${txt.length}
+`;
+
+  // Render as <pre> to avoid markdown formatting costs and preserve what was extracted
+  const html =
+    `<div class="review-container">
+       <div class="review-subheading-sm">Extraction metadata</div>
+       <pre class="review-code" style="white-space:pre-wrap">${esc(meta)}</pre>
+       <div class="review-subheading-sm">Extracted text (raw)</div>
+       <pre class="review-code" style="white-space:pre-wrap; max-height: 70vh;">${esc(txt)}</pre>
+     </div>`;
+
+  if (synthBody) {
+    synthBody.html(html);
+    synthBody.elt.scrollTop = 0;
+  }
+}
+
+function downloadExtractedFullText(i) {
+  const it = itemsData?.[i] || {};
+  const txt = String(it.fulltext || '');
+  if (!txt.trim()) return;
+
+  const title = (it.title || it.openalex?.title || `item_${i}`)
+    .replace(/[^\w\-]+/g, '_')
+    .slice(0, 80);
+
+  const blob = new Blob([txt], { type: 'text/plain' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url;
+  a.download = `${title}_extracted.txt`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 2500);
+}
 
 
 
@@ -7578,12 +7661,6 @@ ${mdTable(top)}
     downloadTextFile('ref_assessment.csv', csv, 'text/csv');
   }
 }
-
-
-
-
-
-
 
 
 function pointerOverUI() {
