@@ -7743,6 +7743,7 @@ ${mdTable(top)}
 ## Notes
 - These are **AI estimates** based on available full text (often truncated) + metadata.
 - Use *confidence* + *notes* to triage what needs human reading.
+${refSummaryMarkdown(computeRefSummary(results, 0.5))}
 `;
 
   setSynthProgressHtml('');
@@ -7764,6 +7765,32 @@ ${mdTable(top)}
     'confidence','notes'
   ];
   const csv = toCSV(results, headers);
+
+  // ---- [ADD] Summary CSV (confidence-filtered) ----
+const summary = computeRefSummary(results, 0.5);
+const summaryRows = [
+  {
+    uoa: 'ALL',
+    n: summary.usedRows,
+    gpa: summary.gpa.toFixed(4),
+    publication_power: (summary.power).toFixed(4),
+    c4: summary.distAll[4]||0,
+    c3: summary.distAll[3]||0,
+    c2: summary.distAll[2]||0,
+    c1: summary.distAll[1]||0,
+    c0: summary.distAll[0]||0
+  },
+  ...(summary.uoaRows || []).map(r => ({
+    uoa: r.uoa,
+    n: r.n,
+    gpa: Number(r.gpa).toFixed(4),
+    publication_power: Number(r.power).toFixed(4),
+    c4: r.c4, c3: r.c3, c2: r.c2, c1: r.c1, c0: r.c0
+  }))
+];
+const summaryCsvHeaders = ['uoa','n','gpa','publication_power','c4','c3','c2','c1','c0'];
+const summaryCsv = toCSV(summaryRows, summaryCsvHeaders);
+
 
   // Enable “download” via Synth panel download button if your UI uses it,
   // but also force a direct CSV download link via a small inline button.
@@ -7789,6 +7816,111 @@ ${mdTable(top)}
     downloadTextFile('ref_assessment.csv', csv, 'text/csv');
   }
 }
+
+// ---- [ADD] REF summary stats helpers (GPA, distribution, Publication Power) ----
+function refOverallScoreFromRow(r) {
+  // Convert avg (string) to number safely; fall back to mean of O/S/R
+  const a = Number(r.avg);
+  let v = Number.isFinite(a)
+    ? a
+    : (Number(r.originality || 0) + Number(r.significance || 0) + Number(r.rigour || 0)) / 3;
+
+  // REF-style “overall score” per output as an integer band 0..4
+  // (Using nearest-integer rounding of the O/S/R mean.)
+  v = Math.round(v);
+  return Math.max(0, Math.min(4, v));
+}
+
+function computeRefSummary(results, confMin = 0.5) {
+  const kept = (results || []).filter(r => Number(r.confidence) >= confMin);
+
+  const distInit = () => ({ 4:0, 3:0, 2:0, 1:0, 0:0 });
+  const addToDist = (dist, score) => { dist[score] = (dist[score] || 0) + 1; };
+
+  const byUoa = new Map(); // key: `${uoa_number} ${uoa_name}` -> bucket
+
+  let sumScores = 0;
+  const distAll = distInit();
+
+  for (const r of kept) {
+    const s = refOverallScoreFromRow(r);
+    sumScores += s;
+    addToDist(distAll, s);
+
+    const uoaKey = `${r.uoa_number} ${String(r.uoa_name || '').trim()}`.trim();
+    if (!byUoa.has(uoaKey)) {
+      byUoa.set(uoaKey, { uoaKey, n: 0, sum: 0, dist: distInit() });
+    }
+    const b = byUoa.get(uoaKey);
+    b.n += 1;
+    b.sum += s;
+    addToDist(b.dist, s);
+  }
+
+  const N = kept.length;
+  const gpa = N ? (sumScores / N) : 0;
+  const power = gpa * N;
+
+  const uoaRows = Array.from(byUoa.values())
+    .map(b => {
+      const g = b.n ? (b.sum / b.n) : 0;
+      return {
+        uoa: b.uoaKey,
+        n: b.n,
+        gpa: g,
+        power: g * b.n,
+        c4: b.dist[4]||0,
+        c3: b.dist[3]||0,
+        c2: b.dist[2]||0,
+        c1: b.dist[1]||0,
+        c0: b.dist[0]||0
+      };
+    })
+    .sort((a,b) => (b.power - a.power) || (b.n - a.n) || (b.gpa - a.gpa));
+
+  return {
+    confMin,
+    totalRows: (results || []).length,
+    usedRows: N,
+    gpa,
+    power,
+    distAll,
+    uoaRows
+  };
+}
+
+function refSummaryMarkdown(sum) {
+  const fmt = (x, dp=2) => (Number.isFinite(+x) ? (+x).toFixed(dp) : '0.00');
+  const d = sum.distAll || {};
+  const usedPct = sum.totalRows ? Math.round(100 * (sum.usedRows / sum.totalRows)) : 0;
+
+  const distLine =
+    `4★:${d[4]||0}  3★:${d[3]||0}  2★:${d[2]||0}  1★:${d[1]||0}  0★:${d[0]||0}`;
+
+  const uoaTableHeader =
+`| UoA | N | GPA | Publication Power | 4★ | 3★ | 2★ | 1★ | 0★ |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|`;
+
+  const uoaLines = (sum.uoaRows || []).map(r =>
+    `| ${String(r.uoa).replace(/\|/g,'—')} | ${r.n} | ${fmt(r.gpa)} | ${fmt(r.power)} | ${r.c4} | ${r.c3} | ${r.c2} | ${r.c1} | ${r.c0} |`
+  ).join('\n');
+
+  return `
+## Summary (REF-style, confidence ≥ ${sum.confMin})
+
+Used **${sum.usedRows}/${sum.totalRows}** outputs (**${usedPct}%**) after confidence filter.
+
+- **Overall GPA:** ${fmt(sum.gpa)}
+- **Publication Power (GPA × N):** ${fmt(sum.power)}
+- **Score distribution:** ${distLine}
+
+### GPA and distribution by Unit of Assessment
+
+${uoaTableHeader}
+${uoaLines || '| (none) | 0 | 0.00 | 0.00 | 0 | 0 | 0 | 0 | 0 |'}
+`.trim();
+}
+
 
 
 function pointerOverUI() {
