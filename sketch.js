@@ -999,6 +999,116 @@ function extractTextFromHtml(html) {
     return (root.innerText || root.textContent || '').replace(/\s+/g,' ').trim();
   } catch { return ''; }
 }
+// ---- Full-text quality gate (avoid caching portal / cookie / account pages) ----
+
+function _normTxt(s) { return String(s || '').toLowerCase(); }
+
+function looksLikePortalOrNavJunk(text, sourceUrl = '') {
+  const t = _normTxt(text);
+  const u = _normTxt(sourceUrl);
+
+  // Common publisher / portal / account / cookie boilerplate
+  const badPhrases = [
+    'sign in', 'log in', 'create account', 'forgot password',
+    'purchase', 'buy this article', 'rent this article',
+    'cookie', 'cookies', 'privacy policy', 'terms of use', 'sitemap',
+    'all rights reserved', 'nondiscrimination policy',
+    'contact us', 'help accessibility', 'update address', 'order history',
+    'payment options', 'subscribe', 'institutional access'
+  ];
+
+  // Strong domain cues (NOT exhaustive; just high-signal)
+  const badDomains = [
+    'ieeexplore.ieee.org',
+    'link.springer.com',
+    'sciencedirect.com',
+    'www.sciencedirect.com',
+    'onlinelibrary.wiley.com',
+    'tandfonline.com',
+    'jstor.org'
+  ];
+
+  let hits = 0;
+  for (const p of badPhrases) if (t.includes(p)) hits++;
+  const domainHit = badDomains.some(d => u.includes(d));
+
+  // If it’s *very* short, it’s almost never a paper
+  if ((text || '').length < 1200) return true;
+
+  // Heuristic: portal pages are *dense* in boilerplate phrases
+  if (hits >= 3) return true;
+
+  // Domain + at least one boilerplate phrase is a strong indicator
+  if (domainHit && hits >= 1) return true;
+
+  return false;
+}
+
+function scorePaperLikeStructure(text, work) {
+  const t = _normTxt(text);
+
+  // Minimal paper structure cues
+  const cues = [
+    'abstract',
+    'introduction',
+    'methods', 'methodology',
+    'results',
+    'discussion',
+    'conclusion',
+    'references', 'bibliography'
+  ];
+
+  let cueHits = 0;
+  for (const c of cues) if (t.includes(c)) cueHits++;
+
+  // Title overlap (weak but helpful)
+  const title = String(work?.title || work?.display_name || '').trim();
+  let titleHit = false;
+  if (title && title.length >= 8) {
+    const toks = title.toLowerCase().split(/\s+/).filter(w => w.length >= 5).slice(0, 6);
+    titleHit = toks.length ? toks.some(tok => t.includes(tok)) : false;
+  }
+
+  // DOI pattern inside text
+  const doiHit = /\b10\.\d{4,9}\/[^\s"<>]+\b/i.test(text || '');
+
+  // Very rough score
+  let score = 0;
+  if (cueHits >= 2) score += 2;
+  if (cueHits >= 4) score += 2;
+  if (titleHit) score += 1;
+  if (doiHit) score += 1;
+
+  // Length contributes, but avoid rewarding portal pages (handled elsewhere)
+  const L = (text || '').length;
+  if (L >= 4000) score += 1;
+  if (L >= 12000) score += 1;
+
+  return score; // 0..8-ish
+}
+
+function validateExtractedFulltext({ text, sourceUrl, isPdf, work }) {
+  if (!text || String(text).trim().length < 1200) {
+    return { ok: false, reason: 'Too little text extracted.' };
+  }
+
+  // Portal/junk detection (only really meaningful for HTML, but keep it for safety)
+  if (!isPdf && looksLikePortalOrNavJunk(text, sourceUrl)) {
+    return { ok: false, reason: 'Looks like publisher portal / navigation text, not the paper.' };
+  }
+
+  // Paper-like structure score
+  const s = scorePaperLikeStructure(text, work);
+
+  // Stricter threshold for HTML; slightly looser for PDF (PDFs can be weirdly structured)
+  const need = isPdf ? 2 : 4;
+
+  if (s < need) {
+    return { ok: false, reason: `Text does not look paper-like enough (score ${s}/${need}).` };
+  }
+
+  return { ok: true, score: s };
+}
 
 
 async function extractTextFromPdfBuffer(arrayBuffer) {
@@ -1090,19 +1200,31 @@ let cand = fulltextCandidatesFromWork(w, doiUrl);
       const ctype = (resp.headers.get('content-type') || '').toLowerCase();
       const looksPdf = ctype.includes('pdf') || /\.pdf(\?|$)/i.test(url);
 
-      if (looksPdf) {
-        const blob = await resp.blob();
-        if (blob.size > MAX_PDF_BYTES) throw new Error('PDF too large (>25MB).');
-        const buf  = await blob.arrayBuffer();
-        const text = await extractTextFromPdfBuffer(buf);
-        if (!text || text.length < 80) throw new Error('No text extracted (scanned PDF?).');
-        item.fulltext = text;
-      } else {
-        const html = await resp.text();
-        const text = extractTextFromHtml(html);
-        if (!text || text.length < 80) throw new Error('No readable text found on HTML page.');
-        item.fulltext = text;
-      }
+let extracted = '';
+
+if (looksPdf) {
+  const blob = await resp.blob();
+  if (blob.size > MAX_PDF_BYTES) throw new Error('PDF too large (>25MB).');
+  const buf  = await blob.arrayBuffer();
+
+  extracted = await extractTextFromPdfBuffer(buf);
+  if (!extracted || extracted.length < 1200) throw new Error('No/too little text extracted (scanned PDF?).');
+
+  const v = validateExtractedFulltext({ text: extracted, sourceUrl: url, isPdf: true, work: w });
+  if (!v.ok) throw new Error(v.reason);
+
+} else {
+  const html = await resp.text();
+  extracted = extractTextFromHtml(html);
+  if (!extracted || extracted.length < 1200) throw new Error('No/too little readable text on HTML page.');
+
+  const v = validateExtractedFulltext({ text: extracted, sourceUrl: url, isPdf: false, work: w });
+  if (!v.ok) throw new Error(v.reason);
+}
+
+// If we get here, it passed validation → now we cache it
+item.fulltext = extracted;
+
 
       // success → cache + UI
       item.fulltext_source       = url;
@@ -1125,6 +1247,12 @@ let cand = fulltextCandidatesFromWork(w, doiUrl);
   }
       // keep trying
     }
+const it = itemsData?.[i] || (itemsData[i] = {});
+it.fulltext_last_fail = {
+  url,
+  message: String(lastErr?.message || err?.message || err || 'unknown'),
+  at: new Date().toISOString()
+};
   }
 
   if (!silent) {
@@ -8364,28 +8492,39 @@ async function autoCacheVisible({ onlyOnScreen = true } = {}) {
 
 // Build a clean list of OA candidates (PDF first, then landing pages)
 // Build a clean list of full-text candidates (HTML landings first, then PDFs, then DOI)
+// Build a clean list of full-text candidates (PDFs first, then HTML landings, then DOI)
 function fulltextCandidatesFromWork(w, doiUrl = '') {
   const best = w?.best_oa_location || {};
   const prim = w?.primary_location || {};
+  const locs = Array.isArray(w?.locations) ? w.locations : [];
 
+  // Direct PDFs (best signals first)
+  const directPdf = [
+    best.url_for_pdf,
+    best.pdf_url,
+    prim.pdf_url,
+    ...locs.map(L => L?.pdf_url),
+    ...locs.map(L => L?.url_for_pdf),
+  ];
+
+  // HTML landings (useful for repositories / author-hosted pages)
   const landings = [
     best.landing_page_url,
     prim.landing_page_url,
+    ...locs.map(L => L?.landing_page_url),
+    ...locs.map(L => L?.url),               // sometimes a repo landing
     w?.host_venue?.url,
     prim?.source?.url,
-  ];
-
-  const directPdf = [
-    best.url_for_pdf, best.pdf_url, prim.pdf_url
   ];
 
   const tail = [doiUrl].filter(Boolean);
 
   const seen = new Set();
-  return [...landings, ...directPdf, ...tail]
+  return [...directPdf, ...landings, ...tail]
     .filter(u => typeof u === 'string' && /^https?:\/\//i.test(u))
     .filter(u => (seen.has(u.toLowerCase()) ? false : seen.add(u.toLowerCase())));
 }
+
 
 
 
