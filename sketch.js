@@ -7578,12 +7578,14 @@ async function runREFLens() {
 
 // If full text is huge, chunk-summarise first to avoid truncation/context overflow
 // If full text is huge, use distributed chunk summaries; otherwise use a representative excerpt.
+
+
 // This avoids "intro-only" bias that inflates high scores.
 const rawText = String(d.text || '');
-const CHAR_HARD_CAP = 80000;      // beyond this, use chunk summarisation
-const EXCERPT_CAP   = 65000;      // direct excerpt cap (head/mid/tail via makeRepresentativeExcerpt)
-const CHUNK_SIZE    = 22000;      // per-chunk size for summariser
-const CHUNK_MAX     = 6;          // cap number of chunks (cost control)
+const CHAR_HARD_CAP = 16000;   // beyond this, use chunk sampling
+const EXCERPT_CAP   = 12000;   // keep direct excerpts small
+const CHUNK_SIZE    = 6000;    // smaller chunk
+const CHUNK_MAX     = 3;       // fewer chunks
 
 d.ref_total_chars = rawText.length;
 
@@ -7649,11 +7651,29 @@ if (typeof d.ref_coverage === 'number') d.ref_coverage = d.ref_coverage.toFixed(
 
 
       const msg = buildREFPrompt(d, uoaListText);
-      raw = await openaiChatDirect(msg, { temperature: 0.1, max_tokens: MAX_TOKENS });
-    } catch (e) {
-      console.warn('REF call failed:', e);
-      raw = '';
-    }
+      raw = await openaiChatDirect(msg, {
+  temperature: 0.1,
+  max_tokens: MAX_TOKENS,
+  retries: 2,            // don’t spiral
+  throttleMs: 0,         // we’ll pace explicitly below
+  onRetry: (st, wait, k) => {
+    setSynthProgressHtml(`<div>REF retry ${k+1}: ${st} — waiting ${(wait/1000).toFixed(1)}s…</div>`);
+  }
+});
+
+
+} catch (e) {
+  console.warn('REF call failed:', e);
+
+  // If we hit rate limits, pause longer before continuing the loop.
+  if (e && (e.status === 429 || String(e.message||'').includes('429'))) {
+    const coolOffMs = 20000 + Math.round(Math.random() * 10000); // 20–30s
+    setSynthProgressHtml(`<div>Rate-limited (429). Cooling off ${(coolOffMs/1000).toFixed(0)}s…</div>`);
+    await new Promise(r => setTimeout(r, coolOffMs));
+  }
+
+  raw = '';
+}
 
     const j = extractFirstJsonObject(raw) || {};
 
@@ -9238,7 +9258,7 @@ let accumMd = 'Chronological Review\n====================\n\n';
 
   // Per-paper (chronological)
   const per = [];
-  const CALL_DELAY_MS = 160;
+  const CALL_DELAY_MS = 0;
   for (let i = 0; i < corpus.length; i++) {
     const d = corpus[i];
     showProgress(`<div>Summarising ${i+1}/${corpus.length} [${d.refKey}] (${d.year || 'n.d.'})…</div>`);
