@@ -11533,6 +11533,8 @@ function removeNodesByIndexSet(S) {
 // OpenAlex: Retrieve by Institution — search name -> pick -> (optional) year range -> fetch works
 // ─────────────────────────────────────────────────────────────────────────────
 function openInstitutionRetrievalDialog() {
+
+
   const dlg = document.createElement('div');
   dlg.className = 'glass-modal';
   Object.assign(dlg.style, {
@@ -11733,35 +11735,50 @@ async function doRetrieve() {
   }
 }
 
-
-
 btnSearch.addEventListener('click', (e) => {
   e.preventDefault();
   e.stopPropagation();
   doSearch();
 }, { capture: true });
 
-btnGo.addEventListener('click', async (e) => {
-  e.preventDefault();
-  e.stopPropagation();
+btnGo.onclick = async (e) => {
+    e.preventDefault();
+    const notify = (msg) => {
+      if (typeof showToast === 'function') showToast(msg);
+      else alert(msg);
+    };
 
-  console.log("[UI] Retrieve clicked");
-  console.log("[UI] inst =", selectedInstitution);
+    if (!selectedInst?.id) {
+      notify('Please select an institution first.');
+      return;
+    }
 
-  try {
-    showLoading("Starting retrieval…", 0.02);
-    await retrieveAllWorksForInstitution(selectedInstitution, {
-      yearLo: Number(inpYearLo?.value || 0),
-      yearHi: Number(inpYearHi?.value || 0),
-      maxItems: Number(inpMaxItems?.value || 0),
-      minClusterSize: Number(inpMinCluster?.value || 0),
-    });
-    console.log("[UI] retrieveAllWorksForInstitution resolved");
-  } catch (err) {
-    console.error("[UI] retrieveAllWorksForInstitution rejected", err);
-    alert(String(err?.message || err));
-  }
-}, { capture: true });
+    const yLo = Number(yLoEl.value || 0);
+    const yHi = Number(yHiEl.value || 0);
+    if (yLo && yHi && yHi < yLo) {
+      notify('“To year” must be ≥ “From year”.');
+      return;
+    }
+
+    const minClusterSize = Math.max(1, Number(minInp.value || window.JOURNAL_MIN_CLUSTER_SIZE || 5));
+    const maxItems = Math.max(0, Number(capInp.value || 0));
+
+    showLoading(`Starting retrieval…`, 0.01);
+    close(); // Close modal before starting async fetch
+
+    try {
+      await retrieveAllWorksForInstitution(selectedInst, { 
+        minClusterSize, 
+        yearLo: yLo || null, 
+        yearHi: yHi || null, 
+        maxItems 
+      });
+    } catch (err) {
+      console.error('Retrieve failed:', err);
+      hideLoading();
+      alert(`Retrieve failed: ${err.message || err}`);
+    }
+  };
 
 
 btnCancel.addEventListener('click', (e) => {
