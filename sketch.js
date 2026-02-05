@@ -11564,6 +11564,12 @@ function openInstitutionRetrievalDialog() {
       <div id="inst_pick" style="display:none;margin-top:6px;padding:8px;border:1px dashed rgba(255,255,255,0.18);border-radius:8px">
         <div id="inst_name" style="font-weight:600"></div>
         <div id="inst_meta" style="opacity:0.8;margin-top:4px"></div>
+<span style="opacity:.7;font-size:12px">(Optional — limits retrieved publications)</span>
+
+<label for="inst_cap" style="opacity:.9;margin-left:8px">Max items</label>
+<input id="inst_cap" type="number" min="0" step="1" value="0"
+       style="width:90px;padding:4px 6px;background:#000;color:#fff;border:1px solid #333;border-radius:6px"/>
+<span style="opacity:.7;font-size:12px">(0 = all; if years set, samples across years)</span>
 
         <div style="display:flex;gap:10px;align-items:center;justify-content:flex-start;margin-top:10px;flex-wrap:wrap">
           <label for="inst_ylo" style="opacity:.9">From year</label>
@@ -11600,6 +11606,8 @@ function openInstitutionRetrievalDialog() {
   const yLoEl    = dlg.querySelector('#inst_ylo');
   const yHiEl    = dlg.querySelector('#inst_yhi');
   const minInp   = dlg.querySelector('#inst_min');
+  const capInp   = dlg.querySelector('#inst_cap');
+
   const btnGo    = dlg.querySelector('#inst_go');
   const btnCancel= dlg.querySelector('#inst_cancel');
 
@@ -11677,11 +11685,14 @@ function openInstitutionRetrievalDialog() {
 
     close();
     const minClusterSize = Math.max(1, Number(minInp?.value || window.JOURNAL_MIN_CLUSTER_SIZE || 5));
-    await retrieveAllWorksForInstitution(selectedInst, {
-      minClusterSize,
-      yearLo: yLo || null,
-      yearHi: yHi || null
-    });
+const maxItems = Math.max(0, Number(capInp?.value || 0));
+await retrieveAllWorksForInstitution(selectedInst, {
+  minClusterSize,
+  yearLo: yLo || null,
+  yearHi: yHi || null,
+  maxItems
+});
+
   }
 
   btnSearch.onclick = doSearch;
@@ -12148,6 +12159,10 @@ function openPublisherJournalDialog() {
 // Fetch & stream ALL works for a given OpenAlex Institution, using cursor paging
 // Fetch & stream ALL works for a given OpenAlex Institution, using cursor paging
 // Fetch & stream ALL works for a given OpenAlex Institution, using cursor paging
+// Fetch & stream works for a given OpenAlex Institution, using cursor paging
+// NEW: optional capped sampling (opts.maxItems > 0)
+// If yearLo/yearHi are set, sampling is STRATIFIED across years using group_by=publication_year.
+
 async function retrieveAllWorksForInstitution(inst, opts = {}) {
   try {
     const instId = (inst?.id || '').replace(/^https?:\/\/openalex\.org\//i, '');
@@ -12157,74 +12172,302 @@ async function retrieveAllWorksForInstitution(inst, opts = {}) {
     const yHi = Number(opts.yearHi || 0);
     const wantYearFilter = (yLo && yHi && yHi >= yLo);
 
-    showLoading(`Retrieving works: ${inst.display_name || 'institution'}`, 0.02);
+    const maxItems = Math.max(0, Number(opts.maxItems || 0)); // 0 => all
+    const doCap    = maxItems > 0;
 
-    const perPage = 200;         // OpenAlex max
-    let cursor    = '*';         // start token
-    let fetched   = 0;
-    let sinceLast = 0;
+    const perPage = 200; // OpenAlex max
     const base    = 'https://api.openalex.org/works';
-    const filter  = `institutions.id:${instId}`;
+    const filter0 = `institutions.id:${instId}`;
     const mailto  = (window.OPENALEX_MAILTO || window.UNPAYWALL_EMAIL || '').trim();
 
-    let page = 0;
-    let total = null;
-
-    while (cursor) {
-      page++;
-
+    // ---------- helpers ----------
+    function buildWorksUrl(filterStr, cursor) {
       const qs = new URLSearchParams();
-      const datedFilter = wantYearFilter
-        ? `${filter},from_publication_date:${yLo}-01-01,to_publication_date:${yHi}-12-31`
-        : filter;
-      qs.set('filter', datedFilter);
+      qs.set('filter', filterStr);
       qs.set('per-page', String(perPage));
-      qs.set('cursor', cursor);            // ← use the current cursor token
+      qs.set('cursor', cursor);
       if (mailto) qs.set('mailto', mailto);
-
-      const full = `${base}?${qs.toString()}`;
-      const j    = await fetchOAJson(full);
-
-      if (total == null) total = Number(j?.meta?.count || 0);
-
-      const works = Array.isArray(j?.results) ? j.results : [];
-      if (!works.length) {
-        // defensive: stop if the API returns no results for this cursor
-        break;
-      }
-
-      fetched   += works.length;
-      sinceLast += works.length;
-
-      integrateWorksAndEdges(null, works, null);
-
-      // periodic UI refresh while streaming
-      if (sinceLast >= 2000) {
-        onGraphDataChanged?.();
-        sinceLast = 0;
-        if (typeof nextTick === 'function') await nextTick();
-      }
-
-      // progress: if total is known, show a proportional bar; else page modulo
-      if (Number.isFinite(total) && total > 0) {
-        const p = Math.min(0.98, fetched / total);
-        setLoadingProgress(p, `Retrieved ${fetched.toLocaleString()} of ${total.toLocaleString()} works…`);
-      } else {
-        setLoadingProgress((page % 10) / 10, `Retrieved ${fetched.toLocaleString()} works…`);
-      }
-
-      // advance cursor; null means “no more pages”
-      cursor = j?.meta?.next_cursor || null;
-
-      // avoid a tight loop
-      if (typeof nextTick === 'function') await nextTick();
-      else await new Promise(res => setTimeout(res, 0));
+      return `${base}?${qs.toString()}`;
     }
 
-    hideLoading();
-    onGraphDataChanged?.();
+    // Standard reservoir sampling: keep k uniform random items from a stream
+    function reservoirPush(res, item, seen, k) {
+      seen++;
+      if (res.length < k) {
+        res.push(item);
+      } else {
+        const j = (Math.random() * seen) | 0; // [0..seen-1]
+        if (j < k) res[j] = item;
+      }
+      return seen;
+    }
 
-    // clustering + UI rebuilds
+    // Try to get per-year counts using OpenAlex group_by=publication_year
+    async function fetchYearCounts() {
+      const qs = new URLSearchParams();
+      const datedFilter = `${filter0},from_publication_date:${yLo}-01-01,to_publication_date:${yHi}-12-31`;
+      qs.set('filter', datedFilter);
+      qs.set('group_by', 'publication_year');
+      qs.set('per-page', '200');
+      if (mailto) qs.set('mailto', mailto);
+
+      const url = `${base}?${qs.toString()}`;
+      const j = await fetchOAJson(url);
+
+      // OpenAlex commonly returns `group_by: [{ key, count }]` for grouped queries,
+      // but be defensive and accept a few shapes.
+      const groups =
+        (Array.isArray(j?.group_by) && j.group_by) ||
+        (Array.isArray(j?.results) && j.results) ||
+        [];
+
+      const map = new Map();
+      for (const g of groups) {
+        const key = g?.key ?? g?.publication_year ?? g?.year;
+        const cnt = Number(g?.count ?? g?.works_count ?? g?.value ?? 0);
+        const yr  = Number(key);
+        if (Number.isFinite(yr) && yr >= yLo && yr <= yHi && cnt > 0) {
+          map.set(yr, cnt);
+        }
+      }
+      return map;
+    }
+
+    // Compute integer quotas per year that sum to maxItems (proportional to year volume)
+    function computeYearQuotas(yearCounts, N) {
+      const years = Array.from(yearCounts.keys()).sort((a,b)=>a-b);
+      const total = years.reduce((s,y)=>s + yearCounts.get(y), 0);
+
+      // If no info, fall back to equal split across years in range
+      if (!total || !years.length) {
+        const ys = [];
+        for (let y = yLo; y <= yHi; y++) ys.push(y);
+        const baseQ = Math.floor(N / ys.length);
+        let rem = N - baseQ * ys.length;
+        const q = new Map();
+        for (const y of ys) {
+          const add = rem > 0 ? (rem--, 1) : 0;
+          q.set(y, baseQ + add);
+        }
+        return q;
+      }
+
+      // Proportional quotas with largest-remainder rounding
+      const raw = years.map(y => {
+        const c = yearCounts.get(y);
+        const v = (N * c) / total;
+        return { y, c, v, f: Math.floor(v), r: v - Math.floor(v) };
+      });
+
+      let sum = raw.reduce((s,o)=>s+o.f,0);
+      let remaining = N - sum;
+
+      raw.sort((a,b)=>b.r - a.r || b.c - a.c || a.y - b.y);
+      for (let i=0; i<raw.length && remaining>0; i++, remaining--) raw[i].f++;
+
+      // Build final map, dropping zero quotas
+      const q = new Map();
+      for (const o of raw) if (o.f > 0) q.set(o.y, o.f);
+      return q;
+    }
+
+    // Fetch & sample up to `k` works for a single year using reservoir sampling
+    async function sampleYear(year, k) {
+      const reservoir = [];
+      let seen = 0;
+
+      const yearFilter = `${filter0},from_publication_date:${year}-01-01,to_publication_date:${year}-12-31`;
+      let cursor = '*';
+      let page = 0;
+
+      while (cursor) {
+        page++;
+        const j = await fetchOAJson(buildWorksUrl(yearFilter, cursor));
+        const works = Array.isArray(j?.results) ? j.results : [];
+        if (!works.length) break;
+
+        for (const w of works) {
+          seen = reservoirPush(reservoir, w, seen, k);
+        }
+
+        cursor = j?.meta?.next_cursor || null;
+
+        // light UI yield
+        if (typeof nextTick === 'function') await nextTick();
+        else await new Promise(res => setTimeout(res, 0));
+      }
+
+      return reservoir;
+    }
+
+    // ---------- main ----------
+    showLoading(
+      doCap
+        ? `Retrieving sample: ${inst.display_name || 'institution'}`
+        : `Retrieving works: ${inst.display_name || 'institution'}`,
+      0.02
+    );
+
+    // CASE A: capped + year range => stratified by year
+    if (doCap && wantYearFilter) {
+      setLoadingProgress(0.03, 'Estimating per-year publication counts…');
+
+      let yearCounts = new Map();
+      try { yearCounts = await fetchYearCounts(); } catch (e) { /* fallback handled below */ }
+
+      const quotas = computeYearQuotas(yearCounts, maxItems);
+      const years  = Array.from(quotas.keys()).sort((a,b)=>a-b);
+
+      let done = 0;
+      let sampledAll = [];
+
+      for (let i = 0; i < years.length; i++) {
+        const y = years[i];
+        const k = quotas.get(y) | 0;
+        if (k <= 0) continue;
+
+        setLoadingProgress(
+          0.05 + 0.85 * (i / Math.max(1, years.length)),
+          `Sampling ${k} works from ${y}…`
+        );
+
+        const samp = await sampleYear(y, k);
+        sampledAll = sampledAll.concat(samp);
+        done += samp.length;
+
+        // periodic UI update while sampling
+        if ((i % 3) === 0) onGraphDataChanged?.();
+      }
+
+      // If some years had fewer works than quota, top up from the full range (uniform reservoir)
+      if (sampledAll.length < maxItems) {
+        const need = maxItems - sampledAll.length;
+        setLoadingProgress(0.92, `Topping up ${need} more from full range…`);
+
+        const reservoir = sampledAll.slice(); // seed with what we have
+        let seen = 0;
+
+        const datedFilter = `${filter0},from_publication_date:${yLo}-01-01,to_publication_date:${yHi}-12-31`;
+        let cursor = '*';
+        let page = 0;
+
+        while (cursor) {
+          page++;
+          const j = await fetchOAJson(buildWorksUrl(datedFilter, cursor));
+          const works = Array.isArray(j?.results) ? j.results : [];
+          if (!works.length) break;
+
+          for (const w of works) {
+            // reservoir size is maxItems (not just need) to keep uniformity overall
+            seen = reservoirPush(reservoir, w, seen, maxItems);
+          }
+
+          cursor = j?.meta?.next_cursor || null;
+
+          if (typeof nextTick === 'function') await nextTick();
+          else await new Promise(res => setTimeout(res, 0));
+        }
+
+        sampledAll = reservoir.slice(0, maxItems);
+      }
+
+      // Integrate sampled works
+      integrateWorksAndEdges(null, sampledAll, null);
+
+      hideLoading();
+      onGraphDataChanged?.();
+
+    } else if (doCap) {
+      // CASE B: capped but no year filter => uniform random sample over the whole stream
+      // (Still random; not stratified unless years are provided)
+      const reservoir = [];
+      let seen = 0;
+
+      const datedFilter = wantYearFilter
+        ? `${filter0},from_publication_date:${yLo}-01-01,to_publication_date:${yHi}-12-31`
+        : filter0;
+
+      let cursor = '*';
+      let fetched = 0;
+      let page = 0;
+
+      while (cursor) {
+        page++;
+        const j = await fetchOAJson(buildWorksUrl(datedFilter, cursor));
+        const works = Array.isArray(j?.results) ? j.results : [];
+        if (!works.length) break;
+
+        for (const w of works) {
+          seen = reservoirPush(reservoir, w, seen, maxItems);
+        }
+
+        fetched += works.length;
+        setLoadingProgress(
+          (page % 10) / 10,
+          `Scanning ${fetched.toLocaleString()} works… building random sample of ${maxItems}`
+        );
+
+        cursor = j?.meta?.next_cursor || null;
+
+        if (typeof nextTick === 'function') await nextTick();
+        else await new Promise(res => setTimeout(res, 0));
+      }
+
+      integrateWorksAndEdges(null, reservoir, null);
+
+      hideLoading();
+      onGraphDataChanged?.();
+
+    } else {
+      // CASE C: no cap => current behaviour (stream everything)
+      const datedFilter = wantYearFilter
+        ? `${filter0},from_publication_date:${yLo}-01-01,to_publication_date:${yHi}-12-31`
+        : filter0;
+
+      let cursor    = '*';
+      let fetched   = 0;
+      let sinceLast = 0;
+      let page      = 0;
+      let total     = null;
+
+      while (cursor) {
+        page++;
+
+        const j = await fetchOAJson(buildWorksUrl(datedFilter, cursor));
+        if (total == null) total = Number(j?.meta?.count || 0);
+
+        const works = Array.isArray(j?.results) ? j.results : [];
+        if (!works.length) break;
+
+        fetched   += works.length;
+        sinceLast += works.length;
+
+        integrateWorksAndEdges(null, works, null);
+
+        if (sinceLast >= 2000) {
+          onGraphDataChanged?.();
+          sinceLast = 0;
+          if (typeof nextTick === 'function') await nextTick();
+        }
+
+        if (Number.isFinite(total) && total > 0) {
+          const p = Math.min(0.98, fetched / total);
+          setLoadingProgress(p, `Retrieved ${fetched.toLocaleString()} of ${total.toLocaleString()} works…`);
+        } else {
+          setLoadingProgress((page % 10) / 10, `Retrieved ${fetched.toLocaleString()} works…`);
+        }
+
+        cursor = j?.meta?.next_cursor || null;
+
+        if (typeof nextTick === 'function') await nextTick();
+        else await new Promise(res => setTimeout(res, 0));
+      }
+
+      hideLoading();
+      onGraphDataChanged?.();
+    }
+
+    // clustering + UI rebuilds (existing behaviour)
     if (typeof computeDomainClusters === 'function') {
       if (!Array.isArray(clusterOf) || clusterOf.length !== nodes.length || !clusterCount) {
         computeDomainClusters();
@@ -12246,6 +12489,7 @@ async function retrieveAllWorksForInstitution(inst, opts = {}) {
     showToast?.(e.message || String(e));
   }
 }
+
 
 
 // Fetch & stream works for a given OpenAlex Source (journal) into the graph
