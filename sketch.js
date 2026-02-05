@@ -12477,10 +12477,12 @@ async function retrieveAllWorksForInstitution(inst, opts = {}) {
       }
 
       // Integrate sampled works
+// Case A Fix
+    if (sampledAll && sampledAll.length > 0) {
       integrateWorksAndEdges(null, sampledAll, null);
-
-      hideLoading();
       onGraphDataChanged?.();
+    }
+    hideLoading();
 
     } else if (doCap) {
       // CASE B: capped but no year filter => uniform random sample over the whole stream
