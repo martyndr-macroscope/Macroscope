@@ -11679,18 +11679,42 @@ function openInstitutionRetrievalDialog() {
   }
 
 async function doRetrieve() {
+  // Fallback notifier (because showToast is not defined in this codebase)
+  const notify = (msg) => {
+    try {
+      if (typeof showToast === 'function') showToast(msg);
+      else alert(msg);
+    } catch { /* ignore */ }
+  };
+
   try {
-    if (!selectedInst?.id) { showToast?.('Please select an institution first.'); return; }
+    if (!selectedInst?.id) { notify('Please select an institution first.'); return; }
 
-    const yLo = Number(yLoEl?.value || 0);
-    const yHi = Number(yHiEl?.value || 0);
-    if (yLo && yHi && yHi < yLo) { showToast?.('“To year” must be ≥ “From year”.'); return; }
+    // Re-query DOM defensively (prevents null refs if the template changes)
+    const _yLoEl  = dlg.querySelector('#inst_ylo');
+    const _yHiEl  = dlg.querySelector('#inst_yhi');
+    const _minInp = dlg.querySelector('#inst_min');
+    const _capInp = dlg.querySelector('#inst_cap');
 
-    const maxItems = Math.max(0, Number(capInp?.value || 0)); // 0 = all
+    if (!_yLoEl || !_yHiEl || !_minInp || !_capInp) {
+      notify('Retrieve dialog is missing one or more inputs (year/min/cap). Please refresh and try again.');
+      console.error('Missing inputs:', { _yLoEl, _yHiEl, _minInp, _capInp });
+      return;
+    }
 
+    const yLo = Number(_yLoEl.value || 0);
+    const yHi = Number(_yHiEl.value || 0);
+    if (yLo && yHi && yHi < yLo) { notify('“To year” must be ≥ “From year”.'); return; }
+
+    const minClusterSize = Math.max(1, Number(_minInp.value || window.JOURNAL_MIN_CLUSTER_SIZE || 5));
+    const maxItems = Math.max(0, Number(_capInp.value || 0)); // 0 = all
+
+    // IMPORTANT: start visible feedback BEFORE closing the dialog,
+    // so “nothing happened” can’t occur.
+    showLoading(`Starting retrieval…`, 0.01);
+
+    // Now close the modal (canvas overlay continues)
     close();
-
-    const minClusterSize = Math.max(1, Number(minInp?.value || window.JOURNAL_MIN_CLUSTER_SIZE || 5));
 
     await retrieveAllWorksForInstitution(selectedInst, {
       minClusterSize,
@@ -11698,12 +11722,16 @@ async function doRetrieve() {
       yearHi: yHi || null,
       maxItems
     });
+
   } catch (e) {
     console.error('Retrieve by Institution failed:', e);
-    showToast?.(`Retrieve failed: ${e?.message || e}`);
-    try { hideLoading?.(); } catch {}
+    try { hideLoading(); } catch {}
+    const msg = e?.message || String(e);
+    // showToast doesn’t exist here, so force visibility
+    try { alert(`Retrieve failed:\n\n${msg}`); } catch {}
   }
 }
+
 
 
   btnSearch.onclick = doSearch;
@@ -12494,11 +12522,18 @@ async function retrieveAllWorksForInstitution(inst, opts = {}) {
     if (typeof renderDimensionsUI   === 'function') renderDimensionsUI();
     if (typeof recomputeVisibility  === 'function') recomputeVisibility();
 
-  } catch (e) {
-    hideLoading();
-    console.error(e);
-    showToast?.(e.message || String(e));
+} catch (e) {
+  try { hideLoading(); } catch {}
+  console.error(e);
+
+  const msg = e?.message || String(e);
+  if (typeof showToast === 'function') {
+    showToast(msg);
+  } else {
+    // Force visibility in this codebase
+    try { alert(`Institution retrieval failed:\n\n${msg}`); } catch {}
   }
+}
 }
 
 
