@@ -11606,6 +11606,7 @@ function openInstitutionRetrievalDialog() {
   const yLoEl    = dlg.querySelector('#inst_ylo');
   const yHiEl    = dlg.querySelector('#inst_yhi');
   const minInp   = dlg.querySelector('#inst_min');
+  
   const capInp   = dlg.querySelector('#inst_cap');
 
   const btnGo    = dlg.querySelector('#inst_go');
@@ -11677,23 +11678,33 @@ function openInstitutionRetrievalDialog() {
     }
   }
 
-  async function doRetrieve() {
+async function doRetrieve() {
+  try {
     if (!selectedInst?.id) { showToast?.('Please select an institution first.'); return; }
-    const yLo = Number(yLoEl.value|0);
-    const yHi = Number(yHiEl.value|0);
+
+    const yLo = Number(yLoEl?.value || 0);
+    const yHi = Number(yHiEl?.value || 0);
     if (yLo && yHi && yHi < yLo) { showToast?.('“To year” must be ≥ “From year”.'); return; }
 
-    close();
-    const minClusterSize = Math.max(1, Number(minInp?.value || window.JOURNAL_MIN_CLUSTER_SIZE || 5));
-const maxItems = Math.max(0, Number(capInp?.value || 0));
-await retrieveAllWorksForInstitution(selectedInst, {
-  minClusterSize,
-  yearLo: yLo || null,
-  yearHi: yHi || null,
-  maxItems
-});
+    const maxItems = Math.max(0, Number(capInp?.value || 0)); // 0 = all
 
+    close();
+
+    const minClusterSize = Math.max(1, Number(minInp?.value || window.JOURNAL_MIN_CLUSTER_SIZE || 5));
+
+    await retrieveAllWorksForInstitution(selectedInst, {
+      minClusterSize,
+      yearLo: yLo || null,
+      yearHi: yHi || null,
+      maxItems
+    });
+  } catch (e) {
+    console.error('Retrieve by Institution failed:', e);
+    showToast?.(`Retrieve failed: ${e?.message || e}`);
+    try { hideLoading?.(); } catch {}
   }
+}
+
 
   btnSearch.onclick = doSearch;
   btnGo.onclick     = doRetrieve;
