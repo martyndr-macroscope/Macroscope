@@ -11735,9 +11735,24 @@ async function doRetrieve() {
 
 
 
-  btnSearch.onclick = doSearch;
-  btnGo.onclick     = doRetrieve;
-  btnCancel.onclick = close;
+btnSearch.addEventListener('click', (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  doSearch();
+}, { capture: true });
+
+btnGo.addEventListener('click', (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  doRetrieve();
+}, { capture: true });
+
+btnCancel.addEventListener('click', (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  close();
+}, { capture: true });
+
 
   dlg.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') { e.preventDefault(); close(); }
