@@ -11596,6 +11596,7 @@ function openInstitutionRetrievalDialog() {
     </div>
   `;
   document.body.appendChild(dlg);
+  if (typeof captureUI === 'function') captureUI(dlg);
 
   const qInput = dlg.querySelector('#inst_query');
   const btnSearch = dlg.querySelector('#inst_search');
