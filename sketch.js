@@ -12484,35 +12484,39 @@ async function retrieveAllWorksForInstitution(inst, opts = {}) {
     }
     hideLoading();
 
-        } else if (doCap) {
-      // CASE B (FAST): capped but no year filter =>
-      // use OpenAlex `sample` so we do NOT scan the full stream.
-      // Note: sampling uses page-based paging (not cursor) and requires a seed for consistency.
+            } else if (doCap) {
+      // CASE B (FAST + CORRECT): capped and no year range =>
+      // use OpenAlex `sample` so we don't scan the full stream.
+      // Sampling uses page-based paging (page=1..), not cursor paging.
 
-      const seed = (Date.now() % 2147483647) | 0;     // simple per-run seed
-      const N = Math.min(10000, maxItems | 0);        // OpenAlex sample cap
+      const N = Math.max(1, Math.min(10000, maxItems | 0));   // OpenAlex sample limit is 10k
+      const seed = (opts.seed != null ? String(opts.seed) : String(Date.now() % 2147483647));
       const perPage = 200;
       const pages = Math.ceil(N / perPage);
 
       let sampled = [];
+      const seen = new Set();
 
-      for (let p = 1; p <= pages; p++) {
-        const take = Math.min(perPage, N - sampled.length);
-        if (take <= 0) break;
-
+      for (let page = 1; page <= pages; page++) {
         const qs = new URLSearchParams();
         qs.set('filter', filter0);
-        qs.set('sample', String(take));               // sample size for this page
-        qs.set('seed', String(seed));                 // REQUIRED if paging
-        qs.set('per-page', String(Math.min(perPage, take)));
-        qs.set('page', String(1));                    // keep page=1 because sample controls randomness
+        qs.set('sample', String(N));                          // IMPORTANT: total sample size
+        qs.set('seed', seed);                                 // IMPORTANT: required for paging through a sample
+        qs.set('per-page', String(perPage));
+        qs.set('page', String(page));
         if (mailto) qs.set('mailto', mailto);
 
         const url = `${base}?${qs.toString()}`;
         const j = await fetchOAJson(url);
-        const works = Array.isArray(j?.results) ? j.results : [];
 
-        sampled = sampled.concat(works);
+        const works = Array.isArray(j?.results) ? j.results : [];
+        for (const w of works) {
+          const id = w?.id || w?.ids?.openalex;
+          if (!id || seen.has(id)) continue;
+          seen.add(id);
+          sampled.push(w);
+          if (sampled.length >= N) break;
+        }
 
         setLoadingProgress(
           Math.min(0.98, sampled.length / N),
@@ -12523,20 +12527,10 @@ async function retrieveAllWorksForInstitution(inst, opts = {}) {
         else await new Promise(res => setTimeout(res, 0));
       }
 
-      // Deduplicate (sample calls can overlap slightly); then truncate
-      const seen = new Set();
-      const uniq = [];
-      for (const w of sampled) {
-        const id = w?.id || w?.ids?.openalex;
-        if (!id || seen.has(id)) continue;
-        seen.add(id);
-        uniq.push(w);
-        if (uniq.length >= N) break;
-      }
-
-      integrateWorksAndEdges(null, uniq.slice(0, N), null);
+      integrateWorksAndEdges(null, sampled.slice(0, N), null);
       hideLoading();
       onGraphDataChanged?.();
+
 
 
     } else {
