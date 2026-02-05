@@ -11741,44 +11741,45 @@ btnSearch.addEventListener('click', (e) => {
   doSearch();
 }, { capture: true });
 
+// --- ENSURE THIS IS THE ONLY CLICK HANDLER FOR btnGo ---
 btnGo.onclick = async (e) => {
-    e.preventDefault();
-    const notify = (msg) => {
-      if (typeof showToast === 'function') showToast(msg);
-      else alert(msg);
-    };
+  e.preventDefault();
+  
+  // Use the correct variable name defined earlier in the function
+  if (!selectedInst?.id) {
+    if (typeof showToast === 'function') showToast('Please select an institution first.');
+    else alert('Please select an institution first.');
+    return;
+  }
 
-    if (!selectedInst?.id) {
-      notify('Please select an institution first.');
-      return;
-    }
+  // Use the correct element references (yLoEl, yHiEl, minInp, capInp)
+  const yLo = Number(yLoEl.value || 0);
+  const yHi = Number(yHiEl.value || 0);
+  if (yLo && yHi && yHi < yLo) {
+    if (typeof showToast === 'function') showToast('“To year” must be ≥ “From year”.');
+    return;
+  }
 
-    const yLo = Number(yLoEl.value || 0);
-    const yHi = Number(yHiEl.value || 0);
-    if (yLo && yHi && yHi < yLo) {
-      notify('“To year” must be ≥ “From year”.');
-      return;
-    }
+  const minClusterSize = Math.max(1, Number(minInp.value || window.JOURNAL_MIN_CLUSTER_SIZE || 5));
+  const maxItems = Math.max(0, Number(capInp.value || 0));
 
-    const minClusterSize = Math.max(1, Number(minInp.value || window.JOURNAL_MIN_CLUSTER_SIZE || 5));
-    const maxItems = Math.max(0, Number(capInp.value || 0));
+  showLoading(`Starting retrieval…`, 0.01);
+  close(); // Close the modal and let the background process run
 
-    showLoading(`Starting retrieval…`, 0.01);
-    close(); // Close modal before starting async fetch
-
-    try {
-      await retrieveAllWorksForInstitution(selectedInst, { 
-        minClusterSize, 
-        yearLo: yLo || null, 
-        yearHi: yHi || null, 
-        maxItems 
-      });
-    } catch (err) {
-      console.error('Retrieve failed:', err);
-      hideLoading();
-      alert(`Retrieve failed: ${err.message || err}`);
-    }
-  };
+  try {
+    // Pass the correct selectedInst object
+    await retrieveAllWorksForInstitution(selectedInst, { 
+      minClusterSize, 
+      yearLo: yLo || null, 
+      yearHi: yHi || null, 
+      maxItems 
+    });
+  } catch (err) {
+    console.error('Retrieve failed:', err);
+    hideLoading();
+    alert(`Retrieve failed: ${err.message || err}`);
+  }
+};
 
 
 btnCancel.addEventListener('click', (e) => {
