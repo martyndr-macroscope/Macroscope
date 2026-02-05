@@ -12484,46 +12484,60 @@ async function retrieveAllWorksForInstitution(inst, opts = {}) {
     }
     hideLoading();
 
-    } else if (doCap) {
-      // CASE B: capped but no year filter => uniform random sample over the whole stream
-      // (Still random; not stratified unless years are provided)
-      const reservoir = [];
-      let seen = 0;
+        } else if (doCap) {
+      // CASE B (FAST): capped but no year filter =>
+      // use OpenAlex `sample` so we do NOT scan the full stream.
+      // Note: sampling uses page-based paging (not cursor) and requires a seed for consistency.
 
-      const datedFilter = wantYearFilter
-        ? `${filter0},from_publication_date:${yLo}-01-01,to_publication_date:${yHi}-12-31`
-        : filter0;
+      const seed = (Date.now() % 2147483647) | 0;     // simple per-run seed
+      const N = Math.min(10000, maxItems | 0);        // OpenAlex sample cap
+      const perPage = 200;
+      const pages = Math.ceil(N / perPage);
 
-      let cursor = '*';
-      let fetched = 0;
-      let page = 0;
+      let sampled = [];
 
-      while (cursor) {
-        page++;
-        const j = await fetchOAJson(buildWorksUrl(datedFilter, cursor));
+      for (let p = 1; p <= pages; p++) {
+        const take = Math.min(perPage, N - sampled.length);
+        if (take <= 0) break;
+
+        const qs = new URLSearchParams();
+        qs.set('filter', filter0);
+        qs.set('sample', String(take));               // sample size for this page
+        qs.set('seed', String(seed));                 // REQUIRED if paging
+        qs.set('per-page', String(Math.min(perPage, take)));
+        qs.set('page', String(1));                    // keep page=1 because sample controls randomness
+        if (mailto) qs.set('mailto', mailto);
+
+        const url = `${base}?${qs.toString()}`;
+        const j = await fetchOAJson(url);
         const works = Array.isArray(j?.results) ? j.results : [];
-        if (!works.length) break;
 
-        for (const w of works) {
-          seen = reservoirPush(reservoir, w, seen, maxItems);
-        }
+        sampled = sampled.concat(works);
 
-        fetched += works.length;
         setLoadingProgress(
-          (page % 10) / 10,
-          `Scanning ${fetched.toLocaleString()} works… building random sample of ${maxItems}`
+          Math.min(0.98, sampled.length / N),
+          `Sampled ${sampled.length.toLocaleString()} of ${N.toLocaleString()} works…`
         );
-
-        cursor = j?.meta?.next_cursor || null;
 
         if (typeof nextTick === 'function') await nextTick();
         else await new Promise(res => setTimeout(res, 0));
       }
 
-      integrateWorksAndEdges(null, reservoir, null);
+      // Deduplicate (sample calls can overlap slightly); then truncate
+      const seen = new Set();
+      const uniq = [];
+      for (const w of sampled) {
+        const id = w?.id || w?.ids?.openalex;
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        uniq.push(w);
+        if (uniq.length >= N) break;
+      }
 
+      integrateWorksAndEdges(null, uniq.slice(0, N), null);
       hideLoading();
       onGraphDataChanged?.();
+
 
     } else {
       // CASE C: no cap => current behaviour (stream everything)
