@@ -11741,11 +11741,28 @@ btnSearch.addEventListener('click', (e) => {
   doSearch();
 }, { capture: true });
 
-btnGo.addEventListener('click', (e) => {
+btnGo.addEventListener('click', async (e) => {
   e.preventDefault();
   e.stopPropagation();
-  doRetrieve();
+
+  console.log("[UI] Retrieve clicked");
+  console.log("[UI] inst =", selectedInstitution);
+
+  try {
+    showLoading("Starting retrieval…", 0.02);
+    await retrieveAllWorksForInstitution(selectedInstitution, {
+      yearLo: Number(inpYearLo?.value || 0),
+      yearHi: Number(inpYearHi?.value || 0),
+      maxItems: Number(inpMaxItems?.value || 0),
+      minClusterSize: Number(inpMinCluster?.value || 0),
+    });
+    console.log("[UI] retrieveAllWorksForInstitution resolved");
+  } catch (err) {
+    console.error("[UI] retrieveAllWorksForInstitution rejected", err);
+    alert(String(err?.message || err));
+  }
 }, { capture: true });
+
 
 btnCancel.addEventListener('click', (e) => {
   e.preventDefault();
@@ -12191,12 +12208,27 @@ function openPublisherJournalDialog() {
     });
   }
 
-  async function doRetrieve() {
-    if (!selectedSource?.id) { showToast?.('Please select a journal.'); return; }
-    close();
-    const minClusterSize = Math.max(1, Number(minInp?.value || window.JOURNAL_MIN_CLUSTER_SIZE || 5));
-    await retrieveAllWorksForJournal(selectedSource, { minClusterSize });
+async function doRetrieve() {
+  console.log("Retrieve clicked");
+
+  try {
+    console.log("Selected institution:", selectedInstitution);
+    console.log("Institution ID:", selectedInstitution?.id);
+
+    showLoading("Starting retrieval…");
+
+    await retrieveAllWorksForInstitution(selectedInstitution);
+
+    console.log("Retrieve completed");
+    hideLoading();
+
+  } catch (err) {
+    console.error("Institution retrieve failed:", err);
+    alert("Retrieve failed – see console for details");
+    hideLoading();
   }
+}
+
 
   btnFind.onclick  = searchPublishers;
   btnGo.onclick    = doRetrieve;
