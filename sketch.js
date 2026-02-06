@@ -12268,6 +12268,8 @@ async function doRetrieve() {
 // NEW: optional capped sampling (opts.maxItems > 0)
 // If yearLo/yearHi are set, sampling is STRATIFIED across years using group_by=publication_year.
 
+// Drop-in replacement: keeps UI updating during capped retrieval,
+// and keeps the loading overlay visible until clustering/UI rebuilds are done.
 async function retrieveAllWorksForInstitution(inst, opts = {}) {
   try {
     const instId = (inst?.id || '').replace(/^https?:\/\/openalex\.org\//i, '');
@@ -12319,8 +12321,6 @@ async function retrieveAllWorksForInstitution(inst, opts = {}) {
       const url = `${base}?${qs.toString()}`;
       const j = await fetchOAJson(url);
 
-      // OpenAlex commonly returns `group_by: [{ key, count }]` for grouped queries,
-      // but be defensive and accept a few shapes.
       const groups =
         (Array.isArray(j?.group_by) && j.group_by) ||
         (Array.isArray(j?.results) && j.results) ||
@@ -12331,9 +12331,7 @@ async function retrieveAllWorksForInstitution(inst, opts = {}) {
         const key = g?.key ?? g?.publication_year ?? g?.year;
         const cnt = Number(g?.count ?? g?.works_count ?? g?.value ?? 0);
         const yr  = Number(key);
-        if (Number.isFinite(yr) && yr >= yLo && yr <= yHi && cnt > 0) {
-          map.set(yr, cnt);
-        }
+        if (Number.isFinite(yr) && yr >= yLo && yr <= yHi && cnt > 0) map.set(yr, cnt);
       }
       return map;
     }
@@ -12342,22 +12340,9 @@ async function retrieveAllWorksForInstitution(inst, opts = {}) {
     function computeYearQuotas(yearCounts, N) {
       const years = Array.from(yearCounts.keys()).sort((a,b)=>a-b);
       const total = years.reduce((s,y)=>s + yearCounts.get(y), 0);
+      if (!total || !years.length) return new Map();
 
-      // If no info, fall back to equal split across years in range
-      if (!total || !years.length) {
-        const ys = [];
-        for (let y = yLo; y <= yHi; y++) ys.push(y);
-        const baseQ = Math.floor(N / ys.length);
-        let rem = N - baseQ * ys.length;
-        const q = new Map();
-        for (const y of ys) {
-          const add = rem > 0 ? (rem--, 1) : 0;
-          q.set(y, baseQ + add);
-        }
-        return q;
-      }
-
-      // Proportional quotas with largest-remainder rounding
+      // Largest-remainder rounding
       const raw = years.map(y => {
         const c = yearCounts.get(y);
         const v = (N * c) / total;
@@ -12370,7 +12355,6 @@ async function retrieveAllWorksForInstitution(inst, opts = {}) {
       raw.sort((a,b)=>b.r - a.r || b.c - a.c || a.y - b.y);
       for (let i=0; i<raw.length && remaining>0; i++, remaining--) raw[i].f++;
 
-      // Build final map, dropping zero quotas
       const q = new Map();
       for (const o of raw) if (o.f > 0) q.set(o.y, o.f);
       return q;
@@ -12383,21 +12367,17 @@ async function retrieveAllWorksForInstitution(inst, opts = {}) {
 
       const yearFilter = `${filter0},from_publication_date:${year}-01-01,to_publication_date:${year}-12-31`;
       let cursor = '*';
-      let page = 0;
 
       while (cursor) {
-        page++;
         const j = await fetchOAJson(buildWorksUrl(yearFilter, cursor));
         const works = Array.isArray(j?.results) ? j.results : [];
         if (!works.length) break;
 
-        for (const w of works) {
-          seen = reservoirPush(reservoir, w, seen, k);
-        }
+        for (const w of works) seen = reservoirPush(reservoir, w, seen, k);
 
         cursor = j?.meta?.next_cursor || null;
 
-        // light UI yield
+        // yield to UI so overlay/progress repaints
         if (typeof nextTick === 'function') await nextTick();
         else await new Promise(res => setTimeout(res, 0));
       }
@@ -12416,14 +12396,14 @@ async function retrieveAllWorksForInstitution(inst, opts = {}) {
     // CASE A: capped + year range => stratified by year
     if (doCap && wantYearFilter) {
       setLoadingProgress(0.03, 'Estimating per-year publication counts…');
+      if (typeof nextTick === 'function') await nextTick();
 
       let yearCounts = new Map();
-      try { yearCounts = await fetchYearCounts(); } catch (e) { /* fallback handled below */ }
+      try { yearCounts = await fetchYearCounts(); } catch (e) { yearCounts = new Map(); }
 
       const quotas = computeYearQuotas(yearCounts, maxItems);
       const years  = Array.from(quotas.keys()).sort((a,b)=>a-b);
 
-      let done = 0;
       let sampledAll = [];
 
       for (let i = 0; i < years.length; i++) {
@@ -12432,43 +12412,45 @@ async function retrieveAllWorksForInstitution(inst, opts = {}) {
         if (k <= 0) continue;
 
         setLoadingProgress(
-          0.05 + 0.85 * (i / Math.max(1, years.length)),
+          0.05 + 0.80 * (i / Math.max(1, years.length)),
           `Sampling ${k} works from ${y}…`
         );
 
         const samp = await sampleYear(y, k);
         sampledAll = sampledAll.concat(samp);
-        done += samp.length;
 
-        // periodic UI update while sampling
-        if ((i % 3) === 0) onGraphDataChanged?.();
+        // UI refresh (overlay + any info text)
+        onGraphDataChanged?.();
+        if (typeof nextTick === 'function') await nextTick();
       }
 
-      // If some years had fewer works than quota, top up from the full range (uniform reservoir)
+      // Top up (uniform across whole range) if some years came up short
       if (sampledAll.length < maxItems) {
         const need = maxItems - sampledAll.length;
-        setLoadingProgress(0.92, `Topping up ${need} more from full range…`);
+        setLoadingProgress(0.88, `Topping up ${need} more from full range…`);
+        if (typeof nextTick === 'function') await nextTick();
 
         const reservoir = sampledAll.slice(); // seed with what we have
         let seen = 0;
 
         const datedFilter = `${filter0},from_publication_date:${yLo}-01-01,to_publication_date:${yHi}-12-31`;
         let cursor = '*';
-        let page = 0;
+        let pages = 0;
 
         while (cursor) {
-          page++;
+          pages++;
           const j = await fetchOAJson(buildWorksUrl(datedFilter, cursor));
           const works = Array.isArray(j?.results) ? j.results : [];
           if (!works.length) break;
 
-          for (const w of works) {
-            // reservoir size is maxItems (not just need) to keep uniformity overall
-            seen = reservoirPush(reservoir, w, seen, maxItems);
-          }
+          for (const w of works) seen = reservoirPush(reservoir, w, seen, maxItems);
 
           cursor = j?.meta?.next_cursor || null;
 
+          // keep the overlay alive
+          if ((pages % 5) === 0) {
+            setLoadingProgress(0.88 + 0.08 * Math.min(1, pages / 50), `Topping up… scanned ${pages} pages`);
+          }
           if (typeof nextTick === 'function') await nextTick();
           else await new Promise(res => setTimeout(res, 0));
         }
@@ -12476,33 +12458,30 @@ async function retrieveAllWorksForInstitution(inst, opts = {}) {
         sampledAll = reservoir.slice(0, maxItems);
       }
 
-      // Integrate sampled works
-// Case A Fix
-    if (sampledAll && sampledAll.length > 0) {
-      integrateWorksAndEdges(null, sampledAll, null);
+      // Now we have the FINAL sample: integrate once (avoids “evicted” items lingering)
+      setLoadingProgress(0.96, `Integrating ${sampledAll.length.toLocaleString()} sampled works…`);
+      if (typeof nextTick === 'function') await nextTick();
+
+      if (sampledAll.length) integrateWorksAndEdges(null, sampledAll, null);
       onGraphDataChanged?.();
-    }
-    hideLoading();
 
-            } else if (doCap) {
-      // CASE B (FAST + CORRECT): capped and no year range =>
-      // use OpenAlex `sample` so we don't scan the full stream.
-      // Sampling uses page-based paging (page=1..), not cursor paging.
-
-      const N = Math.max(1, Math.min(10000, maxItems | 0));   // OpenAlex sample limit is 10k
+    } else if (doCap) {
+      // CASE B (LIVE): capped and no year range =>
+      // use OpenAlex `sample` + INTEGRATE PER PAGE so UI updates continuously.
+      const N = Math.max(1, Math.min(10000, maxItems | 0)); // OA sample cap is 10k
       const seed = (opts.seed != null ? String(opts.seed) : String(Date.now() % 2147483647));
-      const perPage = 200;
-      const pages = Math.ceil(N / perPage);
+      const perPageS = 200;
+      const pages = Math.ceil(N / perPageS);
 
-      let sampled = [];
       const seen = new Set();
+      let kept = 0;
 
       for (let page = 1; page <= pages; page++) {
         const qs = new URLSearchParams();
         qs.set('filter', filter0);
-        qs.set('sample', String(N));                          // IMPORTANT: total sample size
-        qs.set('seed', seed);                                 // IMPORTANT: required for paging through a sample
-        qs.set('per-page', String(perPage));
+        qs.set('sample', String(N));
+        qs.set('seed', seed);
+        qs.set('per-page', String(perPageS));
         qs.set('page', String(page));
         if (mailto) qs.set('mailto', mailto);
 
@@ -12510,28 +12489,31 @@ async function retrieveAllWorksForInstitution(inst, opts = {}) {
         const j = await fetchOAJson(url);
 
         const works = Array.isArray(j?.results) ? j.results : [];
+        const fresh = [];
+
         for (const w of works) {
           const id = w?.id || w?.ids?.openalex;
           if (!id || seen.has(id)) continue;
           seen.add(id);
-          sampled.push(w);
-          if (sampled.length >= N) break;
+          fresh.push(w);
+          kept++;
+          if (kept >= N) break;
+        }
+
+        // STREAM INTO GRAPH (this is the key difference)
+        if (fresh.length) {
+          integrateWorksAndEdges(null, fresh, null);
+          onGraphDataChanged?.();
         }
 
         setLoadingProgress(
-          Math.min(0.98, sampled.length / N),
-          `Sampled ${sampled.length.toLocaleString()} of ${N.toLocaleString()} works…`
+          Math.min(0.98, kept / N),
+          `Sampled ${kept.toLocaleString()} of ${N.toLocaleString()} works… (page ${page}/${pages})`
         );
 
         if (typeof nextTick === 'function') await nextTick();
         else await new Promise(res => setTimeout(res, 0));
       }
-
-      integrateWorksAndEdges(null, sampled.slice(0, N), null);
-      hideLoading();
-      onGraphDataChanged?.();
-
-
 
     } else {
       // CASE C: no cap => current behaviour (stream everything)
@@ -12566,10 +12548,10 @@ async function retrieveAllWorksForInstitution(inst, opts = {}) {
         }
 
         if (Number.isFinite(total) && total > 0) {
-          const p = Math.min(0.98, fetched / total);
+          const p = Math.min(0.90, fetched / total);
           setLoadingProgress(p, `Retrieved ${fetched.toLocaleString()} of ${total.toLocaleString()} works…`);
         } else {
-          setLoadingProgress((page % 10) / 10, `Retrieved ${fetched.toLocaleString()} works…`);
+          setLoadingProgress(0.10 + ((page % 10) / 10) * 0.80, `Retrieved ${fetched.toLocaleString()} works…`);
         }
 
         cursor = j?.meta?.next_cursor || null;
@@ -12578,11 +12560,13 @@ async function retrieveAllWorksForInstitution(inst, opts = {}) {
         else await new Promise(res => setTimeout(res, 0));
       }
 
-      hideLoading();
       onGraphDataChanged?.();
     }
 
-    // clustering + UI rebuilds (existing behaviour)
+    // ---------- clustering + UI rebuilds ----------
+    setLoadingProgress(0.985, 'Finalising: clustering & rebuilding UI…');
+    if (typeof nextTick === 'function') await nextTick();
+
     if (typeof computeDomainClusters === 'function') {
       if (!Array.isArray(clusterOf) || clusterOf.length !== nodes.length || !clusterCount) {
         computeDomainClusters();
@@ -12591,26 +12575,29 @@ async function retrieveAllWorksForInstitution(inst, opts = {}) {
     if (typeof applyMinClusterSize === 'function') {
       const minSize = Math.max(1, Number(opts.minClusterSize || window.JOURNAL_MIN_CLUSTER_SIZE || 5));
       applyMinClusterSize(minSize);
-      setClusterMin(minSize);
+      setClusterMin?.(minSize);
     }
 
     if (typeof buildDimensionsIndex === 'function') buildDimensionsIndex();
     if (typeof renderDimensionsUI   === 'function') renderDimensionsUI();
     if (typeof recomputeVisibility  === 'function') recomputeVisibility();
 
-} catch (e) {
-  try { hideLoading(); } catch {}
-  console.error(e);
+    setLoadingProgress(1.0, 'Done');
+    hideLoading();
+    updateInfo?.(); redraw?.();
 
-  const msg = e?.message || String(e);
-  if (typeof showToast === 'function') {
-    showToast(msg);
-  } else {
-    // Force visibility in this codebase
-    try { alert(`Institution retrieval failed:\n\n${msg}`); } catch {}
+  } catch (e) {
+    try { hideLoading(); } catch {}
+    console.error(e);
+
+    const msg = e?.message || String(e);
+    if (typeof showToast === 'function') showToast(msg);
+    else {
+      try { alert(`Institution retrieval failed:\n\n${msg}`); } catch {}
+    }
   }
 }
-}
+
 
 
 
