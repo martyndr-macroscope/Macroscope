@@ -1145,8 +1145,9 @@ async function extractFullTextForIndex(i, ftContainerId = null, opts = {}) {
 
   const item = itemsData?.[i] || {};
   const w    = item.openalex || {};
-  const doi  = cleanDOI(String(w.doi || ''));
-  const doiUrl = doi ? `https://doi.org/${doi}` : '';
+  let doi  = cleanDOI(String(w.doi || ''));
+  let doiUrl = doi ? `https://doi.org/${doi}` : '';
+
 
 
   // inside extractFullTextForIndex, just after you compute doi/doiUrl:
@@ -10036,13 +10037,14 @@ menu.style('backdrop-filter', '');
     }, { capture: true });
   }
 
-  addItem('Retrieve Full Texts', () => {
-    if (typeof autoCacheVisible === 'function') {
-      autoCacheVisible();
-    } else {
-      console.warn('autoCacheVisible() not found.');
-    }
-  });
+addItem('Retrieve Full Texts', () => {
+  if (typeof autoCacheVisible === 'function') {
+    autoCacheVisible({ onlyOnScreen: false }); // <-- IMPORTANT
+  } else {
+    console.warn('autoCacheVisible() not found.');
+  }
+});
+
 
    addItem('Retrieve by DOI…', () => openIdRetrievalDialog('doi'));
   addItem('Retrieve by OpenAlex ID…', () => openIdRetrievalDialog('wid'));
