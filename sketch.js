@@ -8690,15 +8690,31 @@ function fulltextCandidatesFromWork(w, doiUrl = '') {
 
 
 // Optional: ask Unpaywall for more OA links (often better than publisher)
+// Optional: ask Unpaywall for more OA links (often better than publisher)
 async function fetchUnpaywall(doi) {
   if (!UNPAYWALL_EMAIL || !doi) return null;
-  const u = `https://api.unpaywall.org/v2/${encodeURIComponent(doi)}?email=${encodeURIComponent(UNPAYWALL_EMAIL)}`;
+
+  // --- FIX: prevent double-encoding (e.g. "%2F" -> "%252F") ---
+  let d = String(doi).trim();
   try {
-    const r = await fetchWithTimeout(viaProxy(u), {}, 15000);   // go via proxy to avoid CORS
+    if (/%[0-9A-Fa-f]{2}/.test(d)) d = decodeURIComponent(d);
+  } catch { /* ignore */ }
+
+  const u = `https://api.unpaywall.org/v2/${encodeURIComponent(d)}?email=${encodeURIComponent(UNPAYWALL_EMAIL)}`;
+
+  try {
+    // Unpaywall usually supports CORS, so try direct first, then proxy fallback.
+    let r = await fetchWithTimeout(u, { mode: 'cors' }, 15000);
+    if (!r.ok && FETCH_PROXY && __proxyAvailable) {
+      r = await fetchWithTimeout(viaProxy(u), {}, 15000);
+    }
     if (!r.ok) return null;
     return await r.json();
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }
+
 
 function mergeUnpaywallCandidates(json, current) {
   if (!json) return current;
