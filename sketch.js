@@ -5477,8 +5477,13 @@ function showLoading(msg = 'Loading…', pct = 0) {
 function setLoadingProgress(pct, msg) {
   loadingPct = Math.max(0, Math.min(1, Number(pct) || 0));
   if (msg) loadingMsg = msg;
+
+  // If we're in a loading phase, keep the draw loop alive so the overlay paints.
+  if (isLoading) loop();
+
   redraw();
 }
+
 
 function hideLoading() {
   isLoading  = false;
@@ -12270,6 +12275,9 @@ async function doRetrieve() {
 
 async function retrieveAllWorksForInstitution(inst, opts = {}) {
   try {
+    showLoading('Retrieving works…', 0.01);
+    updateInfo?.();
+    redraw?.();
     const instId = (inst?.id || '').replace(/^https?:\/\/openalex\.org\//i, '');
     if (!instId || !/^I\d+$/i.test(instId)) throw new Error('Invalid OpenAlex Institution ID');
 
