@@ -12430,129 +12430,122 @@ async function sampleYear(year, k, ui = {}) {
     );
 
     // CASE A: capped + year range => stratified by year
-    if (doCap && wantYearFilter) {
-      setLoadingProgress(0.03, 'Estimating per-year publication counts…');
+    // CASE A (FAST): capped + year range => stratified sampling by year using OpenAlex `sample`
+if (doCap && wantYearFilter) {
+  setLoadingProgress(0.03, 'Estimating per-year publication counts…');
+  if (typeof nextTick === 'function') await nextTick(); else await new Promise(r => setTimeout(r, 0));
 
-      let yearCounts = new Map();
-      try { yearCounts = await fetchYearCounts(); } catch (e) { /* fallback handled below */ }
+  // --- helper: sample N works for a given filter using OpenAlex sample+seed paging ---
+  async function sampleByFilter(filterStr, N, label) {
+    const per = Math.min(perPage, Math.max(1, N));
+    const seed = String(Math.floor(Math.random() * 1e9));
+    const pages = Math.max(1, Math.ceil(N / per));
 
-      const quotas = computeYearQuotas(yearCounts, maxItems);
-      const years  = Array.from(quotas.keys()).sort((a,b)=>a-b);
+    let sampled = [];
+    const seen = new Set();
 
-      let done = 0;
-      let sampledAll = [];
+    for (let page = 1; page <= pages; page++) {
+      const qs = new URLSearchParams();
+      qs.set('filter', filterStr);
+      qs.set('sample', String(N));      // total sample size
+      qs.set('seed', seed);             // required for paging a sample
+      qs.set('per-page', String(per));
+      qs.set('page', String(page));
+      if (mailto) qs.set('mailto', mailto);
 
-      for (let i = 0; i < years.length; i++) {
-        const y = years[i];
-        const k = quotas.get(y) | 0;
-        if (k <= 0) continue;
+      const url = `${base}?${qs.toString()}`;
+      const j = await fetchOAJson(url);
 
-        setLoadingProgress(
-          0.05 + 0.85 * (i / Math.max(1, years.length)),
-          `Sampling ${k} works from ${y}…`
-        );
-
-const frac0 = i / Math.max(1, years.length);
-const frac1 = (i + 1) / Math.max(1, years.length);
-const samp = await sampleYear(y, k, {
-  p0: 0.05 + 0.85 * frac0,
-  p1: 0.05 + 0.85 * frac1,
-  labelPrefix: `Sampling ${k} works from ${y}`
-});
-
-        sampledAll = sampledAll.concat(samp);
-        done += samp.length;
-
-        // periodic UI update while sampling
-        if ((i % 3) === 0) onGraphDataChanged?.();
+      const works = Array.isArray(j?.results) ? j.results : [];
+      for (const w of works) {
+        const id = w?.id || w?.ids?.openalex;
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        sampled.push(w);
+        if (sampled.length >= N) break;
       }
 
-      // If some years had fewer works than quota, top up from the full range (uniform reservoir)
-      if (sampledAll.length < maxItems) {
-        const need = maxItems - sampledAll.length;
-        setLoadingProgress(0.92, `Topping up ${need} more from full range…`);
+      // progress for this filter
+      const frac = Math.min(1, sampled.length / Math.max(1, N));
+      setLoadingProgress(
+        0.06 + 0.88 * frac,
+        `${label} ${sampled.length.toLocaleString()} / ${N.toLocaleString()}…`
+      );
 
-        const reservoir = sampledAll.slice(); // seed with what we have
-        let seen = 0;
+      // let UI paint
+      if (typeof nextTick === 'function') await nextTick();
+      else await new Promise(res => setTimeout(res, 0));
 
-        const datedFilter = `${filter0},from_publication_date:${yLo}-01-01,to_publication_date:${yHi}-12-31`;
-        let cursor = '*';
-        let page = 0;
-
-        while (cursor) {
-          page++;
-          const j = await fetchOAJson(buildWorksUrl(datedFilter, cursor));
-          const works = Array.isArray(j?.results) ? j.results : [];
-          if (!works.length) break;
-
-          for (const w of works) {
-            // reservoir size is maxItems (not just need) to keep uniformity overall
-            seen = reservoirPush(reservoir, w, seen, maxItems);
-          }
-
-          cursor = j?.meta?.next_cursor || null;
-
-          if (typeof nextTick === 'function') await nextTick();
-          else await new Promise(res => setTimeout(res, 0));
-        }
-
-        sampledAll = reservoir.slice(0, maxItems);
-      }
-
-      // Integrate sampled works
-// Case A Fix
-    if (sampledAll && sampledAll.length > 0) {
-      integrateWorksAndEdges(null, sampledAll, null);
-      onGraphDataChanged?.();
+      if (sampled.length >= N) break;
     }
-    hideLoading();
 
-            } else if (doCap) {
-      // CASE B (FAST + CORRECT): capped and no year range =>
-      // use OpenAlex `sample` so we don't scan the full stream.
-      // Sampling uses page-based paging (page=1..), not cursor paging.
+    return sampled.slice(0, N);
+  }
 
-      const N = Math.max(1, Math.min(10000, maxItems | 0));   // OpenAlex sample limit is 10k
-      const seed = (opts.seed != null ? String(opts.seed) : String(Date.now() % 2147483647));
-      const perPage = 200;
-      const pages = Math.ceil(N / perPage);
+  // --- fetch per-year counts (for quotas) ---
+  let yearCounts = new Map();
+  try {
+    yearCounts = await fetchYearCounts();
+  } catch (e) {
+    // If group_by fails for any reason, fall back to equal quotas across years.
+    yearCounts = new Map();
+    for (let y = yLo; y <= yHi; y++) yearCounts.set(y, 1);
+  }
 
-      let sampled = [];
-      const seen = new Set();
+  const quotas = computeYearQuotas(yearCounts, maxItems);
+  const years  = Array.from(quotas.keys()).sort((a,b)=>a-b);
 
-      for (let page = 1; page <= pages; page++) {
-        const qs = new URLSearchParams();
-        qs.set('filter', filter0);
-        qs.set('sample', String(N));                          // IMPORTANT: total sample size
-        qs.set('seed', seed);                                 // IMPORTANT: required for paging through a sample
-        qs.set('per-page', String(perPage));
-        qs.set('page', String(page));
-        if (mailto) qs.set('mailto', mailto);
+  let sampledAll = [];
+  const globalSeen = new Set();
 
-        const url = `${base}?${qs.toString()}`;
-        const j = await fetchOAJson(url);
+  // --- sample each year quickly ---
+  for (let i = 0; i < years.length; i++) {
+    const y = years[i];
+    const k = quotas.get(y) | 0;
+    if (k <= 0) continue;
 
-        const works = Array.isArray(j?.results) ? j.results : [];
-        for (const w of works) {
-          const id = w?.id || w?.ids?.openalex;
-          if (!id || seen.has(id)) continue;
-          seen.add(id);
-          sampled.push(w);
-          if (sampled.length >= N) break;
-        }
+    const yrFilter = `${filter0},from_publication_date:${y}-01-01,to_publication_date:${y}-12-31`;
+    setLoadingProgress(0.05 + 0.85 * (i / Math.max(1, years.length)), `Sampling ${k} from ${y}…`);
+    if (typeof nextTick === 'function') await nextTick(); else await new Promise(r => setTimeout(r, 0));
 
-        setLoadingProgress(
-          Math.min(0.98, sampled.length / N),
-          `Sampled ${sampled.length.toLocaleString()} of ${N.toLocaleString()} works…`
-        );
+    const samp = await sampleByFilter(yrFilter, k, `Year ${y}:`);
+    for (const w of samp) {
+      const id = w?.id || w?.ids?.openalex;
+      if (!id || globalSeen.has(id)) continue;
+      globalSeen.add(id);
+      sampledAll.push(w);
+    }
 
-        if (typeof nextTick === 'function') await nextTick();
-        else await new Promise(res => setTimeout(res, 0));
-      }
+    // periodic panel refresh so you *see* activity even before final integration
+    if ((i % 2) === 0) onGraphDataChanged?.();
+  }
 
-      integrateWorksAndEdges(null, sampled.slice(0, N), null);
-      hideLoading();
-      onGraphDataChanged?.();
+  // --- top up (fast) from full range if duplicates/shortfalls occurred ---
+  if (sampledAll.length < maxItems) {
+    const need = maxItems - sampledAll.length;
+    const rangeFilter = `${filter0},from_publication_date:${yLo}-01-01,to_publication_date:${yHi}-12-31`;
+
+    setLoadingProgress(0.92, `Topping up ${need.toLocaleString()} from full range…`);
+    if (typeof nextTick === 'function') await nextTick(); else await new Promise(r => setTimeout(r, 0));
+
+    const extra = await sampleByFilter(rangeFilter, need, `Top-up:`);
+    for (const w of extra) {
+      const id = w?.id || w?.ids?.openalex;
+      if (!id || globalSeen.has(id)) continue;
+      globalSeen.add(id);
+      sampledAll.push(w);
+      if (sampledAll.length >= maxItems) break;
+    }
+  }
+
+  // integrate sampled works
+  if (sampledAll && sampledAll.length > 0) {
+    integrateWorksAndEdges(null, sampledAll.slice(0, maxItems), null);
+    onGraphDataChanged?.();
+  }
+
+  setLoadingProgress(1.0, `Done. Retrieved ${Math.min(sampledAll.length, maxItems).toLocaleString()} works.`);
+  hideLoading();
 
 
 
