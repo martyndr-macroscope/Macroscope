@@ -2081,12 +2081,15 @@ function draw() {
   }
 
   background(14);
- if (drawSplashIfNeeded()) return;
-  // If a blocking load is happening, show overlay and bail before any push()
-  if (isLoading) {
-    drawLoadingOverlay();
-    return;
-  }
+
+// If a blocking load is happening, show overlay even on the splash screen
+if (isLoading) {
+  drawLoadingOverlay();
+  return;
+}
+
+if (drawSplashIfNeeded()) return;
+
 
   // Safety …
 if (!visibleMask || visibleMask.length !== nodes.length) {
@@ -12292,6 +12295,13 @@ async function retrieveAllWorksForInstitution(inst, opts = {}) {
     const base    = 'https://api.openalex.org/works';
     const filter0 = `institutions.id:${instId}`;
     const mailto  = (window.OPENALEX_MAILTO || window.UNPAYWALL_EMAIL || '').trim();
+console.log('[OA][inst] start', {
+  instId,
+  yearLo: yLo || null,
+  yearHi: yHi || null,
+  maxItems,
+  doCap
+});
 
     // ---------- helpers ----------
     function buildWorksUrl(filterStr, cursor) {
@@ -12460,7 +12470,7 @@ if (doCap && wantYearFilter) {
       qs.set('per-page', String(per));
       qs.set('page', String(page));
       if (mailto) qs.set('mailto', mailto);
-
+      console.log(`[OA][inst] fetched so far: ${sampled.length}/${maxItems || 'ALL'}`);
       const url = `${base}?${qs.toString()}`;
       const j = await fetchOAJson(url);
 
