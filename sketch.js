@@ -7457,6 +7457,8 @@ Return ONLY valid JSON with EXACT keys:
   "rigour": 0,
   "confidence": 0.0,
   "evidence_flags": ["methods_present","results_present","evaluation_present","mostly_intro_or_abstract","low_coverage","theoretical_innovation","dataset_or_resource","replication_or_validation","limitations_discussed"],
+  "overall_probs": { "0":0.0, "1":0.0, "2":0.0, "3":0.0, "4":0.0 },
+  "overall_expected": 0.0,
   "notes": ""
 }`;
 
@@ -7694,15 +7696,28 @@ let significance = clampInt(j.significance, 0, 4);
 let rigour       = clampInt(j.rigour, 0, 4);
 // --- Hard anti-inflation guard ---
 // If we used chunk-briefs or coverage is low, prevent 4s.
-const coverageNum = Number(d.ref_coverage);
-const lowCoverage = Number.isFinite(coverageNum) && coverageNum < 0.45;
+
+const flags = Array.isArray(j.evidence_flags) ? j.evidence_flags.map(String) : [];
+const hasMethods = flags.includes('methods_present');
+const hasResults = flags.includes('results_present');
+const hasEval    = flags.includes('evaluation_present');
+const strongInternalEvidence = hasMethods && hasResults && (hasEval || flags.includes('replication_or_validation'));
+
+const coverageNum   = Number(d.ref_coverage);
+const lowCoverage   = Number.isFinite(coverageNum) && coverageNum < 0.45;
 const usedChunkBrief = String(d.text_for_ref || '').startsWith('NOTE: Full text too long;');
 
-if (lowCoverage || usedChunkBrief) {
+const conf = clamp01(j.confidence);
+
+// Only cap 4s when coverage is poor AND evidence is not strong.
+const shouldCap4 = (lowCoverage || usedChunkBrief) && !(strongInternalEvidence && conf >= 0.70);
+
+if (shouldCap4) {
   originality  = Math.min(originality, 3);
   significance = Math.min(significance, 3);
   rigour       = Math.min(rigour, 3);
 }
+
 
 
 
