@@ -1,0 +1,1097 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Demo Dashboard — Semantic Space</title>
+
+  <meta name="description" content="Demo Dashboard: OpenAlex institution analytics in a Semantic Space-style interface." />
+
+  <!-- Fonts (same family vibe as your page) -->
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+
+  <style>
+    :root {
+      --bg: #05070b;
+      --bg-soft: #0b101a;
+      --panel: rgba(5,7,11,0.96);
+      --border-soft: rgba(255,255,255,0.12);
+      --border-strong: rgba(255,255,255,0.26);
+      --text: #f5f5ff;
+      --muted: #9ba0b8;
+      --accent: #b6ff85;
+      --accent-soft: rgba(182,255,133,0.12);
+      --danger: #ff6a6a;
+      --warn: #ffd27a;
+      --radius-lg: 16px;
+      --radius-sm: 10px;
+      --shadow-soft: 0 18px 50px rgba(0,0,0,0.6);
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body { margin: 0; padding: 0; height: 100%; }
+
+    body {
+      font-family: "Space Grotesk", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at 0 0, #14192a 0, transparent 55%),
+        radial-gradient(circle at 100% 0, #231220 0, transparent 55%),
+        radial-gradient(circle at 50% 90%, #0e1f1a 0, transparent 60%),
+        var(--bg);
+      color: var(--text);
+      -webkit-font-smoothing: antialiased;
+    }
+
+    a { color: inherit; text-decoration: none; }
+    .container { width: min(1180px, 92vw); margin: 0 auto; }
+
+    /* HEADER */
+    .header {
+      border-bottom: 1px solid rgba(255,255,255,0.10);
+      backdrop-filter: blur(10px);
+      background: linear-gradient(to bottom, rgba(5,7,11,0.9), rgba(5,7,11,0.6));
+      position: sticky;
+      top: 0;
+      z-index: 20;
+    }
+
+    .header-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 14px 0;
+      gap: 18px;
+    }
+
+    .header-left { display: flex; flex-direction: column; gap: 4px; }
+    .header-label {
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 11px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .header-title {
+      font-size: 15px;
+      font-weight: 600;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .header-right { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; justify-content: flex-end; }
+    .header-tag {
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 11px;
+      padding: 5px 9px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,0.16);
+      background: rgba(0,0,0,0.4);
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.16em;
+    }
+    .brand-dot {
+      width: 10px; height: 10px; border-radius: 999px;
+      background: var(--accent);
+      box-shadow: 0 0 18px rgba(182,255,133,0.8);
+      opacity: 0.95;
+    }
+
+    /* MAIN */
+    .main { padding: 34px 0 44px; }
+
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.2fr) minmax(0, 2fr);
+      gap: 18px;
+      align-items: start;
+    }
+    @media (max-width: 980px) { .grid { grid-template-columns: 1fr; } }
+
+    .panel {
+      border-radius: var(--radius-lg);
+      border: 1px solid var(--border-soft);
+      background:
+        linear-gradient(to bottom right, rgba(255,255,255,0.04), transparent),
+        var(--panel);
+      box-shadow: var(--shadow-soft);
+      padding: 16px 16px 18px;
+    }
+
+    .panel-header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 14px;
+      flex-wrap: wrap;
+      margin-bottom: 10px;
+    }
+
+    .panel-title {
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.15em;
+      color: var(--muted);
+    }
+
+    .panel-badge {
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.18em;
+      padding: 3px 8px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,0.18);
+      background: rgba(0,0,0,0.5);
+      color: var(--accent);
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-family: "IBM Plex Mono", monospace;
+      text-transform: uppercase;
+      letter-spacing: 0.18em;
+      font-size: 11px;
+      color: var(--muted);
+      padding: 4px 10px;
+      border-radius: 999px;
+      border: 1px dashed rgba(255,255,255,0.35);
+      background: rgba(0,0,0,0.45);
+      margin-bottom: 12px;
+    }
+    .eyebrow-dot {
+      width: 6px; height: 6px; border-radius: 999px;
+      background: var(--accent);
+      box-shadow: 0 0 12px rgba(182,255,133,0.8);
+    }
+
+    /* FORM */
+    label {
+      font-size: 12px;
+      color: var(--muted);
+      font-family: "IBM Plex Mono", monospace;
+      text-transform: uppercase;
+      letter-spacing: 0.16em;
+      display: block;
+      margin-bottom: 5px;
+    }
+
+    .field { display: flex; flex-direction: column; gap: 6px; }
+    .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 12px; }
+    @media (max-width: 560px) { .form-grid { grid-template-columns: 1fr; } }
+
+    input, select {
+      font: inherit;
+      padding: 9px 10px;
+      border-radius: 8px;
+      border: 1px solid rgba(255,255,255,0.22);
+      background: rgba(3,5,9,0.85);
+      color: var(--text);
+    }
+    input::placeholder { color: rgba(155,160,184,0.7); }
+    input:focus, select:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 1px rgba(182,255,133,0.4);
+    }
+
+    .btnrow { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 10px; }
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      padding: 7px 14px;
+      border-radius: 999px;
+      border: 1px solid var(--border-soft);
+      background: rgba(5,7,11,0.8);
+      color: var(--text);
+      font-size: 13px;
+      font-weight: 500;
+      font-family: "IBM Plex Mono", monospace;
+      text-transform: uppercase;
+      letter-spacing: 0.16em;
+      cursor: pointer;
+      transition: background 0.15s ease, transform 0.1s ease, border-color 0.15s ease;
+    }
+    .btn:hover {
+      background: rgba(10,13,22,1);
+      transform: translateY(-1px);
+      border-color: var(--border-strong);
+    }
+    .btn-primary {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+    .btn-primary:hover { background: rgba(182,255,133,0.18); }
+
+    .hint {
+      font-size: 11px;
+      color: var(--muted);
+      font-family: "IBM Plex Mono", monospace;
+      line-height: 1.5;
+    }
+    .status {
+      font-size: 12px;
+      font-family: "IBM Plex Mono", monospace;
+      color: var(--accent);
+      min-height: 1.2em;
+    }
+    .status.warn { color: var(--warn); }
+    .status.err { color: var(--danger); }
+
+    /* METRICS */
+    .kpis {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px 12px;
+      margin-top: 10px;
+    }
+    @media (max-width: 560px) { .kpis { grid-template-columns: 1fr; } }
+
+    .kpi {
+      border-radius: var(--radius-sm);
+      border: 1px solid rgba(255,255,255,0.14);
+      background: rgba(0,0,0,0.35);
+      padding: 10px 10px 9px;
+    }
+    .kpi .label {
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.16em;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+    .kpi .value {
+      font-size: 18px;
+      font-weight: 650;
+      letter-spacing: -0.01em;
+    }
+
+    /* CHART */
+    .chart-wrap {
+      border-radius: var(--radius-sm);
+      border: 1px solid rgba(255,255,255,0.14);
+      background: rgba(0,0,0,0.28);
+      padding: 10px;
+      margin-top: 12px;
+    }
+    canvas { width: 100%; height: 220px; display: block; }
+
+    /* LISTS */
+    .lists {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+      margin-top: 14px;
+    }
+    @media (max-width: 980px) { .lists { grid-template-columns: 1fr; } }
+
+    .list-card {
+      border-radius: var(--radius-lg);
+      border: 1px dashed rgba(153, 160, 192, 0.55);
+      background: rgba(7,10,18,0.92);
+      padding: 14px 14px 12px;
+      overflow: hidden;
+    }
+
+    .list-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 8px;
+      flex-wrap: wrap;
+    }
+
+    .list-title {
+      margin: 0;
+      font-size: 14px;
+      letter-spacing: -0.01em;
+    }
+
+    .list-meta {
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+    }
+
+    ol {
+      margin: 0;
+      padding-left: 18px;
+    }
+    li {
+      padding: 6px 0;
+      border-bottom: 1px solid rgba(255,255,255,0.06);
+      line-height: 1.35;
+    }
+    li:last-child { border-bottom: none; }
+
+    .row {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: baseline;
+    }
+    .name { color: var(--text); }
+    .sub {
+      color: var(--muted);
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 11px;
+      letter-spacing: 0.02em;
+      white-space: nowrap;
+    }
+
+    .footer {
+      border-top: 1px solid rgba(255,255,255,0.1);
+      padding: 18px 0 28px;
+      margin-top: 26px;
+      font-size: 11px;
+      color: var(--muted);
+      font-family: "IBM Plex Mono", monospace;
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="page">
+    <header class="header">
+      <div class="container header-inner">
+        <div class="header-left">
+          <div class="header-label">Semantic Space</div>
+          <div class="header-title">Demo Dashboard</div>
+        </div>
+        <div class="header-right">
+          <div class="header-tag">OpenAlex · Live</div>
+          <div class="brand-dot" aria-hidden="true"></div>
+        </div>
+      </div>
+    </header>
+
+    <main class="main">
+      <div class="container grid">
+        <!-- LEFT: CONTROLS -->
+        <section class="panel">
+          <div class="panel-header">
+            <div class="panel-title">Query</div>
+            <div class="panel-badge">Institution analytics</div>
+          </div>
+
+          <div class="eyebrow">
+            <span class="eyebrow-dot"></span>
+            Type an institution · pick years · run
+          </div>
+
+          <div class="form-grid">
+            <div class="field" style="grid-column: 1 / -1;">
+              <label for="instSearch">Institution</label>
+              <input id="instSearch" placeholder="e.g., Northumbria University" autocomplete="off" />
+              <div class="hint">Suggestions appear as you type. Select one before running.</div>
+            </div>
+
+            <div class="field" style="grid-column: 1 / -1;">
+              <label for="instSelect">Selected institution</label>
+              <select id="instSelect" disabled>
+                <option value="">— Search above to populate —</option>
+              </select>
+            </div>
+
+            <div class="field">
+              <label for="yearLo">From year</label>
+              <input id="yearLo" type="number" min="1600" max="2100" value="2018" />
+            </div>
+
+            <div class="field">
+              <label for="yearHi">To year</label>
+              <input id="yearHi" type="number" min="1600" max="2100" value="2024" />
+            </div>
+          </div>
+
+          <div class="btnrow">
+            <button class="btn btn-primary" id="runBtn" type="button">Run</button>
+            <button class="btn" id="resetBtn" type="button">Reset</button>
+            <span class="status" id="status" role="status" aria-live="polite"></span>
+          </div>
+
+          <div class="kpis" aria-label="Key metrics">
+            <div class="kpi">
+              <div class="label">Total publications</div>
+              <div class="value" id="kpiTotal">—</div>
+            </div>
+            <div class="kpi">
+              <div class="label">Year span</div>
+              <div class="value" id="kpiSpan">—</div>
+            </div>
+          </div>
+
+          <div class="chart-wrap">
+            <div class="panel-header" style="margin: 0 0 8px;">
+              <div class="panel-title">Publications per year</div>
+              <div class="panel-badge" id="chartNote">—</div>
+            </div>
+            <canvas id="yearChart" width="900" height="260" aria-label="Publications per year chart"></canvas>
+            <div class="hint" style="margin-top: 8px;">
+              Counts are from OpenAlex “works” filtered by institution + publication year range.
+            </div>
+          </div>
+
+          <div class="hint" style="margin-top: 14px;">
+            Notes:
+            <ul style="margin: 8px 0 0; padding-left: 18px;">
+              <li>“Highest cited authors” is an approximation: authors present in the institution’s works in-range, ranked by their overall <span style="color:var(--accent);">author cited_by_count</span>.</li>
+              <li>“Collaborated-with institutions” is computed from institution co-occurrence in the same filtered works (excluding the selected institution).</li>
+            </ul>
+          </div>
+        </section>
+
+        <!-- RIGHT: OUTPUT -->
+        <section class="panel">
+          <div class="panel-header">
+            <div class="panel-title">Results</div>
+            <div class="panel-badge" id="resultBadge">Idle</div>
+          </div>
+
+          <div class="lists">
+            <article class="list-card">
+              <div class="list-head">
+                <h3 class="list-title">Top 10 highest-cited authors</h3>
+                <div class="list-meta">Approx · author cited_by_count</div>
+              </div>
+              <ol id="listHighCited"></ol>
+            </article>
+
+            <article class="list-card">
+              <div class="list-head">
+                <h3 class="list-title">Top 10 most productive authors</h3>
+                <div class="list-meta">Works count in range</div>
+              </div>
+              <ol id="listProductive"></ol>
+            </article>
+
+            <article class="list-card">
+              <div class="list-head">
+                <h3 class="list-title">Top 10 collaborated-with institutions</h3>
+                <div class="list-meta">Co-occurrence in works</div>
+              </div>
+              <ol id="listCollabInst"></ol>
+            </article>
+
+            <article class="list-card">
+              <div class="list-head">
+                <h3 class="list-title">Top 10 venues</h3>
+                <div class="list-meta">Host venue in range</div>
+              </div>
+              <ol id="listVenues"></ol>
+            </article>
+
+            <article class="list-card">
+              <div class="list-head">
+                <h3 class="list-title">Top 10 concepts</h3>
+                <div class="list-meta">Concept tags in range</div>
+              </div>
+              <ol id="listConcepts"></ol>
+            </article>
+
+            <article class="list-card">
+              <div class="list-head">
+                <h3 class="list-title">Raw debug</h3>
+                <div class="list-meta">OpenAlex endpoints used</div>
+              </div>
+              <div class="hint" id="debugBox" style="white-space: pre-wrap; margin-top: 6px;"></div>
+            </article>
+          </div>
+        </section>
+      </div>
+
+      <footer class="container footer">
+        <span>© <span id="year"></span> Semantic Space · Demo Dashboard.</span>
+        <small>Uses OpenAlex public API. No keys required. Rate-limited; avoid hammering Run.</small>
+      </footer>
+    </main>
+  </div>
+
+  <script>
+    // =========================
+    // OpenAlex Demo Dashboard
+    // =========================
+
+    const OA = {
+      base: "https://api.openalex.org",
+      mailto: "", // optional: "you@domain.com" (OpenAlex encourages mailto param for polite usage)
+    };
+
+    const el = (id) => document.getElementById(id);
+
+    const ui = {
+      instSearch: el("instSearch"),
+      instSelect: el("instSelect"),
+      yearLo: el("yearLo"),
+      yearHi: el("yearHi"),
+      runBtn: el("runBtn"),
+      resetBtn: el("resetBtn"),
+      status: el("status"),
+      badge: el("resultBadge"),
+      kpiTotal: el("kpiTotal"),
+      kpiSpan: el("kpiSpan"),
+      chartNote: el("chartNote"),
+      chart: el("yearChart"),
+      listHighCited: el("listHighCited"),
+      listProductive: el("listProductive"),
+      listCollabInst: el("listCollabInst"),
+      listVenues: el("listVenues"),
+      listConcepts: el("listConcepts"),
+      debugBox: el("debugBox"),
+    };
+
+    // Year stamp
+    el("year").textContent = new Date().getFullYear();
+
+    // ---------- Helpers ----------
+    function setStatus(text, kind = "ok") {
+      ui.status.classList.remove("warn", "err");
+      if (kind === "warn") ui.status.classList.add("warn");
+      if (kind === "err") ui.status.classList.add("err");
+      ui.status.textContent = text || "";
+    }
+
+    function setBadge(text) {
+      ui.badge.textContent = text;
+    }
+
+    function clampYear(y) {
+      const n = Number(y);
+      if (!Number.isFinite(n)) return null;
+      return Math.max(1600, Math.min(2100, Math.floor(n)));
+    }
+
+    function asISODateFromYear(y, isStart) {
+      // OpenAlex supports from_publication_date/to_publication_date
+      // We'll cover full years with Jan 1 and Dec 31
+      return isStart ? `${y}-01-01` : `${y}-12-31`;
+    }
+
+    function oaUrl(path, params = {}) {
+      const url = new URL(OA.base + path);
+      for (const [k, v] of Object.entries(params)) {
+        if (v === undefined || v === null || v === "") continue;
+        url.searchParams.set(k, String(v));
+      }
+      if (OA.mailto) url.searchParams.set("mailto", OA.mailto);
+      return url.toString();
+    }
+
+    async function fetchJson(url) {
+      const res = await fetch(url, { headers: { "Accept": "application/json" } });
+      if (!res.ok) {
+        const t = await res.text().catch(() => "");
+        throw new Error(`HTTP ${res.status}: ${t.slice(0, 200)}`);
+      }
+      return res.json();
+    }
+
+    function clearList(ol) {
+      ol.innerHTML = "";
+    }
+
+    function addListItem(ol, name, rightText, href) {
+      const li = document.createElement("li");
+      const row = document.createElement("div");
+      row.className = "row";
+
+      const left = document.createElement(href ? "a" : "span");
+      left.className = "name";
+      left.textContent = name || "—";
+      if (href) {
+        left.href = href;
+        left.target = "_blank";
+        left.rel = "noopener noreferrer";
+        left.style.textDecoration = "underline";
+        left.style.textDecorationColor = "rgba(255,255,255,0.18)";
+      }
+
+      const right = document.createElement("span");
+      right.className = "sub";
+      right.textContent = rightText || "";
+
+      row.appendChild(left);
+      row.appendChild(right);
+      li.appendChild(row);
+      ol.appendChild(li);
+    }
+
+    function fmtInt(n) {
+      const x = Number(n);
+      if (!Number.isFinite(x)) return "—";
+      return x.toLocaleString();
+    }
+
+    // ---------- Chart ----------
+    function drawYearChart(canvas, series /* [{year,count}] */, labelNote = "") {
+      const ctx = canvas.getContext("2d");
+      const w = canvas.width, h = canvas.height;
+
+      // hi-dpi friendliness (keep simple)
+      ctx.clearRect(0, 0, w, h);
+
+      // Background grid
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = "rgba(0,0,0,0)";
+      ctx.fillRect(0, 0, w, h);
+
+      const padL = 44, padR = 16, padT = 14, padB = 34;
+      const innerW = w - padL - padR;
+      const innerH = h - padT - padB;
+
+      // Axes
+      ctx.strokeStyle = "rgba(255,255,255,0.20)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(padL, padT);
+      ctx.lineTo(padL, padT + innerH);
+      ctx.lineTo(padL + innerW, padT + innerH);
+      ctx.stroke();
+
+      if (!series || series.length === 0) {
+        ctx.fillStyle = "rgba(155,160,184,0.9)";
+        ctx.font = "12px 'IBM Plex Mono', monospace";
+        ctx.fillText("No data", padL + 10, padT + 20);
+        return;
+      }
+
+      const maxC = Math.max(...series.map(d => d.count));
+      const minY = series[0].year;
+      const maxY = series[series.length - 1].year;
+
+      // Grid lines + y labels
+      const steps = 4;
+      ctx.font = "11px 'IBM Plex Mono', monospace";
+      ctx.fillStyle = "rgba(155,160,184,0.9)";
+      ctx.strokeStyle = "rgba(255,255,255,0.08)";
+      for (let i = 0; i <= steps; i++) {
+        const t = i / steps;
+        const y = padT + innerH - t * innerH;
+        ctx.beginPath();
+        ctx.moveTo(padL, y);
+        ctx.lineTo(padL + innerW, y);
+        ctx.stroke();
+
+        const val = Math.round(t * maxC);
+        ctx.fillText(fmtInt(val), 8, y + 4);
+      }
+
+      // Bars
+      const n = series.length;
+      const gap = Math.max(2, Math.floor(innerW * 0.01));
+      const barW = Math.max(2, Math.floor((innerW - gap * (n - 1)) / n));
+
+      // Accent-ish bars (no explicit colors requested by you, but we keep consistent)
+      ctx.fillStyle = "rgba(182,255,133,0.22)";
+      ctx.strokeStyle = "rgba(182,255,133,0.65)";
+      ctx.lineWidth = 1;
+
+      series.forEach((d, i) => {
+        const x = padL + i * (barW + gap);
+        const bh = maxC ? (d.count / maxC) * innerH : 0;
+        const y = padT + innerH - bh;
+
+        ctx.fillRect(x, y, barW, bh);
+        ctx.strokeRect(x + 0.5, y + 0.5, barW - 1, Math.max(0, bh - 1));
+      });
+
+      // X labels (sparse)
+      ctx.fillStyle = "rgba(155,160,184,0.9)";
+      const every = n <= 12 ? 1 : (n <= 24 ? 2 : 3);
+      for (let i = 0; i < n; i += every) {
+        const d = series[i];
+        const x = padL + i * (barW + gap) + Math.floor(barW / 2) - 10;
+        ctx.fillText(String(d.year), x, padT + innerH + 22);
+      }
+
+      // Note
+      if (labelNote) {
+        ctx.fillStyle = "rgba(155,160,184,0.9)";
+        ctx.fillText(labelNote, padL, padT + 12);
+      }
+    }
+
+    // ---------- OpenAlex logic ----------
+    let instSearchTimer = null;
+
+    async function searchInstitutions(q) {
+      const url = oaUrl("/institutions", {
+        search: q,
+        "per-page": 8
+      });
+      return fetchJson(url);
+    }
+
+    function setInstitutionOptions(results) {
+      ui.instSelect.innerHTML = "";
+      if (!results || results.length === 0) {
+        ui.instSelect.disabled = true;
+        const opt = document.createElement("option");
+        opt.value = "";
+        opt.textContent = "— No results —";
+        ui.instSelect.appendChild(opt);
+        return;
+      }
+
+      ui.instSelect.disabled = false;
+      const top = document.createElement("option");
+      top.value = "";
+      top.textContent = "— Select an institution —";
+      ui.instSelect.appendChild(top);
+
+      for (const r of results) {
+        const opt = document.createElement("option");
+        opt.value = r.id; // e.g. https://openalex.org/I...
+        const country = r.country_code ? ` · ${r.country_code}` : "";
+        opt.textContent = `${r.display_name}${country}`;
+        opt.dataset.oaid = r.id;
+        opt.dataset.ror = r.ror || "";
+        ui.instSelect.appendChild(opt);
+      }
+    }
+
+    function toInstId(instUrl) {
+      // https://openalex.org/I123 -> I123
+      if (!instUrl) return "";
+      return String(instUrl).replace(/^https?:\/\/openalex\.org\//i, "");
+    }
+
+    function buildWorksFilter(instId, yLo, yHi) {
+      const from = asISODateFromYear(yLo, true);
+      const to = asISODateFromYear(yHi, false);
+      return `institutions.id:${instId},from_publication_date:${from},to_publication_date:${to}`;
+    }
+
+    async function worksGroupBy(filter, group_by, extra = {}) {
+      const url = oaUrl("/works", {
+        filter,
+        group_by,
+        "per-page": 200,
+        ...extra
+      });
+      return fetchJson(url);
+    }
+
+    async function fetchEntityMap(endpoint, ids) {
+      // Fetch display_name for a list of OpenAlex IDs (A..., I..., V..., C...)
+      // Uses "ids" param: /authors?filter=openalex_id:A...,A... (not supported)
+      // Safer: individual fetches with small concurrency.
+      const map = new Map();
+      const limit = 8;
+      let i = 0;
+
+      async function worker() {
+        while (i < ids.length) {
+          const idx = i++;
+          const id = ids[idx];
+          const url = oaUrl(`/${endpoint}/${id}`);
+          try {
+            const j = await fetchJson(url);
+            map.set(id, j);
+          } catch (e) {
+            map.set(id, null);
+          }
+        }
+      }
+
+      const workers = Array.from({ length: Math.min(limit, ids.length) }, () => worker());
+      await Promise.all(workers);
+      return map;
+    }
+
+    function normalizeGroupKey(k) {
+      // group_by key may come back as:
+      // - number (publication_year)
+      // - OpenAlex URL
+      // - OpenAlex short id
+      if (k === null || k === undefined) return "";
+      const s = String(k);
+      return s.replace(/^https?:\/\/openalex\.org\//i, "");
+    }
+
+    function fillListsEmpty() {
+      for (const l of [ui.listHighCited, ui.listProductive, ui.listCollabInst, ui.listVenues, ui.listConcepts]) {
+        clearList(l);
+        addListItem(l, "—", "");
+      }
+    }
+
+    function setDebug(lines) {
+      ui.debugBox.textContent = lines.join("\n");
+    }
+
+    async function runDashboard() {
+      setStatus("", "ok");
+      setBadge("Running");
+      ui.runBtn.disabled = true;
+
+      // Clear outputs
+      ui.kpiTotal.textContent = "—";
+      ui.kpiSpan.textContent = "—";
+      ui.chartNote.textContent = "—";
+      fillListsEmpty();
+      drawYearChart(ui.chart, [], "");
+
+      try {
+        const instUrl = ui.instSelect.value;
+        const instId = toInstId(instUrl);
+
+        const yLo = clampYear(ui.yearLo.value);
+        const yHi = clampYear(ui.yearHi.value);
+
+        if (!instId) {
+          setStatus("Select an institution first.", "warn");
+          setBadge("Idle");
+          return;
+        }
+        if (!yLo || !yHi || yHi < yLo) {
+          setStatus("Check year range (From <= To).", "warn");
+          setBadge("Idle");
+          return;
+        }
+
+        ui.kpiSpan.textContent = `${yLo}–${yHi}`;
+        setStatus("Querying OpenAlex…", "ok");
+
+        const filter = buildWorksFilter(instId, yLo, yHi);
+
+        const debugLines = [];
+        debugLines.push("Filters:");
+        debugLines.push(`  works.filter = ${filter}`);
+        debugLines.push("");
+
+        // 1) Per-year counts
+        debugLines.push("Endpoints:");
+        debugLines.push(oaUrl("/works", { filter, group_by: "publication_year" }));
+
+        const byYear = await worksGroupBy(filter, "publication_year");
+        const yearBuckets = (byYear?.group_by || [])
+          .map(g => ({ year: Number(g.key_display_name ?? g.key), count: Number(g.count || 0) }))
+          .filter(d => Number.isFinite(d.year))
+          .sort((a, b) => a.year - b.year);
+
+        // Ensure full span present (including zeros)
+        const yearMap = new Map(yearBuckets.map(d => [d.year, d.count]));
+        const series = [];
+        let total = 0;
+        for (let y = yLo; y <= yHi; y++) {
+          const c = yearMap.get(y) || 0;
+          total += c;
+          series.push({ year: y, count: c });
+        }
+
+        ui.kpiTotal.textContent = fmtInt(total);
+        ui.chartNote.textContent = `${fmtInt(total)} works`;
+        drawYearChart(ui.chart, series, "");
+
+        // 2) Top productive authors (works group_by=author.id)
+        // OpenAlex group_by supports "author.id" for works via authorships.
+        debugLines.push(oaUrl("/works", { filter, group_by: "author.id" }));
+        const gbAuthors = await worksGroupBy(filter, "author.id");
+        const topAuthors = (gbAuthors?.group_by || []).slice(0, 20).map(g => ({
+          id: normalizeGroupKey(g.key),
+          count: Number(g.count || 0)
+        })).filter(a => a.id);
+
+        const top10Productive = topAuthors.slice(0, 10);
+
+        // Fetch author records for names + cited_by_count
+        const authorIds = Array.from(new Set(topAuthors.map(a => a.id)));
+        const authorMap = await fetchEntityMap("authors", authorIds);
+
+        clearList(ui.listProductive);
+        top10Productive.forEach((a) => {
+          const rec = authorMap.get(a.id);
+          const name = rec?.display_name || a.id;
+          addListItem(
+            ui.listProductive,
+            name,
+            `${fmtInt(a.count)} works`,
+            rec?.id || `https://openalex.org/${a.id}`
+          );
+        });
+
+        // 3) Highest cited authors (approx) = topAuthors ranked by author.cited_by_count
+        const topByCites = topAuthors
+          .map(a => {
+            const rec = authorMap.get(a.id);
+            return {
+              id: a.id,
+              works: a.count,
+              name: rec?.display_name || a.id,
+              cited_by_count: Number(rec?.cited_by_count || 0),
+              url: rec?.id || `https://openalex.org/${a.id}`
+            };
+          })
+          .sort((x, y) => (y.cited_by_count - x.cited_by_count))
+          .slice(0, 10);
+
+        clearList(ui.listHighCited);
+        topByCites.forEach(a => {
+          addListItem(
+            ui.listHighCited,
+            a.name,
+            `${fmtInt(a.cited_by_count)} cites`,
+            a.url
+          );
+        });
+
+        // 4) Collaborated-with institutions (group_by=institutions.id)
+        // This includes the selected institution; remove it.
+        debugLines.push(oaUrl("/works", { filter, group_by: "institutions.id" }));
+        const gbInst = await worksGroupBy(filter, "institutions.id");
+
+        const instBuckets = (gbInst?.group_by || [])
+          .map(g => ({ id: normalizeGroupKey(g.key), count: Number(g.count || 0) }))
+          .filter(d => d.id && d.id !== instId)
+          .slice(0, 20);
+
+        const instIds = Array.from(new Set(instBuckets.map(d => d.id)));
+        const instMap = await fetchEntityMap("institutions", instIds);
+
+        clearList(ui.listCollabInst);
+        instBuckets.slice(0, 10).forEach(d => {
+          const rec = instMap.get(d.id);
+          const name = rec?.display_name || d.id;
+          addListItem(
+            ui.listCollabInst,
+            name,
+            `${fmtInt(d.count)} co-works`,
+            rec?.id || `https://openalex.org/${d.id}`
+          );
+        });
+
+        // 5) Venues (group_by=host_venue.id)
+// 5) Venues (OpenAlex: host_venue deprecated -> use primary_location.source.id)
+// This groups by Source (journals, repositories, proceedings, etc.)
+debugLines.push(oaUrl("/works", { filter, group_by: "primary_location.source.id" }));
+const gbVenues = await worksGroupBy(filter, "primary_location.source.id");
+
+const venueBuckets = (gbVenues?.group_by || [])
+  .map(g => ({
+    id: normalizeGroupKey(g.key),            // should be S######## or https://openalex.org/S########
+    count: Number(g.count || 0),
+    label: g.key_display_name
+  }))
+  .filter(d => d.id && d.id !== "null")
+  .slice(0, 12);
+
+// Sources use S-ids, and the endpoint is /sources (not /venues)
+const sourceIds = Array.from(new Set(venueBuckets.map(d => d.id).filter(x => /^S\d+/i.test(x))));
+const sourceMap = await fetchEntityMap("sources", sourceIds);
+
+clearList(ui.listVenues);
+venueBuckets.slice(0, 10).forEach(d => {
+  const rec = sourceMap.get(d.id);
+  const name = rec?.display_name || d.label || d.id;
+  addListItem(
+    ui.listVenues,
+    name,
+    `${fmtInt(d.count)} works`,
+    rec?.id || `https://openalex.org/${d.id}`
+  );
+});
+
+
+        // 6) Concepts (group_by=concepts.id)
+        debugLines.push(oaUrl("/works", { filter, group_by: "concepts.id" }));
+        const gbConcepts = await worksGroupBy(filter, "concepts.id");
+
+        const conceptBuckets = (gbConcepts?.group_by || [])
+          .map(g => ({ id: normalizeGroupKey(g.key), count: Number(g.count || 0), label: g.key_display_name }))
+          .filter(d => d.id && d.id !== "null")
+          .slice(0, 12);
+
+        const conceptIds = Array.from(new Set(conceptBuckets.map(d => d.id).filter(x => /^C\d+/i.test(x))));
+        const conceptMap = await fetchEntityMap("concepts", conceptIds);
+
+        clearList(ui.listConcepts);
+        conceptBuckets.slice(0, 10).forEach(d => {
+          const rec = conceptMap.get(d.id);
+          const name = rec?.display_name || d.label || d.id;
+          addListItem(
+            ui.listConcepts,
+            name,
+            `${fmtInt(d.count)} works`,
+            rec?.id || `https://openalex.org/${d.id}`
+          );
+        });
+
+        setDebug(debugLines);
+        setStatus("Done.", "ok");
+        setBadge("Complete");
+      } catch (err) {
+        console.error(err);
+        setStatus(`Error: ${err?.message || err}`, "err");
+        setBadge("Error");
+      } finally {
+        ui.runBtn.disabled = false;
+      }
+    }
+
+    // ---------- Wiring ----------
+    ui.instSearch.addEventListener("input", () => {
+      const q = ui.instSearch.value.trim();
+      clearTimeout(instSearchTimer);
+
+      if (q.length < 3) {
+        setInstitutionOptions([]);
+        setStatus("Type at least 3 characters to search institutions.", "warn");
+        return;
+      }
+
+      instSearchTimer = setTimeout(async () => {
+        try {
+          setStatus("Searching institutions…", "ok");
+          const j = await searchInstitutions(q);
+          setInstitutionOptions(j?.results || []);
+          setStatus(`Found ${Math.min(j?.meta?.count || 0, 8)} suggestions.`, "ok");
+        } catch (e) {
+          setInstitutionOptions([]);
+          setStatus("Institution search failed (network / rate-limit). Try again.", "err");
+        }
+      }, 250);
+    });
+
+    ui.runBtn.addEventListener("click", runDashboard);
+
+    ui.resetBtn.addEventListener("click", () => {
+      ui.instSearch.value = "";
+      ui.instSelect.innerHTML = `<option value="">— Search above to populate —</option>`;
+      ui.instSelect.disabled = true;
+      ui.yearLo.value = "2018";
+      ui.yearHi.value = "2024";
+      ui.kpiTotal.textContent = "—";
+      ui.kpiSpan.textContent = "—";
+      ui.chartNote.textContent = "—";
+      fillListsEmpty();
+      drawYearChart(ui.chart, [], "");
+      setDebug([]);
+      setStatus("", "ok");
+      setBadge("Idle");
+    });
+
+    // Initial
+    setBadge("Idle");
+    fillListsEmpty();
+    drawYearChart(ui.chart, [], "");
+    setStatus("Type an institution name to begin.", "ok");
+  </script>
+</body>
+</html>

@@ -7423,30 +7423,39 @@ function downloadTextFile(fileName, text, mime = 'text/plain') {
 // Prompt builder: REF-style scoring + UoA assignment.
 function buildREFPrompt(doc, uoaListText) {
   const sys =
-`You are a REF reviewer assessing a single research output.
+`You are a REF outputs reviewer assessing ONE research output using ONLY the provided text and metadata.
 
-Assess the output against three criteria:
+REF criteria:
+- Originality: important and innovative contribution to understanding/knowledge.
+- Significance: influence or credible capacity to influence knowledge/scholarly thought.
+- Rigour: intellectual coherence/integrity; robust and appropriate concepts, analysis, and methods.
 
-Originality: The extent to which the output makes an important and innovative contribution to understanding and knowledge in the field.
+Star definitions (REF-aligned):
+4 = World-leading in originality, significance, and rigour.
+3 = Internationally excellent in originality, significance, and rigour, but short of the highest standards.
+2 = Recognised internationally in originality, significance, and rigour.
+1 = Recognised nationally in originality, significance, and rigour.
+0 = Unclassified (below 1* or not research).
 
-Significance: The extent to which the work has influenced, or has the capacity to influence, knowledge and scholarly thought.
+IMPORTANT: produce a USEFUL spread of grades.
+- Many competent papers should sit at 2–3.
+- 4 is plausible when there is clear evidence in the provided text for strong novelty + strong validation/robustness + broad significance.
+- 2 is plausible when contribution is incremental, validation is limited, methods are weak/unclear, or significance is narrow.
+- 1/0 should be rare in typical peer-reviewed venues unless the text indicates non-research, very weak scholarship, or missing essentials.
 
-Rigour: The extent to which the work demonstrates intellectual coherence and integrity, and adopts robust and appropriate concepts, analyses, and methodologies.
+EVIDENCE-FIRST PROCESS (do this internally):
+1) Extract evidence signals from the text: novelty claim, methods detail, results/validation, limitations, comparisons to prior work, scope of contribution, generalisability.
+2) Score O/S/R each as integer 0..4 based on evidence strength.
+3) Then produce an overall probability distribution over 0..4.
 
-GRADING SCALE (use integers; REF-aligned):
-4 = World-leading: outstanding in originality, significance, and rigour.
-3 = Internationally excellent: very considerable in originality, significance, and rigour, but short of the highest standards.
-2 = Recognised internationally: good quality research recognised internationally.
-1 = Recognised nationally: quality recognised nationally.
-0 = Unclassified: below the standard of nationally recognised work or does not meet the definition of research.
+SOFT PRIOR (to avoid score compression):
+Start from this generic prior for typical UK research outputs:
+P(4)=0.15, P(3)=0.45, P(2)=0.30, P(1)=0.08, P(0)=0.02
+Update away from the prior only if the provided text gives strong evidence.
 
-CALIBRATION RULES (VERY IMPORTANT — prevent generosity):
-- Default assumption for strong, competent journal/conference papers is usually 3 or 2, not 4.
-- Award 4 ONLY when there is explicit evidence in the provided text of: (a) important innovation, (b) strong scholarly influence/potential influence beyond a narrow niche, and (c) clearly robust methods/analysis/validation.
-- If methods/results/evaluation are missing or unclear in the provided text, do NOT award 4 for Rigour; likely cap overall at 3 or 2.
-- If the provided text is truncated/partial/low coverage, CAP all scores at 3 and set confidence <= 0.55.
-- If the provided text is mostly abstract/introduction (little methods/results), CAP at 2–3 and include "mostly_intro_or_abstract".
-- Use the whole scale: 3 should be common; 4 should be uncommon.
+COVERAGE / UNCERTAINTY:
+- If the text is partial/truncated, DO NOT automatically cap at 3. Instead: increase uncertainty (flatten probs) and lower confidence.
+- Confidence is 0..1 and should reflect how much the text actually supports the judgement.
 
 Return ONLY valid JSON with EXACT keys:
 {
@@ -7456,11 +7465,12 @@ Return ONLY valid JSON with EXACT keys:
   "significance": 0,
   "rigour": 0,
   "confidence": 0.0,
-  "evidence_flags": ["methods_present","results_present","evaluation_present","mostly_intro_or_abstract","low_coverage","theoretical_innovation","dataset_or_resource","replication_or_validation","limitations_discussed"],
+  "evidence_flags": ["methods_present","results_present","evaluation_present","mostly_intro_or_abstract","low_coverage","theoretical_innovation","dataset_or_resource","replication_or_validation","limitations_discussed","incremental_contribution","narrow_significance","weak_methods_or_reporting"],
   "overall_probs": { "0":0.0, "1":0.0, "2":0.0, "3":0.0, "4":0.0 },
   "overall_expected": 0.0,
   "notes": ""
 }`;
+
 
   const coverageLine =
     (doc && (doc.ref_total_chars != null) && (doc.ref_provided_chars != null))
