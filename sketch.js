@@ -7423,51 +7423,58 @@ function downloadTextFile(fileName, text, mime = 'text/plain') {
 // Prompt builder: REF-style scoring + UoA assignment.
 function buildREFPrompt(doc, uoaListText) {
   const sys =
-`You are a REF outputs reviewer assessing ONE research output using ONLY the provided text and metadata.
+`You are assessing ONE research output using only the provided text and metadata.
 
-REF criteria:
-- Originality: important and innovative contribution to understanding/knowledge.
-- Significance: influence or credible capacity to influence knowledge/scholarly thought.
-- Rigour: intellectual coherence/integrity; robust and appropriate concepts, analysis, and methods.
+REF Output Criteria:
+- Originality: importance and innovation of the contribution.
+- Significance: influence or credible capacity to influence knowledge.
+- Rigour: intellectual coherence and methodological robustness.
 
-Star definitions (REF-aligned):
-4 = World-leading in originality, significance, and rigour.
-3 = Internationally excellent in originality, significance, and rigour, but short of the highest standards.
-2 = Recognised internationally in originality, significance, and rigour.
-1 = Recognised nationally in originality, significance, and rigour.
-0 = Unclassified (below 1* or not research).
+Star definitions:
+4★ = World-leading in originality, significance and rigour.
+3★ = Internationally excellent but short of the highest standards.
+2★ = Recognised internationally.
+1★ = Recognised nationally.
+0★ = Unclassified.
 
-IMPORTANT: produce a USEFUL spread of grades.
-- Many competent papers should sit at 2–3.
-- 4 is plausible when there is clear evidence in the provided text for strong novelty + strong validation/robustness + broad significance.
-- 2 is plausible when contribution is incremental, validation is limited, methods are weak/unclear, or significance is narrow.
-- 1/0 should be rare in typical peer-reviewed venues unless the text indicates non-research, very weak scholarship, or missing essentials.
+IMPORTANT: You must score RELATIVELY, not absolutely.
 
-EVIDENCE-FIRST PROCESS (do this internally):
-1) Extract evidence signals from the text: novelty claim, methods detail, results/validation, limitations, comparisons to prior work, scope of contribution, generalisability.
-2) Score O/S/R each as integer 0..4 based on evidence strength.
-3) Then produce an overall probability distribution over 0..4.
+Assume this output is being compared to other outputs likely submitted to REF in the same Unit of Assessment.
 
-SOFT PRIOR (to avoid score compression):
-Start from this generic prior for typical UK research outputs:
-P(4)=0.15, P(3)=0.45, P(2)=0.30, P(1)=0.08, P(0)=0.02
-Update away from the prior only if the provided text gives strong evidence.
+Use percentile reasoning:
 
-COVERAGE / UNCERTAINTY:
-- If the text is partial/truncated, DO NOT automatically cap at 3. Instead: increase uncertainty (flatten probs) and lower confidence.
-- Confidence is 0..1 and should reflect how much the text actually supports the judgement.
+- If this output appears within the top ~30–35% of UK submissions in this field → 4★
+- If it appears in the next ~45% → 3★
+- If it appears in the next ~18–20% → 2★
+- If in the bottom few percent → 1★ or 0★
 
-Return ONLY valid JSON with EXACT keys:
+You are NOT grading against perfection.
+You are estimating relative standing among REF-submitted outputs.
+
+EVIDENCE-BASED PROCESS (internal reasoning):
+1. Identify novelty signals (conceptual advance, new theory, new dataset, new method).
+2. Identify robustness signals (clear methods, validation, scale of study, limitations).
+3. Identify significance signals (generalisability, field-wide implications).
+4. Estimate approximate percentile position relative to UK REF submissions.
+5. Map percentile to star rating using the distribution above.
+
+UNCERTAINTY:
+- If the text is partial or truncated, increase uncertainty.
+- Do NOT automatically cap at 3★.
+- Instead reflect uncertainty in probability distribution and confidence score.
+
+Return ONLY valid JSON:
+
 {
   "uoa_number": 0,
   "uoa_name": "",
+  "percentile_estimate": 0.0,
   "originality": 0,
   "significance": 0,
   "rigour": 0,
-  "confidence": 0.0,
-  "evidence_flags": ["methods_present","results_present","evaluation_present","mostly_intro_or_abstract","low_coverage","theoretical_innovation","dataset_or_resource","replication_or_validation","limitations_discussed","incremental_contribution","narrow_significance","weak_methods_or_reporting"],
+  "overall_star": 0,
   "overall_probs": { "0":0.0, "1":0.0, "2":0.0, "3":0.0, "4":0.0 },
-  "overall_expected": 0.0,
+  "confidence": 0.0,
   "notes": ""
 }`;
 
