@@ -11189,76 +11189,7 @@ if (itemsData.length === 1) {                              // ← ADD
 // <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 // ─────────────────────────────────────────────────────────────────────────────
 
-function openRefSpreadsheetRetrievalDialog() {
-  // backdrop
-  const bg = document.createElement('div');
-  Object.assign(bg.style, {
-    position:'fixed', inset:'0', background:'rgba(0,0,0,0.45)', backdropFilter:'blur(4px)',
-    display:'flex', alignItems:'center', justifyContent:'center', zIndex:'10060'
-  });
 
-  const box = document.createElement('div');
-  Object.assign(box.style, {
-    width:'min(720px, 94vw)', background:'rgba(16,16,20,0.95)', color:'#fff',
-    border:'1px solid rgba(255,255,255,0.18)', borderRadius:'12px',
-    boxShadow:'0 12px 40px rgba(0,0,0,0.5)', padding:'16px',
-    font:'14px/1.35 system-ui, -apple-system, Segoe UI, Roboto'
-  });
-
-  box.innerHTML = `
-    <div style="font-weight:700; margin-bottom:8px">Retrieve by REF database</div>
-    <div style="opacity:.85; margin-bottom:12px">
-      Upload a <b>REF 2021 Outputs</b> spreadsheet (.xlsx) and Macroscope will:
-      <ul style="margin:8px 0 0 18px; opacity:.9">
-        <li>Extract <b>DOIs</b> (and basic metadata)</li>
-        <li>Resolve each DOI to an <b>OpenAlex</b> record</li>
-        <li>Add/merge publications into the current graph</li>
-        <li>Attach <b>Unit of Assessment</b> (UoA) from the spreadsheet to each item</li>
-      </ul>
-      <div style="margin-top:8px; font-size:12px; opacity:.75">
-        Note: for .xlsx parsing you need the SheetJS XLSX library loaded (global <code>XLSX</code>).
-      </div>
-    </div>
-
-    <div style="display:flex; gap:10px; justify-content:flex-end; margin-top:14px">
-      <button id="ref_cancel" style="padding:8px 12px;border-radius:10px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.2);color:#fff;cursor:pointer">Cancel</button>
-      <button id="ref_choose"  style="padding:8px 12px;border-radius:10px;background:#2a84ff;border:1px solid rgba(255,255,255,0.2);color:#fff;cursor:pointer;font-weight:700">Choose spreadsheet…</button>
-    </div>
-  `;
-
-  bg.appendChild(box);
-  document.body.appendChild(bg);
-
-  const close = () => { try { bg.remove(); } catch {} };
-
-  box.querySelector('#ref_cancel')?.addEventListener('click', close);
-
-  box.querySelector('#ref_choose')?.addEventListener('click', async () => {
-    try {
-      const input = document.createElement('input');
-      input.type = 'file';
-      input.accept = '.xlsx,.xls,.csv';
-      input.style.display = 'none';
-      document.body.appendChild(input);
-
-      input.addEventListener('change', async () => {
-        const file = input.files && input.files[0];
-        try { input.remove(); } catch {}
-        if (!file) return;
-
-        close();
-
-        await retrieveFromRefSpreadsheetFile(file);
-      });
-
-      input.click();
-    } catch (e) {
-      console.error(e);
-      showToast?.('Could not open file chooser.');
-      close();
-    }
-  });
-}
 
 async function retrieveFromRefSpreadsheetFile(file) {
   if (typeof XLSX === 'undefined') {
@@ -11980,6 +11911,77 @@ function removeNodesByIndexSet(S) {
 
 
 
+}
+
+function openRefSpreadsheetRetrievalDialog() {
+  // backdrop
+  const bg = document.createElement('div');
+  Object.assign(bg.style, {
+    position:'fixed', inset:'0', background:'rgba(0,0,0,0.45)', backdropFilter:'blur(4px)',
+    display:'flex', alignItems:'center', justifyContent:'center', zIndex:'10060'
+  });
+
+  const box = document.createElement('div');
+  Object.assign(box.style, {
+    width:'min(720px, 94vw)', background:'rgba(16,16,20,0.95)', color:'#fff',
+    border:'1px solid rgba(255,255,255,0.18)', borderRadius:'12px',
+    boxShadow:'0 12px 40px rgba(0,0,0,0.5)', padding:'16px',
+    font:'14px/1.35 system-ui, -apple-system, Segoe UI, Roboto'
+  });
+
+  box.innerHTML = `
+    <div style="font-weight:700; margin-bottom:8px">Retrieve by REF database</div>
+    <div style="opacity:.85; margin-bottom:12px">
+      Upload a <b>REF 2021 Outputs</b> spreadsheet (.xlsx) and Macroscope will:
+      <ul style="margin:8px 0 0 18px; opacity:.9">
+        <li>Extract <b>DOIs</b> (and basic metadata)</li>
+        <li>Resolve each DOI to an <b>OpenAlex</b> record</li>
+        <li>Add/merge publications into the current graph</li>
+        <li>Attach <b>Unit of Assessment</b> (UoA) from the spreadsheet to each item</li>
+      </ul>
+      <div style="margin-top:8px; font-size:12px; opacity:.75">
+        Note: for .xlsx parsing you need the SheetJS XLSX library loaded (global <code>XLSX</code>).
+      </div>
+    </div>
+
+    <div style="display:flex; gap:10px; justify-content:flex-end; margin-top:14px">
+      <button id="ref_cancel" style="padding:8px 12px;border-radius:10px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.2);color:#fff;cursor:pointer">Cancel</button>
+      <button id="ref_choose"  style="padding:8px 12px;border-radius:10px;background:#2a84ff;border:1px solid rgba(255,255,255,0.2);color:#fff;cursor:pointer;font-weight:700">Choose spreadsheet…</button>
+    </div>
+  `;
+
+  bg.appendChild(box);
+  document.body.appendChild(bg);
+
+  const close = () => { try { bg.remove(); } catch {} };
+
+  box.querySelector('#ref_cancel')?.addEventListener('click', close);
+
+  box.querySelector('#ref_choose')?.addEventListener('click', async () => {
+    try {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.xlsx,.xls,.csv';
+      input.style.display = 'none';
+      document.body.appendChild(input);
+
+      input.addEventListener('change', async () => {
+        const file = input.files && input.files[0];
+        try { input.remove(); } catch {}
+        if (!file) return;
+
+        close();
+
+        await retrieveFromRefSpreadsheetFile(file);
+      });
+
+      input.click();
+    } catch (e) {
+      console.error(e);
+      showToast?.('Could not open file chooser.');
+      close();
+    }
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
