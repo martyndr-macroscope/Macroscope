@@ -18185,24 +18185,43 @@ async function parseRefSpreadsheetToRows(file) {
   const buf = await file.arrayBuffer();
   const wb = XLSX.read(buf, { type: 'array' });
 
-  const sheetName = wb.SheetNames?.[0];
+  const sheetName = (wb.SheetNames && wb.SheetNames[0]) ? wb.SheetNames[0] : null;
   if (!sheetName) throw new Error('No sheets');
 
   const ws = wb.Sheets[sheetName];
+  if (!ws) throw new Error('Sheet missing');
 
-  // raw rows as arrays
-  const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, blankrows: false, defval: '' });
+  const ref = ws['!ref'];
+  if (!ref) throw new Error('Sheet has no !ref range');
 
-  // Find header row
+  const range = XLSX.utils.decode_range(ref);
+
+  // Convert sheet cells to a 2D array using the declared range (robust)
+  const aoa = [];
+  for (let r = range.s.r; r <= range.e.r; r++) {
+    const row = [];
+    for (let c = range.s.c; c <= range.e.c; c++) {
+      const addr = XLSX.utils.encode_cell({ r, c });
+      const cell = ws[addr];
+      row.push(cell ? cell.v : '');
+    }
+    aoa.push(row);
+  }
+
+  // Find header row (0-indexed within aoa)
   const headerRowIndex = findRefHeaderRowIndex(aoa);
   if (headerRowIndex < 0) throw new Error('Header row not found');
 
   const headers = (aoa[headerRowIndex] || []).map(h => String(h || '').trim());
-  const out = [];
 
+  const out = [];
   for (let r = headerRowIndex + 1; r < aoa.length; r++) {
     const row = aoa[r];
-    if (!row || !row.length) continue;
+    if (!row) continue;
+
+    // skip totally empty rows
+    const anyVal = row.some(v => String(v ?? '').trim() !== '');
+    if (!anyVal) continue;
 
     const obj = {};
     for (let c = 0; c < headers.length; c++) {
@@ -18212,6 +18231,7 @@ async function parseRefSpreadsheetToRows(file) {
     out.push(obj);
   }
 
+  console.log('REF parser:', { sheetName, ref, headerRowIndex, outRows: out.length });
   return out;
 }
 
