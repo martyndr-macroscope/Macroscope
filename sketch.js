@@ -7484,9 +7484,20 @@ Return ONLY valid JSON:
       ? `EXCERPT COVERAGE: provided_chars=${doc.ref_provided_chars} / total_chars=${doc.ref_total_chars} (coverage≈${doc.ref_coverage || ''})\n`
       : '';
 
+  const refUoa = getRefUoaFromDocOrItem(doc);
+
+  const uoaInstruction = refUoa.hasRefUoa
+    ? `UNIT OF ASSESSMENT IS PROVIDED (from REF dataset). DO NOT PREDICT OR CHANGE IT.
+Use EXACTLY:
+uoa_number: ${refUoa.uoa_number}
+uoa_name: ${refUoa.uoa_name}
+
+In your JSON, set uoa_number/uoa_name exactly to those values.`
+    : `Choose ONE Unit of Assessment from this list (use EXACT number + name):
+${uoaListText}`;
+
   const user =
-`Choose ONE Unit of Assessment from this list (use EXACT number + name):
-${uoaListText}
+`${uoaInstruction}
 
 PAPER METADATA:
 Title: ${doc.title || 'Untitled'}
@@ -7540,6 +7551,7 @@ function clamp01(x) {
 
 // UoA list (REF2021/REF2029 kept same 34; numbers + names)
 // Keep it compact but exact.
+
 function getUoaListText() {
   return [
     "1 Clinical Medicine",
@@ -7578,6 +7590,48 @@ function getUoaListText() {
     "34 Communication, Cultural and Media Studies, Library and Information Management"
   ].join('\n');
 }
+function getRefUoaFromDocOrItem(d) {
+  // 1) direct fields on doc (preferred)
+  let num = d?.ref_uoa_number ?? d?.ref_uoa_num ?? null;
+  let name = d?.ref_uoa_name ?? null;
+
+  // 2) try itemsData mirror (common in your codebase)
+  const it = (typeof itemsData !== 'undefined' && d && d.idx != null) ? itemsData[d.idx] : null;
+  if (!num && it?.ref_uoa_number) num = it.ref_uoa_number;
+  if (!name && it?.ref_uoa_name) name = it.ref_uoa_name;
+
+  // 3) if still missing, try mode from ref_records (if multiple)
+  if ((!num || !name) && Array.isArray(it?.ref_records) && it.ref_records.length) {
+    const counts = new Map(); // "num|name" -> count
+    for (const r of it.ref_records) {
+      const n = r?.ref_uoa_number;
+      const nm = r?.ref_uoa_name;
+      if (!n && !nm) continue;
+      const key = `${String(n ?? '').trim()}|${String(nm ?? '').trim()}`;
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    let bestKey = null, bestCt = 0;
+    for (const [k, ct] of counts.entries()) {
+      if (ct > bestCt) { bestCt = ct; bestKey = k; }
+    }
+    if (bestKey) {
+      const [bn, bnm] = bestKey.split('|');
+      if (!num && bn) num = bn;
+      if (!name && bnm) name = bnm;
+    }
+  }
+
+  // normalise num
+  const numInt = Math.round(Number(num));
+  const okNum = Number.isFinite(numInt) && numInt >= 1 && numInt <= 34;
+
+  return {
+    hasRefUoa: okNum,
+    uoa_number: okNum ? numInt : null,
+    uoa_name: (name ? String(name).trim() : '')
+  };
+}
+
 
 // Main entry point (wired from AI dropdown)
 async function runREFLens() {
@@ -7705,8 +7759,19 @@ if (typeof d.ref_coverage === 'number') d.ref_coverage = d.ref_coverage.toFixed(
 
     const j = extractFirstJsonObject(raw) || {};
 
-    const uoa_number = clampInt(j.uoa_number, 1, 34);
-    const uoa_name   = String(j.uoa_name || '').trim();
+const refUoa = getRefUoaFromDocOrItem(d);
+
+let uoa_number, uoa_name, uoa_source;
+
+if (refUoa.hasRefUoa) {
+  uoa_number = refUoa.uoa_number;
+  uoa_name   = refUoa.uoa_name || '';
+  uoa_source = 'REF';
+} else {
+  uoa_number = clampInt(j.uoa_number, 1, 34);
+  uoa_name   = String(j.uoa_name || '').trim();
+  uoa_source = 'AI';
+}
 
 let originality  = clampInt(j.originality, 0, 4);
 let significance = clampInt(j.significance, 0, 4);
