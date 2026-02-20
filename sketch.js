@@ -18109,10 +18109,10 @@ async function retrieveFromRefSpreadsheetFile(file) {
   const uniqueDois = Array.from(byDoi.keys());
   const total = uniqueDois.length;
 
-console.log("REF rows parsed:", rows.length);
-console.log("REF DOI records extracted:", doiRecords.length);
-console.log("Unique DOIs to resolve:", uniqueDois.length);
-console.log("Sample DOIs:", uniqueDois.slice(0, 5));
+  console.log("REF rows parsed:", rows.length);
+  console.log("REF DOI records extracted:", doiRecords.length);
+  console.log("Unique DOIs to resolve:", uniqueDois.length);
+  console.log("Sample DOIs:", uniqueDois.slice(0, 5));
 
   // Ensure OA id map is ready so we can merge quickly
   try { indexExistingOAIds?.(); } catch {}
@@ -18122,12 +18122,18 @@ console.log("Sample DOIs:", uniqueDois.slice(0, 5));
   for (let i = 0; i < uniqueDois.length; i++) {
     const doi = uniqueDois[i];
     const pct = (i + 1) / total;
-    setLoadingProgress?.(Math.max(0.03, Math.min(0.98, pct)), `Resolving DOI ${i+1}/${total}`);
+    setLoadingProgress?.(
+      Math.max(0.03, Math.min(0.98, pct)),
+      `Resolving DOI ${i + 1}/${total}`
+    );
 
     try {
-      // Use existing DOI retrieval method if present; otherwise resolve via OpenAlex API
+      // Pull the records for this DOI (for later metadata attachment)
+      const pack = byDoi.get(doi);
+      const hint = pack?.records?.[0] || null; // title/year/uoa (optional)
 
-       
+      // ✅ Resolve the OpenAlex work FIRST
+      const work = await resolveOpenAlexWorkByDoi(doi, hint);
       if (!work) throw new Error('No OpenAlex work returned');
 
       // Merge/add node
@@ -18136,11 +18142,6 @@ console.log("Sample DOIs:", uniqueDois.slice(0, 5));
       // Attach REF UoA metadata onto the corresponding itemsData entry
       const item = itemsData[idx] || (itemsData[idx] = {});
       item.ref_records = item.ref_records || [];
-
-      // Append all rows that pointed to this DOI
-      const pack = byDoi.get(doi);
- const hint = pack?.records?.[0] || null;   // contains title/year/uoa fields
-const work = await resolveOpenAlexWorkByDoi(doi, hint); 
 
       for (const r of (pack?.records || [])) {
         item.ref_records.push({
@@ -18152,7 +18153,7 @@ const work = await resolveOpenAlexWorkByDoi(doi, hint);
           ref_doi: doi
         });
 
-        // Convenience “first seen” fields (as requested: record Unit of Assessment into Macroscope data)
+        // Convenience “first seen” fields
         if (!item.ref_uoa_number && r.uoaNumber) item.ref_uoa_number = r.uoaNumber;
         if (!item.ref_uoa_name && r.uoaName) item.ref_uoa_name = r.uoaName;
       }
@@ -18175,6 +18176,8 @@ const work = await resolveOpenAlexWorkByDoi(doi, hint);
   try { redraw?.(); } catch {}
 }
 window.retrieveFromRefSpreadsheetFile = retrieveFromRefSpreadsheetFile;
+
+
 
 
 /**
