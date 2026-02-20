@@ -10100,7 +10100,7 @@ addItem('Retrieve Full Texts', () => {
   addItem('Retrieve Journal by Publisher…', () => openPublisherJournalDialog());
 addItem('Retrieve by Institution…', () => openInstitutionRetrievalDialog());
   //addItem('Retrieve by REF database…', () => openRefSpreadsheetRetrievalDialog());
-  addItem('Retrieve by REF database…', () => window.openRefSpreadsheetRetrievalDialog());
+  addItem('Retrieve by REF database…', () => window.openRefSpreadsheetRetrievalDialog?.());
 
 
 
