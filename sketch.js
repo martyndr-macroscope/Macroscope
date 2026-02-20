@@ -10099,7 +10099,7 @@ addItem('Retrieve Full Texts', () => {
   addItem('Retrieve by Journal…', () => openJournalRetrievalDialog());
   addItem('Retrieve Journal by Publisher…', () => openPublisherJournalDialog());
 addItem('Retrieve by Institution…', () => openInstitutionRetrievalDialog());
-
+  addItem('Retrieve by REF database…', () => openRefSpreadsheetRetrievalDialog());
 
 
 
@@ -11183,7 +11183,402 @@ if (itemsData.length === 1) {                              // ← ADD
   itemsData[idx].isSeed = true;                            // ← ADD
   itemsData[idx].seedSource = (mode === 'doi' ? 'doi' : 'openalex_id'); // ← ADD
 }
+// ─────────────────────────────────────────────────────────────────────────────
+// Retrieve by REF database (REF 2021 Outputs spreadsheet)
+// Requires SheetJS (XLSX) for .xlsx parsing. Add to index.html:
+// <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+// ─────────────────────────────────────────────────────────────────────────────
 
+function openRefSpreadsheetRetrievalDialog() {
+  // backdrop
+  const bg = document.createElement('div');
+  Object.assign(bg.style, {
+    position:'fixed', inset:'0', background:'rgba(0,0,0,0.45)', backdropFilter:'blur(4px)',
+    display:'flex', alignItems:'center', justifyContent:'center', zIndex:'10060'
+  });
+
+  const box = document.createElement('div');
+  Object.assign(box.style, {
+    width:'min(720px, 94vw)', background:'rgba(16,16,20,0.95)', color:'#fff',
+    border:'1px solid rgba(255,255,255,0.18)', borderRadius:'12px',
+    boxShadow:'0 12px 40px rgba(0,0,0,0.5)', padding:'16px',
+    font:'14px/1.35 system-ui, -apple-system, Segoe UI, Roboto'
+  });
+
+  box.innerHTML = `
+    <div style="font-weight:700; margin-bottom:8px">Retrieve by REF database</div>
+    <div style="opacity:.85; margin-bottom:12px">
+      Upload a <b>REF 2021 Outputs</b> spreadsheet (.xlsx) and Macroscope will:
+      <ul style="margin:8px 0 0 18px; opacity:.9">
+        <li>Extract <b>DOIs</b> (and basic metadata)</li>
+        <li>Resolve each DOI to an <b>OpenAlex</b> record</li>
+        <li>Add/merge publications into the current graph</li>
+        <li>Attach <b>Unit of Assessment</b> (UoA) from the spreadsheet to each item</li>
+      </ul>
+      <div style="margin-top:8px; font-size:12px; opacity:.75">
+        Note: for .xlsx parsing you need the SheetJS XLSX library loaded (global <code>XLSX</code>).
+      </div>
+    </div>
+
+    <div style="display:flex; gap:10px; justify-content:flex-end; margin-top:14px">
+      <button id="ref_cancel" style="padding:8px 12px;border-radius:10px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.2);color:#fff;cursor:pointer">Cancel</button>
+      <button id="ref_choose"  style="padding:8px 12px;border-radius:10px;background:#2a84ff;border:1px solid rgba(255,255,255,0.2);color:#fff;cursor:pointer;font-weight:700">Choose spreadsheet…</button>
+    </div>
+  `;
+
+  bg.appendChild(box);
+  document.body.appendChild(bg);
+
+  const close = () => { try { bg.remove(); } catch {} };
+
+  box.querySelector('#ref_cancel')?.addEventListener('click', close);
+
+  box.querySelector('#ref_choose')?.addEventListener('click', async () => {
+    try {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.xlsx,.xls,.csv';
+      input.style.display = 'none';
+      document.body.appendChild(input);
+
+      input.addEventListener('change', async () => {
+        const file = input.files && input.files[0];
+        try { input.remove(); } catch {}
+        if (!file) return;
+
+        close();
+
+        await retrieveFromRefSpreadsheetFile(file);
+      });
+
+      input.click();
+    } catch (e) {
+      console.error(e);
+      showToast?.('Could not open file chooser.');
+      close();
+    }
+  });
+}
+
+async function retrieveFromRefSpreadsheetFile(file) {
+  if (typeof XLSX === 'undefined') {
+    showToast?.('XLSX library not found. Add SheetJS to index.html (see comments in code).');
+    return;
+  }
+
+  showLoading?.('Reading REF spreadsheet…', 0.02);
+
+  let rows;
+  try {
+    rows = await parseRefSpreadsheetToRows(file);
+  } catch (e) {
+    console.error(e);
+    hideLoading?.();
+    showToast?.('Failed to parse spreadsheet.');
+    return;
+  }
+
+  // Extract DOI records with UoA metadata
+  const doiRecords = extractRefDoiRecords(rows);
+
+  if (!doiRecords.length) {
+    hideLoading?.();
+    showToast?.('No DOI records found in spreadsheet.');
+    return;
+  }
+
+  // de-dup DOIs (but keep multi-row mapping via ref_records later)
+  const byDoi = new Map(); // doi -> { doi, records: [...] }
+  for (const rec of doiRecords) {
+    const d = normalizeDoi(rec.doi);
+    if (!d) continue;
+    if (!byDoi.has(d)) byDoi.set(d, { doi: d, records: [] });
+    byDoi.get(d).records.push(rec);
+  }
+
+  const uniqueDois = Array.from(byDoi.keys());
+  const total = uniqueDois.length;
+
+  // Ensure OA id map is ready so we can merge quickly
+  try { indexExistingOAIds?.(); } catch {}
+
+  let ok = 0, fail = 0;
+
+  for (let i = 0; i < uniqueDois.length; i++) {
+    const doi = uniqueDois[i];
+    const pct = (i + 1) / total;
+    setLoadingProgress?.(Math.max(0.03, Math.min(0.98, pct)), `Resolving DOI ${i+1}/${total}`);
+
+    try {
+      // Use existing DOI retrieval method if present; otherwise resolve via OpenAlex API
+      const work = await resolveOpenAlexWorkByDoi(doi);
+      if (!work) throw new Error('No OpenAlex work returned');
+
+      // Merge/add node
+      const idx = getOrCreateNodeForWork(work, null);
+
+      // Attach REF UoA metadata onto the corresponding itemsData entry
+      const item = itemsData[idx] || (itemsData[idx] = {});
+      item.ref_records = item.ref_records || [];
+
+      // Append all rows that pointed to this DOI
+      const pack = byDoi.get(doi);
+      for (const r of (pack?.records || [])) {
+        item.ref_records.push({
+          ref_output_identifier: r.outputId || null,
+          ref_uoa_number: r.uoaNumber || null,
+          ref_uoa_name: r.uoaName || null,
+          ref_title: r.title || null,
+          ref_year: r.year || null,
+          ref_doi: doi
+        });
+
+        // Convenience “first seen” fields (as requested: record Unit of Assessment into Macroscope data)
+        if (!item.ref_uoa_number && r.uoaNumber) item.ref_uoa_number = r.uoaNumber;
+        if (!item.ref_uoa_name && r.uoaName) item.ref_uoa_name = r.uoaName;
+      }
+
+      ok++;
+    } catch (e) {
+      console.warn('REF DOI resolve failed:', doi, e);
+      fail++;
+    }
+  }
+
+  hideLoading?.();
+  showToast?.(`REF import complete: ${ok} added/merged, ${fail} failed.`);
+
+  // Refresh UI/indices
+  try { buildDimensionsIndex?.(); } catch {}
+  try { updateDimSections?.(); } catch {}
+  try { recomputeVisibility?.(); } catch {}
+  try { updateInfo?.(); } catch {}
+  try { redraw?.(); } catch {}
+}
+
+/**
+ * Parse REF spreadsheet file into array-of-rows where each row is an object keyed by header.
+ * We auto-detect the header row by searching for a row containing "Output identifier" and "DOI".
+ */
+async function parseRefSpreadsheetToRows(file) {
+  const ext = (file.name || '').toLowerCase().split('.').pop();
+
+  if (ext === 'csv') {
+    const text = await file.text();
+    return parseCsvToRowObjects(text);
+  }
+
+  const buf = await file.arrayBuffer();
+  const wb = XLSX.read(buf, { type: 'array' });
+
+  const sheetName = wb.SheetNames?.[0];
+  if (!sheetName) throw new Error('No sheets');
+
+  const ws = wb.Sheets[sheetName];
+
+  // raw rows as arrays
+  const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, blankrows: false, defval: '' });
+
+  // Find header row
+  const headerRowIndex = findRefHeaderRowIndex(aoa);
+  if (headerRowIndex < 0) throw new Error('Header row not found');
+
+  const headers = (aoa[headerRowIndex] || []).map(h => String(h || '').trim());
+  const out = [];
+
+  for (let r = headerRowIndex + 1; r < aoa.length; r++) {
+    const row = aoa[r];
+    if (!row || !row.length) continue;
+
+    const obj = {};
+    for (let c = 0; c < headers.length; c++) {
+      const key = headers[c] || `col_${c}`;
+      obj[key] = row[c];
+    }
+    out.push(obj);
+  }
+
+  return out;
+}
+
+function findRefHeaderRowIndex(aoa) {
+  const wantA = 'output identifier';
+  const wantB = 'doi';
+  for (let i = 0; i < Math.min(50, aoa.length); i++) {
+    const row = aoa[i] || [];
+    const low = row.map(x => String(x || '').trim().toLowerCase());
+    const hasA = low.some(v => v === wantA || v.includes(wantA));
+    const hasB = low.some(v => v === wantB || v.includes(wantB));
+    if (hasA && hasB) return i;
+  }
+  return -1;
+}
+
+/**
+ * Extract DOI rows + UoA from REF 2021 Outputs structure.
+ * This expects fields like:
+ * - "Output identifier"
+ * - "DOI"
+ * - "Unit of assessment number"
+ * - "Unit of assessment name"
+ * Titles/years are optional.
+ */
+function extractRefDoiRecords(rows) {
+  const out = [];
+
+  // helper to get a field by fuzzy matching possible column names
+  const pick = (obj, names) => {
+    for (const n of names) {
+      if (n in obj) return obj[n];
+      // case-insensitive match
+      const key = Object.keys(obj).find(k => k.trim().toLowerCase() === n.trim().toLowerCase());
+      if (key) return obj[key];
+    }
+    return null;
+  };
+
+  for (const row of rows) {
+    if (!row) continue;
+
+    const outputId = pick(row, ['Output identifier', 'Output ID', 'OutputID']);
+    const doi      = pick(row, ['DOI', 'Doi', 'doi']);
+
+    // UoA columns vary slightly between exports
+    const uoaNumber = pick(row, [
+      'Unit of assessment number',
+      'Unit of Assessment number',
+      'UOA number',
+      'UoA number',
+      'Unit of assessment (number)'
+    ]);
+
+    const uoaName = pick(row, [
+      'Unit of assessment name',
+      'Unit of Assessment name',
+      'UOA name',
+      'UoA name',
+      'Unit of assessment (name)'
+    ]);
+
+    const title = pick(row, ['Title', 'Output title', 'Output Title']);
+    const year  = pick(row, ['Year', 'Publication year', 'Publication Year']);
+
+    const doiNorm = normalizeDoi(doi);
+    if (!doiNorm) continue;
+
+    out.push({
+      outputId: outputId ? String(outputId).trim() : null,
+      doi: doiNorm,
+      uoaNumber: uoaNumber ? String(uoaNumber).trim() : null,
+      uoaName: uoaName ? String(uoaName).trim() : null,
+      title: title ? String(title).trim() : null,
+      year: year ? String(year).trim() : null
+    });
+  }
+
+  return out;
+}
+
+function normalizeDoi(v) {
+  if (!v) return '';
+  let s = String(v).trim();
+  if (!s) return '';
+
+  // remove URL wrappers
+  s = s.replace(/^https?:\/\/(dx\.)?doi\.org\//i, '');
+  s = s.replace(/^doi:\s*/i, '');
+
+  // very light validation
+  if (!s.includes('/')) return '';
+  return s;
+}
+
+/**
+ * Resolve an OpenAlex work by DOI.
+ * Uses OpenAlex endpoint: https://api.openalex.org/works/doi:{doi}
+ * Routed through your proxy if available (proxy.semanticspace.ai/fetch?url=...),
+ * otherwise direct fetch.
+ */
+async function resolveOpenAlexWorkByDoi(doi) {
+  const url = `https://api.openalex.org/works/doi:${encodeURIComponent(doi)}`;
+
+  // Prefer your proxy if fetchJson supports full URL or if proxy is present.
+  // We attempt proxy.semanticspace.ai/fetch?url=... first (consistent with your other code).
+  const prox = (typeof PROXY_BASE !== 'undefined' && PROXY_BASE) ? PROXY_BASE :
+               (typeof proxyBase !== 'undefined' && proxyBase) ? proxyBase :
+               'https://proxy.semanticspace.ai/fetch?url=';
+
+  const proxUrl = prox.includes('?url=') ? `${prox}${encodeURIComponent(url)}` : url;
+
+  // If you have fetchJson helper, use it; otherwise raw fetch.
+  if (typeof fetchJson === 'function') {
+    try {
+      const w = await fetchJson(proxUrl);
+      // some proxies wrap content
+      return w?.id ? w : (w?.data?.id ? w.data : (w?.work?.id ? w.work : w));
+    } catch (e) {
+      // fallback direct
+      const w = await fetchJson(url);
+      return w?.id ? w : (w?.data?.id ? w.data : (w?.work?.id ? w.work : w));
+    }
+  } else {
+    // raw fetch
+    const tryFetch = async (u) => {
+      const res = await fetch(u);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const w = await res.json();
+      return w?.id ? w : (w?.data?.id ? w.data : (w?.work?.id ? w.work : w));
+    };
+
+    try {
+      return await tryFetch(proxUrl);
+    } catch (e) {
+      return await tryFetch(url);
+    }
+  }
+}
+
+function parseCsvToRowObjects(text) {
+  // Simple CSV parser (handles quotes). Good enough for typical REF CSV exports.
+  const lines = String(text || '').split(/\r?\n/).filter(l => l.trim().length);
+  if (!lines.length) return [];
+
+  const parseLine = (line) => {
+    const out = [];
+    let cur = '', inQ = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') {
+        if (inQ && line[i+1] === '"') { cur += '"'; i++; }
+        else inQ = !inQ;
+      } else if (ch === ',' && !inQ) {
+        out.push(cur); cur = '';
+      } else cur += ch;
+    }
+    out.push(cur);
+    return out.map(s => s.trim());
+  };
+
+  // find header by scanning first ~10 lines for DOI + Output identifier
+  const aoa = lines.map(parseLine);
+  const headerRowIndex = findRefHeaderRowIndex(aoa);
+  if (headerRowIndex < 0) {
+    // assume first line
+    const headers = aoa[0].map(h => h.replace(/^"|"$/g,'').trim());
+    return aoa.slice(1).map(row => {
+      const obj = {};
+      for (let i = 0; i < headers.length; i++) obj[headers[i]] = row[i] ?? '';
+      return obj;
+    });
+  }
+
+  const headers = aoa[headerRowIndex].map(h => h.replace(/^"|"$/g,'').trim());
+  return aoa.slice(headerRowIndex + 1).map(row => {
+    const obj = {};
+    for (let i = 0; i < headers.length; i++) obj[headers[i]] = row[i] ?? '';
+    return obj;
+  });
+}
 
     // 4) Link to existing nodes (outgoing)
     let outgoingLinks = 0, incomingLinks = 0;
