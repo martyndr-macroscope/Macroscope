@@ -18126,7 +18126,8 @@ console.log("Sample DOIs:", uniqueDois.slice(0, 5));
 
     try {
       // Use existing DOI retrieval method if present; otherwise resolve via OpenAlex API
-      const work = await resolveOpenAlexWorkByDoi(doi);
+
+       
       if (!work) throw new Error('No OpenAlex work returned');
 
       // Merge/add node
@@ -18138,6 +18139,9 @@ console.log("Sample DOIs:", uniqueDois.slice(0, 5));
 
       // Append all rows that pointed to this DOI
       const pack = byDoi.get(doi);
+ const hint = pack?.records?.[0] || null;   // contains title/year/uoa fields
+const work = await resolveOpenAlexWorkByDoi(doi, hint); 
+
       for (const r of (pack?.records || [])) {
         item.ref_records.push({
           ref_output_identifier: r.outputId || null,
@@ -18375,12 +18379,27 @@ function normalizeDoi(v) {
   let s = String(v).trim();
   if (!s) return '';
 
-  // remove URL wrappers
+  // remove URL wrappers / prefixes
   s = s.replace(/^https?:\/\/(dx\.)?doi\.org\//i, '');
   s = s.replace(/^doi:\s*/i, '');
 
+  // trim surrounding quotes
+  s = s.replace(/^["']+|["']+$/g, '');
+
+  // remove common trailing punctuation from spreadsheets / refs
+  // e.g. "10.1234/abcd."  "10.1234/abcd);"  "10.1234/abcd ,"
+  s = s.replace(/[)\].,;:\s]+$/g, '');
+
+  // remove leading punctuation/whitespace just in case
+  s = s.replace(/^[\s([{"']+/g, '');
+
+  // normalise case
+  s = s.toLowerCase();
+
   // very light validation
   if (!s.includes('/')) return '';
+  if (!/^10\.\d{4,9}\//.test(s)) return ''; // DOI prefix sanity check
+
   return s;
 }
 
