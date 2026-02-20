@@ -18191,31 +18191,39 @@ async function parseRefSpreadsheetToRows(file) {
   const ws = wb.Sheets[sheetName];
   if (!ws) throw new Error('Sheet missing');
 
-  const ref = ws['!ref'];
-  if (!ref) throw new Error('Sheet has no !ref range');
+  // REF exports sometimes have a wrong / truncated ws['!ref'] even though data exists lower down.
+  // Infer the *true* range from actual populated cell keys.
+  const cellKeys = Object.keys(ws).filter(k => k[0] !== '!');
+  if (!cellKeys.length) throw new Error('Sheet has no cells');
 
-  const range = XLSX.utils.decode_range(ref);
-
-  // Convert sheet cells to a 2D array using the declared range (robust)
-  const aoa = [];
-  for (let r = range.s.r; r <= range.e.r; r++) {
-    const row = [];
-    for (let c = range.s.c; c <= range.e.c; c++) {
-      const addr = XLSX.utils.encode_cell({ r, c });
-      const cell = ws[addr];
-      row.push(cell ? cell.v : '');
-    }
-    aoa.push(row);
+  let minR = Infinity, minC = Infinity, maxR = -Infinity, maxC = -Infinity;
+  for (const k of cellKeys) {
+    const rc = XLSX.utils.decode_cell(k);
+    if (rc.r < minR) minR = rc.r;
+    if (rc.c < minC) minC = rc.c;
+    if (rc.r > maxR) maxR = rc.r;
+    if (rc.c > maxC) maxC = rc.c;
   }
+  const trueRange = { s: { r: minR, c: minC }, e: { r: maxR, c: maxC } };
+  const inferredRef = XLSX.utils.encode_range(trueRange);
+
+  // Build AOA using inferred range (fast + reliable)
+  const aoa = XLSX.utils.sheet_to_json(ws, {
+    header: 1,
+    range: trueRange,
+    blankrows: false,
+    defval: ''
+  });
 
   // Find header row (0-indexed within aoa)
   const headerRowIndex = findRefHeaderRowIndex(aoa);
   if (headerRowIndex < 0) throw new Error('Header row not found');
 
   const headers = (aoa[headerRowIndex] || []).map(h => String(h || '').trim());
+
   console.log("REF headerRowIndex (0-based):", headerRowIndex);
-console.log("REF headers (first 12):", headers.slice(0, 12));
-console.log("REF headers: DOI col index:", headers.findIndex(h => h.trim().toLowerCase() === 'doi'));
+  console.log("REF headers (first 12):", headers.slice(0, 12));
+  console.log("REF headers: DOI col index:", headers.findIndex(h => h.trim().toLowerCase() === 'doi'));
 
   const out = [];
   for (let r = headerRowIndex + 1; r < aoa.length; r++) {
@@ -18234,7 +18242,14 @@ console.log("REF headers: DOI col index:", headers.findIndex(h => h.trim().toLow
     out.push(obj);
   }
 
-  console.log('REF parser:', { sheetName, ref, headerRowIndex, outRows: out.length });
+  console.log('REF parser:', {
+    sheetName,
+    originalRef: ws['!ref'],
+    inferredRef,
+    headerRowIndex,
+    outRows: out.length
+  });
+
   return out;
 }
 
