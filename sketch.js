@@ -18213,6 +18213,9 @@ async function parseRefSpreadsheetToRows(file) {
   if (headerRowIndex < 0) throw new Error('Header row not found');
 
   const headers = (aoa[headerRowIndex] || []).map(h => String(h || '').trim());
+  console.log("REF headerRowIndex (0-based):", headerRowIndex);
+console.log("REF headers (first 12):", headers.slice(0, 12));
+console.log("REF headers: DOI col index:", headers.findIndex(h => h.trim().toLowerCase() === 'doi'));
 
   const out = [];
   for (let r = headerRowIndex + 1; r < aoa.length; r++) {
@@ -18244,40 +18247,21 @@ function findRefHeaderRowIndex(aoa) {
   // - DOI
   // - Unit of assessment number (or similar)
   // - AND either Output identifier OR Institution UKPRN code OR Institution name
+function findRefHeaderRowIndex(aoa) {
+  const maxScan = Math.min(aoa.length, 120);
+  const norm = (v) => String(v ?? '').trim().toLowerCase();
+
+  // STRICT match for REF Outputs format you provided
   for (let i = 0; i < maxScan; i++) {
     const row = (aoa[i] || []).map(norm);
 
-    const hasDOI =
-      row.some(v => v === 'doi' || v.includes('doi'));
+    const hasUkprn = row.includes('institution ukprn code');
+    const hasInst  = row.includes('institution name');
+    const hasUoaNo  = row.includes('unit of assessment number');
+    const hasTitle  = row.includes('title');
+    const hasDoi    = row.includes('doi');
 
-    const hasUoA =
-      row.some(v =>
-        v === 'unit of assessment number' ||
-        v.includes('unit of assessment number') ||
-        v === 'uoa number' ||
-        v.includes('uoa number')
-      );
-
-    const hasOutputId =
-      row.some(v => v === 'output identifier' || v.includes('output identifier'));
-
-    const hasInstitution =
-      row.some(v =>
-        v === 'institution ukprn code' ||
-        v.includes('institution ukprn') ||
-        v === 'institution name' ||
-        v.includes('institution name')
-      );
-
-    if (hasDOI && hasUoA && (hasOutputId || hasInstitution)) return i;
-
-    // fallback: join-based detection (handles odd spacing/case)
-    const joined = row.join(' | ');
-    if (
-      joined.includes('doi') &&
-      joined.includes('unit of assessment') &&
-      (joined.includes('output identifier') || joined.includes('institution ukprn') || joined.includes('institution name'))
-    ) {
+    if (hasUkprn && hasInst && hasUoaNo && hasTitle && hasDoi) {
       return i;
     }
   }
