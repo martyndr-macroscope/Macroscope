@@ -10514,15 +10514,9 @@ function normOA(id) {
 
 function indexExistingOAIds() {
   oaIdToNode.clear();
-
-  // IMPORTANT: oaIdToNode must map OpenAlexID -> nodes[] index (NOT itemsData index)
   for (let i = 0; i < itemsData.length; i++) {
     const id = normOA(itemsData[i]?.openalex?.id);
-    if (id == null) continue;
-
-    // Find the node whose .idx points at this itemsData entry
-    const nodeIdx = nodes.findIndex(n => n && n.idx === i);
-    if (nodeIdx >= 0) oaIdToNode.set(id, nodeIdx);
+    if (id != null) oaIdToNode.set(id, i);
   }
 }
 
@@ -18108,11 +18102,6 @@ async function retrieveFromRefSpreadsheetFile(file) {
   const uniqueDois = Array.from(byDoi.keys());
   const total = uniqueDois.length;
 
-console.log("REF rows parsed:", rows.length);
-console.log("REF DOI records extracted:", doiRecords.length);
-console.log("Unique DOIs to resolve:", uniqueDois.length);
-console.log("Sample DOIs:", uniqueDois.slice(0, 5));
-
   // Ensure OA id map is ready so we can merge quickly
   try { indexExistingOAIds?.(); } catch {}
 
@@ -18185,54 +18174,24 @@ async function parseRefSpreadsheetToRows(file) {
   const buf = await file.arrayBuffer();
   const wb = XLSX.read(buf, { type: 'array' });
 
-  const sheetName = (wb.SheetNames && wb.SheetNames[0]) ? wb.SheetNames[0] : null;
+  const sheetName = wb.SheetNames?.[0];
   if (!sheetName) throw new Error('No sheets');
 
   const ws = wb.Sheets[sheetName];
-  if (!ws) throw new Error('Sheet missing');
 
-  // REF exports sometimes have a wrong / truncated ws['!ref'] even though data exists lower down.
-  // Infer the *true* range from actual populated cell keys.
-  const cellKeys = Object.keys(ws).filter(k => k[0] !== '!');
-  if (!cellKeys.length) throw new Error('Sheet has no cells');
+  // raw rows as arrays
+  const aoa = XLSX.utils.sheet_to_json(ws, { header: 1, blankrows: false, defval: '' });
 
-  let minR = Infinity, minC = Infinity, maxR = -Infinity, maxC = -Infinity;
-  for (const k of cellKeys) {
-    const rc = XLSX.utils.decode_cell(k);
-    if (rc.r < minR) minR = rc.r;
-    if (rc.c < minC) minC = rc.c;
-    if (rc.r > maxR) maxR = rc.r;
-    if (rc.c > maxC) maxC = rc.c;
-  }
-  const trueRange = { s: { r: minR, c: minC }, e: { r: maxR, c: maxC } };
-  const inferredRef = XLSX.utils.encode_range(trueRange);
-
-  // Build AOA using inferred range (fast + reliable)
-  const aoa = XLSX.utils.sheet_to_json(ws, {
-    header: 1,
-    range: trueRange,
-    blankrows: false,
-    defval: ''
-  });
-
-  // Find header row (0-indexed within aoa)
+  // Find header row
   const headerRowIndex = findRefHeaderRowIndex(aoa);
   if (headerRowIndex < 0) throw new Error('Header row not found');
 
   const headers = (aoa[headerRowIndex] || []).map(h => String(h || '').trim());
-
-  console.log("REF headerRowIndex (0-based):", headerRowIndex);
-  console.log("REF headers (first 12):", headers.slice(0, 12));
-  console.log("REF headers: DOI col index:", headers.findIndex(h => h.trim().toLowerCase() === 'doi'));
-
   const out = [];
+
   for (let r = headerRowIndex + 1; r < aoa.length; r++) {
     const row = aoa[r];
-    if (!row) continue;
-
-    // skip totally empty rows
-    const anyVal = row.some(v => String(v ?? '').trim() !== '');
-    if (!anyVal) continue;
+    if (!row || !row.length) continue;
 
     const obj = {};
     for (let c = 0; c < headers.length; c++) {
@@ -18242,62 +18201,18 @@ async function parseRefSpreadsheetToRows(file) {
     out.push(obj);
   }
 
-  console.log('REF parser:', {
-    sheetName,
-    originalRef: ws['!ref'],
-    inferredRef,
-    headerRowIndex,
-    outRows: out.length
-  });
-
   return out;
 }
 
 function findRefHeaderRowIndex(aoa) {
-  const maxScan = Math.min(aoa.length, 80);
-
-  const norm = (v) => String(v ?? '').trim().toLowerCase();
-
-  // We accept a header row if it contains:
-  // - DOI
-  // - Unit of assessment number (or similar)
-  // - AND either Output identifier OR Institution UKPRN code OR Institution name
-  for (let i = 0; i < maxScan; i++) {
-    const row = (aoa[i] || []).map(norm);
-
-    const hasDOI =
-      row.some(v => v === 'doi' || v.includes('doi'));
-
-    const hasUoA =
-      row.some(v =>
-        v === 'unit of assessment number' ||
-        v.includes('unit of assessment number') ||
-        v === 'uoa number' ||
-        v.includes('uoa number')
-      );
-
-    const hasOutputId =
-      row.some(v => v === 'output identifier' || v.includes('output identifier'));
-
-    const hasInstitution =
-      row.some(v =>
-        v === 'institution ukprn code' ||
-        v.includes('institution ukprn') ||
-        v === 'institution name' ||
-        v.includes('institution name')
-      );
-
-    if (hasDOI && hasUoA && (hasOutputId || hasInstitution)) return i;
-
-    // fallback: join-based detection (handles odd spacing/case)
-    const joined = row.join(' | ');
-    if (
-      joined.includes('doi') &&
-      joined.includes('unit of assessment') &&
-      (joined.includes('output identifier') || joined.includes('institution ukprn') || joined.includes('institution name'))
-    ) {
-      return i;
-    }
+  const wantA = 'output identifier';
+  const wantB = 'doi';
+  for (let i = 0; i < Math.min(50, aoa.length); i++) {
+    const row = aoa[i] || [];
+    const low = row.map(x => String(x || '').trim().toLowerCase());
+    const hasA = low.some(v => v === wantA || v.includes(wantA));
+    const hasB = low.some(v => v === wantB || v.includes(wantB));
+    if (hasA && hasB) return i;
   }
   return -1;
 }
