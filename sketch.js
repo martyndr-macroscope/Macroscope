@@ -10514,9 +10514,15 @@ function normOA(id) {
 
 function indexExistingOAIds() {
   oaIdToNode.clear();
+
+  // IMPORTANT: oaIdToNode must map OpenAlexID -> nodes[] index (NOT itemsData index)
   for (let i = 0; i < itemsData.length; i++) {
     const id = normOA(itemsData[i]?.openalex?.id);
-    if (id != null) oaIdToNode.set(id, i);
+    if (id == null) continue;
+
+    // Find the node whose .idx points at this itemsData entry
+    const nodeIdx = nodes.findIndex(n => n && n.idx === i);
+    if (nodeIdx >= 0) oaIdToNode.set(id, nodeIdx);
   }
 }
 
@@ -18101,6 +18107,11 @@ async function retrieveFromRefSpreadsheetFile(file) {
 
   const uniqueDois = Array.from(byDoi.keys());
   const total = uniqueDois.length;
+
+console.log("REF rows parsed:", rows.length);
+console.log("REF DOI records extracted:", doiRecords.length);
+console.log("Unique DOIs to resolve:", uniqueDois.length);
+console.log("Sample DOIs:", uniqueDois.slice(0, 5));
 
   // Ensure OA id map is ready so we can merge quickly
   try { indexExistingOAIds?.(); } catch {}
