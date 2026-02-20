@@ -18205,14 +18205,50 @@ async function parseRefSpreadsheetToRows(file) {
 }
 
 function findRefHeaderRowIndex(aoa) {
-  const wantA = 'output identifier';
-  const wantB = 'doi';
-  for (let i = 0; i < Math.min(50, aoa.length); i++) {
-    const row = aoa[i] || [];
-    const low = row.map(x => String(x || '').trim().toLowerCase());
-    const hasA = low.some(v => v === wantA || v.includes(wantA));
-    const hasB = low.some(v => v === wantB || v.includes(wantB));
-    if (hasA && hasB) return i;
+  const maxScan = Math.min(aoa.length, 80);
+
+  const norm = (v) => String(v ?? '').trim().toLowerCase();
+
+  // We accept a header row if it contains:
+  // - DOI
+  // - Unit of assessment number (or similar)
+  // - AND either Output identifier OR Institution UKPRN code OR Institution name
+  for (let i = 0; i < maxScan; i++) {
+    const row = (aoa[i] || []).map(norm);
+
+    const hasDOI =
+      row.some(v => v === 'doi' || v.includes('doi'));
+
+    const hasUoA =
+      row.some(v =>
+        v === 'unit of assessment number' ||
+        v.includes('unit of assessment number') ||
+        v === 'uoa number' ||
+        v.includes('uoa number')
+      );
+
+    const hasOutputId =
+      row.some(v => v === 'output identifier' || v.includes('output identifier'));
+
+    const hasInstitution =
+      row.some(v =>
+        v === 'institution ukprn code' ||
+        v.includes('institution ukprn') ||
+        v === 'institution name' ||
+        v.includes('institution name')
+      );
+
+    if (hasDOI && hasUoA && (hasOutputId || hasInstitution)) return i;
+
+    // fallback: join-based detection (handles odd spacing/case)
+    const joined = row.join(' | ');
+    if (
+      joined.includes('doi') &&
+      joined.includes('unit of assessment') &&
+      (joined.includes('output identifier') || joined.includes('institution ukprn') || joined.includes('institution name'))
+    ) {
+      return i;
+    }
   }
   return -1;
 }
