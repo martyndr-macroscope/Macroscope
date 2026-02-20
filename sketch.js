@@ -18127,42 +18127,41 @@ async function retrieveFromRefSpreadsheetFile(file) {
       `Resolving DOI ${i + 1}/${total}`
     );
 
-       try {
-      // Pull the records for this DOI (for later metadata attachment)
-      const pack = byDoi.get(doi);
-      const hint = pack?.records?.[0] || null;
+try {
+  // Pull the records for this DOI (for later metadata attachment)
+  const pack = byDoi.get(doi);
+  const hint = pack?.records?.[0] || null;
 
-      // ✅ Resolve the OpenAlex work FIRST
-      const work = await resolveOpenAlexWorkByDoi(doi, hint);
-      if (!work) throw new Error('No OpenAlex work returned');
+  // ✅ Declare + fetch before *any* access
+  const oaWork = await resolveOpenAlexWorkByDoi(doi, hint);
+  if (!oaWork) throw new Error('No OpenAlex work returned');
 
-      // Merge/add node
-      const idx = getOrCreateNodeForWork(work, null);
+  // Merge/add node
+  const idx = getOrCreateNodeForWork(oaWork, null);
 
-      // Attach REF UoA metadata onto the corresponding itemsData entry
-      const item = itemsData[idx] || (itemsData[idx] = {});
-      item.ref_records = item.ref_records || [];
+  // Attach REF UoA metadata
+  const item = itemsData[idx] || (itemsData[idx] = {});
+  item.ref_records = item.ref_records || [];
 
-      // Append all rows that pointed to this DOI
-      for (const r of (pack?.records || [])) {
-        item.ref_records.push({
-          ref_output_identifier: r.outputId || null,
-          ref_uoa_number: r.uoaNumber || null,
-          ref_uoa_name: r.uoaName || null,
-          ref_title: r.title || null,
-          ref_year: r.year || null,
-          ref_doi: doi
-        });
+  for (const r of (pack?.records || [])) {
+    item.ref_records.push({
+      ref_output_identifier: r.outputId || null,
+      ref_uoa_number: r.uoaNumber || null,
+      ref_uoa_name: r.uoaName || null,
+      ref_title: r.title || null,
+      ref_year: r.year || null,
+      ref_doi: doi
+    });
 
-        if (!item.ref_uoa_number && r.uoaNumber) item.ref_uoa_number = r.uoaNumber;
-        if (!item.ref_uoa_name && r.uoaName) item.ref_uoa_name = r.uoaName;
-      }
+    if (!item.ref_uoa_number && r.uoaNumber) item.ref_uoa_number = r.uoaNumber;
+    if (!item.ref_uoa_name && r.uoaName) item.ref_uoa_name = r.uoaName;
+  }
 
-      ok++;
-    } catch (e) {
-      console.warn('REF DOI resolve failed:', doi, e);
-      fail++;
-    }
+  ok++;
+} catch (e) {
+  console.warn('REF DOI resolve failed:', doi, e);
+  fail++;
+} 
   }
 
   hideLoading?.();
