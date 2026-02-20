@@ -18127,10 +18127,10 @@ async function retrieveFromRefSpreadsheetFile(file) {
       `Resolving DOI ${i + 1}/${total}`
     );
 
-    try {
+       try {
       // Pull the records for this DOI (for later metadata attachment)
       const pack = byDoi.get(doi);
-      const hint = pack?.records?.[0] || null; // title/year/uoa (optional)
+      const hint = pack?.records?.[0] || null;
 
       // ✅ Resolve the OpenAlex work FIRST
       const work = await resolveOpenAlexWorkByDoi(doi, hint);
@@ -18143,6 +18143,7 @@ async function retrieveFromRefSpreadsheetFile(file) {
       const item = itemsData[idx] || (itemsData[idx] = {});
       item.ref_records = item.ref_records || [];
 
+      // Append all rows that pointed to this DOI
       for (const r of (pack?.records || [])) {
         item.ref_records.push({
           ref_output_identifier: r.outputId || null,
@@ -18153,7 +18154,6 @@ async function retrieveFromRefSpreadsheetFile(file) {
           ref_doi: doi
         });
 
-        // Convenience “first seen” fields
         if (!item.ref_uoa_number && r.uoaNumber) item.ref_uoa_number = r.uoaNumber;
         if (!item.ref_uoa_name && r.uoaName) item.ref_uoa_name = r.uoaName;
       }
