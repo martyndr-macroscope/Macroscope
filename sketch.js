@@ -5264,10 +5264,13 @@ function createTopControlBar() {
   lay.style('display','block');
   lay.style('cursor','pointer');
   lay.attribute('draggable','false');
-  lay.attribute('title', 'Run Force Directed Graph'); 
-  attachTooltip(lay, 'Run Force Directed Graph'); 
-  lay.mousePressed(toggleLayout);
-  captureUI(lay.elt);
+lay.attribute('title', 'View / Layout'); 
+attachTooltip(lay, 'View / Layout'); 
+captureUI(lay.elt);
+
+// Attach the view menu to this icon (same click logic as other menus)
+attachViewMenuToLayoutIcon(lay);
+  lay.elt.addEventListener('click', (e) => e.stopPropagation(), { capture: true });
 
   // Auto-cache button (parent to topBar, not 'bar')
   const autoBtn = createButton('Retrieve Full Texts');
@@ -10181,12 +10184,17 @@ addItem('Retrieve by Institution…', () => openInstitutionRetrievalDialog());
     }
   }, { capture: true });
 
-  document.addEventListener('click', (ev) => {
-    if (menu.elt.style.display === 'none') return;
-    if (!menu.elt.contains(ev.target) && ev.target !== btn.elt) {
-      menu.style('display','none');
-    }
-  }, { capture: true });
+document.addEventListener('click', (ev) => {
+  if (!viewMenu || viewMenu.elt.style.display === 'none') return;
+
+  const t = ev.target;
+
+  // If click is on menu OR on the button that opened it, do nothing
+  if (viewMenu.elt.contains(t)) return;
+  if (viewMenuBtn?.elt && viewMenuBtn.elt.contains(t)) return;
+
+  viewMenu.style('display', 'none');
+}, { capture: true });
 
   document.body.appendChild(menu.elt);
 }
@@ -10199,6 +10207,550 @@ function positionMenuUnder(btn, menu) {
   menu.style('top',  `${Math.round(r.bottom + 6)}px`);
   menu.style('display','block');
 }
+
+// ─────────────────────────────────────────────────────────────
+// VIEW MENU (Citation Graph ↔ Thematic Manifold)
+// ─────────────────────────────────────────────────────────────
+let viewMenuBtn = null;
+let viewMenu = null;
+
+let viewMode = 'citation'; // 'citation' | 'thematic'
+
+// Stash for restoring
+let _stash = {
+  clusterOf: null,
+  clusterColors: null,
+  clusterSizesTotal: null,
+  nodePos: null,          // [{x,y}, ...]
+  lensesShowEdges: null
+};
+
+function ensureViewMenuBuilt(parent) {
+  if (viewMenu) return;
+
+  const p = parent || (window.topBar || window.topToolbar || document.body);
+
+  viewMenu = createDiv('');
+  viewMenu.parent(p);
+  viewMenu.style('position','fixed');
+  viewMenu.style('display','none');
+  viewMenu.style('z-index','10060');
+  viewMenu.style('background', '#000');
+  viewMenu.style('border-radius','8px');
+  viewMenu.style('padding','6px 0');
+  viewMenu.style('box-shadow', '0 10px 28px rgba(0,0,0,0.45)');
+  captureUI?.(viewMenu.elt);
+
+  const addItem = (label, onClick) => {
+    const row = createDiv(label);
+    row.parent(viewMenu);
+    row.style('padding','8px 14px');
+    row.style('font','12px/1.2 system-ui, -apple-system, Segoe UI, Roboto');
+    row.style('color','#f0f3f6');
+    row.style('cursor','pointer');
+    row.mouseOver(()=> row.style('background','rgba(255,255,255,0.06)'));
+    row.mouseOut(()=>  row.style('background','transparent'));
+    captureUI?.(row.elt);
+    row.elt.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      try { onClick?.(); } finally { viewMenu.style('display','none'); }
+    }, { capture: true });
+  };
+
+  addItem('Citation graph (force layout)', () => switchToCitationGraphMode());
+  addItem('Show thematic manifold',        () => switchToThematicManifoldMode());
+
+  document.addEventListener('click', (ev) => {
+    if (viewMenu?.elt?.style?.display === 'none') return;
+    if (!viewMenu.elt.contains(ev.target)) viewMenu.style('display','none');
+  }, { capture: true });
+}
+
+function openViewMenu(btnImg) {
+  if (!btnImg?.elt) return;
+
+  // remember trigger button so clicks on it don't immediately close menu
+  viewMenuBtn = btnImg;
+
+  ensureViewMenuBuilt(topBar || document.body);
+
+  const vis = viewMenu.elt.style.display !== 'none';
+  if (vis) { viewMenu.style('display','none'); return; }
+
+  positionMenuUnder(btnImg, viewMenu);
+  viewMenu.style('display','block');
+}
+
+// ─────────────────────────────────────────────────────────────
+// Dynamic dependency loader (UMAP + HDBSCAN)
+// ─────────────────────────────────────────────────────────────
+function loadScriptOnce(src) {
+  return new Promise((resolve, reject) => {
+    if ([...document.scripts].some(s => (s.src || '').includes(src))) return resolve(true);
+    const s = document.createElement('script');
+    s.src = src;
+    s.async = true;
+    s.onload = () => resolve(true);
+    s.onerror = (e) => reject(new Error(`Failed to load: ${src}`));
+    document.head.appendChild(s);
+  });
+}
+
+async function ensureThematicDeps() {
+  // UMAP (umap-js exposes UMAP on window in many builds; we’ll check both)
+  if (!window.UMAP && !window.umapjs && !window.UMAPjs) {
+    try {
+      await loadScriptOnce('https://unpkg.com/umap-js@1.3.3/lib/umap-js.min.js');
+    } catch (e) {
+      console.warn('UMAP failed to load, will fallback to PCA-ish projection.', e);
+    }
+  }
+
+  // HDBSCAN — there are multiple small builds in the wild; we try one.
+  // If it fails, we fallback to a simple k-means labelling you already have elsewhere.
+if (!window.hdbscan && !window.HDBSCAN) {
+  const candidates = [
+    // 1) jsDelivr often serves correct MIME types
+    'https://cdn.jsdelivr.net/npm/hdbscanjs@1.0.2/dist/hdbscan.min.js',
+    // 2) unpkg latest (no pinned path) sometimes differs; try package root
+    'https://unpkg.com/hdbscanjs@1.0.2',
+  ];
+  let ok = false;
+  for (const src of candidates) {
+    try {
+      await loadScriptOnce(src);
+      ok = !!(window.hdbscan || window.HDBSCAN);
+      if (ok) break;
+    } catch (_) {}
+  }
+  if (!ok) {
+    console.warn('HDBSCAN failed to load; will fallback to single-cluster labelling.');
+  }
+}
+}
+// ─────────────────────────────────────────────────────────────
+// THEME MANIFOLD STATE
+// ─────────────────────────────────────────────────────────────
+let thematicState = {
+  computedForKey: null,     // cache key
+  ids: [],                  // node indices used
+  vectors: null,            // NxD
+  xy: null,                 // Nx2
+  labels: null,             // cluster labels per row (same order as ids)
+  probs: null,              // optional membership strength
+  clusterOf: null,          // length = nodes.length, -1 for noise
+  clusterSizesTotal: null,
+  clusterColors: null,
+  clusterNames: null        // cid -> name
+};
+
+
+
+function getNodeTextForTheme(n) {
+  if (!n) return '';
+
+  // Macroscope item shape often includes nested OpenAlex
+  const oa = n.openalex || n.openAlex || null;
+
+  // Prefer full abstract; else reconstruct OpenAlex inverted index; else title/label
+  const abs =
+    n.abstractText ||
+    n.abstract ||
+    n.abs ||
+    (oa && (oa.abstract || oa.abstractText)) ||
+    (oa && reconstructAbstractFromInvertedIndex(oa.abstract_inverted_index)) ||
+    '';
+
+  const title =
+    n.title ||
+    n.label ||
+    (oa && (oa.display_name || oa.title)) ||
+    '';
+
+  const t = String(abs || title || '').trim();
+  return t;
+}
+
+function makeInstitutionCacheKey() {
+  // crude cache key: node count + visible year bounds + any filter thresholds that affect corpus
+  return [
+    nodes?.length || 0,
+    yearLo|0, yearHi|0,
+    (degThreshold|0),
+    (extCitesThreshold|0),
+    (clusterSizeThreshold|0)
+  ].join(':');
+}
+// ─────────────────────────────────────────────────────────────
+// Minimal TF-IDF embedder (local, no API)
+// ─────────────────────────────────────────────────────────────
+function tokenizeSimple(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g,' ')
+    .split(/\s+/)
+    .filter(w => w.length >= 3 && w.length <= 24);
+}
+
+function buildTfidfVectors(texts, {
+  vocabMax = 800,
+  minDf = 2,
+  maxDfFrac = 0.65
+} = {}) {
+  const N = texts.length;
+  const docs = texts.map(t => tokenizeSimple(t));
+  const df = new Map();
+
+  for (const ws of docs) {
+    const seen = new Set(ws);
+    for (const w of seen) df.set(w, (df.get(w)||0) + 1);
+  }
+
+  // prune by df
+  const maxDf = Math.max(1, Math.floor(N * maxDfFrac));
+  let vocab = [...df.entries()]
+    .filter(([,c]) => c >= minDf && c <= maxDf)
+    .sort((a,b) => b[1] - a[1])           // keep common-ish but not too common
+    .slice(0, vocabMax)
+    .map(([w]) => w);
+
+  const vidx = new Map(vocab.map((w,i)=>[w,i]));
+  const D = vocab.length;
+
+  // IDF
+  const idf = new Float32Array(D);
+  for (let i=0;i<D;i++){
+    const c = df.get(vocab[i]) || 1;
+    idf[i] = Math.log((1 + N) / (1 + c)) + 1;
+  }
+
+  // TF-IDF vectors (L2 normalised)
+  const X = new Array(N);
+  for (let i=0;i<N;i++){
+    const v = new Float32Array(D);
+    const ws = docs[i];
+    const tf = new Map();
+    for (const w of ws) if (vidx.has(w)) tf.set(w, (tf.get(w)||0) + 1);
+
+    let norm = 0;
+    for (const [w,c] of tf.entries()){
+      const j = vidx.get(w);
+      const val = (c / ws.length) * idf[j];
+      v[j] = val;
+      norm += val*val;
+    }
+    norm = Math.sqrt(norm) || 1;
+    for (let j=0;j<D;j++) v[j] /= norm;
+
+    X[i] = v;
+  }
+  return { X, vocab };
+}
+// ─────────────────────────────────────────────────────────────
+// UMAP + HDBSCAN pipeline
+// ─────────────────────────────────────────────────────────────
+function safeUMAP2D(X) {
+  // Return Nx2 array (plain JS numbers)
+  // Try umap-js; else fallback to a cheap projection (first two dims).
+  try {
+    const U = window.UMAP || window.umapjs?.UMAP || window.UMAPjs?.UMAP;
+    if (U) {
+const n = X.length;
+const nn = Math.max(2, Math.min(15, n - 1)); // adapt
+const umap = new U({
+  nNeighbors: nn,
+  minDist: 0.12,
+  nComponents: 2,
+  random: Math.random
+});
+      // umap-js expects arrays, not typed arrays; convert lightly
+      const arr = X.map(v => Array.from(v));
+      const emb = umap.fit(arr);
+      return emb.map(p => [Number(p[0]), Number(p[1])]);
+    }
+  } catch (e) {
+    console.warn('UMAP failed; using fallback projection.', e);
+  }
+
+  // fallback: first 2 dimensions (still “manifold-ish” enough for a probe)
+  return X.map(v => [Number(v[0]||0), Number(v[1]||0)]);
+}
+
+function safeHDBSCAN(xy, minClusterSize) {
+  // Returns labels length N (ints, -1 noise)
+  const N = xy.length;
+  const mcs = Math.max(5, Number(minClusterSize||8)|0);
+
+  try {
+    const h = window.hdbscan || window.HDBSCAN;
+    if (h) {
+      // Different builds expose different APIs; try common signatures.
+      // 1) hdbscan(xy, minPts, minClusterSize)
+      if (typeof h === 'function') {
+        const out = h(xy, mcs, mcs);
+        if (Array.isArray(out)) return out.map(v => (v==null?-1:(v|0)));
+        if (out?.labels) return out.labels.map(v => (v==null?-1:(v|0)));
+      }
+      // 2) new HDBSCAN().run(xy)
+      if (typeof h === 'object' && typeof h.HDBSCAN === 'function') {
+        const inst = new h.HDBSCAN({ minClusterSize: mcs });
+        const out = inst.run(xy);
+        if (out?.labels) return out.labels.map(v => (v==null?-1:(v|0)));
+      }
+    }
+  } catch (e) {
+    console.warn('HDBSCAN failed; will fallback.', e);
+  }
+
+  // fallback: single cluster (investor/probe friendly: never “fails”)
+  return new Array(N).fill(0);
+}
+
+function buildClusterSizes(labels) {
+  const sizes = new Map();
+  for (const c of labels) {
+    if (c == null || c < 0) continue;
+    sizes.set(c, (sizes.get(c)||0) + 1);
+  }
+  // remap to dense 0..K-1
+  const oldIds = [...sizes.keys()].sort((a,b)=>a-b);
+  const map = new Map(oldIds.map((id,i)=>[id,i]));
+  const denseLabels = labels.map(c => (c!=null && c>=0) ? map.get(c) : -1);
+
+  const K = oldIds.length;
+  const denseSizes = new Array(K).fill(0);
+  for (const c of denseLabels) if (c>=0) denseSizes[c]++;
+
+  return { denseLabels, denseSizes };
+}
+
+function defaultClusterPalette(K) {
+  // reuse your existing clusterColors if present, else generate
+  if (Array.isArray(clusterColors) && clusterColors.length >= K) return clusterColors.slice(0,K);
+  const cols = [];
+  for (let i=0;i<K;i++){
+    // simple HSV-ish to RGB
+    const t = i / Math.max(1,K);
+    const a = 2*Math.PI*t;
+    const r = Math.floor(160 + 80*Math.sin(a));
+    const g = Math.floor(160 + 80*Math.sin(a + 2.1));
+    const b = Math.floor(160 + 80*Math.sin(a + 4.2));
+    cols.push([r,g,b]);
+  }
+  return cols;
+}
+
+function nameClustersFromRepresentativeAbstracts(ids, xy, labels, nRep = 6) {
+  // Non-AI: pick representative docs near cluster centroid, then extract top terms.
+  const byC = new Map();
+  for (let r=0;r<ids.length;r++){
+    const c = labels[r];
+    if (c < 0) continue;
+    if (!byC.has(c)) byC.set(c, []);
+    byC.get(c).push(r);
+  }
+
+  const names = Object.create(null);
+
+  for (const [c, rows] of byC.entries()){
+    // centroid in 2D
+    let sx=0, sy=0;
+    for (const r of rows){ sx += xy[r][0]; sy += xy[r][1]; }
+    const cx = sx/rows.length, cy = sy/rows.length;
+
+    // nearest to centroid
+    rows.sort((ra, rb) => {
+      const da = (xy[ra][0]-cx)**2 + (xy[ra][1]-cy)**2;
+      const db = (xy[rb][0]-cx)**2 + (xy[rb][1]-cy)**2;
+      return da-db;
+    });
+
+    const rep = rows.slice(0, Math.max(2, nRep));
+    const texts = rep.map(r => getNodeTextForTheme(nodes[ids[r]])).join(' ');
+    const toks = tokenizeSimple(texts);
+
+    // crude term scoring
+    const stop = new Set(['using','based','study','results','paper','approach','analysis','method','methods','data','new','model','models']);
+    const freq = new Map();
+    for (const w of toks) {
+      if (stop.has(w)) continue;
+      freq.set(w, (freq.get(w)||0) + 1);
+    }
+    const top = [...freq.entries()].sort((a,b)=>b[1]-a[1]).slice(0,6).map(x=>x[0]);
+
+    names[c] = top.length ? top.slice(0,4).join(' • ') : `Theme ${c+1}`;
+  }
+
+  return names;
+}
+// ─────────────────────────────────────────────────────────────
+// MODE SWITCHERS
+// ─────────────────────────────────────────────────────────────
+async function switchToThematicManifoldMode() {
+  if (!nodes?.length) return;
+
+  // stash once
+  if (_stash.nodePos == null) {
+    _stash.nodePos = nodes.map(n => ({ x: n.x, y: n.y }));
+    _stash.clusterOf = (Array.isArray(clusterOf) ? clusterOf.slice() : null);
+    _stash.clusterColors = (Array.isArray(clusterColors) ? clusterColors.slice() : null);
+    _stash.clusterSizesTotal = (Array.isArray(clusterSizesTotal) ? clusterSizesTotal.slice() : null);
+    _stash.lensesShowEdges = !!lenses?.showEdges;
+  }
+
+  viewMode = 'thematic';
+
+  // Turn off force layout / edges emphasis (optional)
+  try { layoutRunning = false; } catch(_) {}
+  if (lenses) lenses.showEdges = false;
+
+  const nRep = Math.max(2, Number(prompt('Representative abstracts per cluster label?', '6') || 6) | 0);
+  const minCluster = Math.max(5, Number(prompt('HDBSCAN min cluster size?', '12') || 12) | 0);
+
+  await ensureThematicDeps();
+
+  const cacheKey = makeInstitutionCacheKey();
+  if (thematicState.computedForKey !== cacheKey) {
+    msg = 'Building thematic manifold…'; updateInfo?.(); redraw?.();
+
+    // corpus = visible nodes with some text
+    const ids = [];
+    const texts = [];
+const hasVisibleMask = Array.isArray(visibleMask) && visibleMask.length === nodes.length;
+
+for (let i=0;i<nodes.length;i++){
+  // Prefer visibleMask if available; otherwise include all nodes
+  if (hasVisibleMask && !visibleMask[i]) continue;
+
+  const t = getNodeTextForTheme(nodes[i]);
+  if (!t) continue;
+
+  ids.push(i);
+  texts.push(t);
+
+  if (ids.length >= 20000) break; // safety cap
+}
+
+if (ids.length < 30) {
+  console.warn('Thematic manifold: not enough documents with text to embed. ids.length=', ids.length);
+  msg = `Thematic manifold needs more text-bearing docs (found ${ids.length}).`;
+  updateInfo?.();
+  return;
+}
+console.log('Thematic manifold: sample text =', texts[0]?.slice(0,180));
+    const { X } = buildTfidfVectors(texts, { vocabMax: 900, minDf: 2, maxDfFrac: 0.6 });
+    const xy = safeUMAP2D(X);
+
+    // Normalize xy (so it fits your world coords nicely)
+    let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
+    for (const p of xy){ if (p[0]<minX) minX=p[0]; if (p[0]>maxX) maxX=p[0]; if (p[1]<minY) minY=p[1]; if (p[1]>maxY) maxY=p[1]; }
+    const w = Math.max(1e-9, maxX-minX), h = Math.max(1e-9, maxY-minY);
+
+    // map into world space with padding
+    const pad = 140;
+    const targetW = Math.max(world?.w || 2000, 2400);
+    const targetH = Math.max(world?.h || 2000, 2400);
+
+    const xyWorld = xy.map(p => ([
+      pad + ((p[0]-minX)/w) * (targetW - pad*2),
+      pad + ((p[1]-minY)/h) * (targetH - pad*2)
+    ]));
+
+    const labels0 = safeHDBSCAN(xy, minCluster);
+    const { denseLabels, denseSizes } = buildClusterSizes(labels0);
+    const K = denseSizes.length;
+
+    // Build global-per-node clusterOf
+    const cOf = new Array(nodes.length).fill(-1);
+    for (let r=0;r<ids.length;r++){
+      cOf[ids[r]] = denseLabels[r];
+    }
+
+    const cols = defaultClusterPalette(Math.max(1,K));
+    const names = nameClustersFromRepresentativeAbstracts(ids, xy, denseLabels, nRep);
+
+    thematicState = {
+      computedForKey: cacheKey,
+      ids,
+      vectors: null,
+      xy: xyWorld,
+      labels: denseLabels,
+      probs: null,
+      clusterOf: cOf,
+      clusterSizesTotal: denseSizes,
+      clusterColors: cols,
+      clusterNames: names
+    };
+    // Make thematic clusters visible to the existing UI/overlays
+clusterCount = Math.max(0, K);
+clusterLabels = new Array(clusterCount).fill('').map((_, cid) => {
+  return (thematicState.clusterNames && thematicState.clusterNames[cid]) ? thematicState.clusterNames[cid] : `Theme ${cid+1}`;
+});
+
+// Ensure sizes/colours are consistent
+clusterSizesTotal = thematicState.clusterSizesTotal;
+clusterColors     = thematicState.clusterColors;
+clusterOf         = thematicState.clusterOf;
+
+// Rebuild cluster dimension index (so “Dimensions → Clusters” works)
+buildDimensionsIndex?.();
+updateDimSections?.();
+initClusterFilterUI?.();
+
+    msg = `Thematic manifold: ${ids.length} docs, ${K} themes`; updateInfo?.();
+  }
+
+  // Apply positions
+  const ids = thematicState.ids;
+  const xyW = thematicState.xy;
+  for (let r=0;r<ids.length;r++){
+    const i = ids[r];
+    nodes[i].x = xyW[r][0];
+    nodes[i].y = xyW[r][1];
+  }
+
+  // Swap cluster arrays so your existing node colouring path just works
+  clusterOf = thematicState.clusterOf;
+  clusterSizesTotal = thematicState.clusterSizesTotal;
+  clusterColors = thematicState.clusterColors;
+
+  // Make it visible even if slider is low
+  try { ovClusterColors = Math.max(ovClusterColors, 0.85); } catch(_) {}
+
+  adjustWorldToContent?.(160);
+  fitContentInView?.(40);
+  recomputeVisibility?.();
+  redraw?.();
+}
+
+function switchToCitationGraphMode() {
+  viewMode = 'citation';
+
+  // Restore positions (if we have them)
+  if (_stash.nodePos?.length === nodes.length) {
+    for (let i=0;i<nodes.length;i++){
+      nodes[i].x = _stash.nodePos[i].x;
+      nodes[i].y = _stash.nodePos[i].y;
+    }
+  }
+
+  // Restore cluster arrays
+  if (_stash.clusterOf) clusterOf = _stash.clusterOf;
+  if (_stash.clusterSizesTotal) clusterSizesTotal = _stash.clusterSizesTotal;
+  if (_stash.clusterColors) clusterColors = _stash.clusterColors;
+
+  // Restore lens edges toggle
+  if (lenses) lenses.showEdges = !!_stash.lensesShowEdges;
+
+  // Optionally re-run the force layout if you want it to “snap back”
+  // toggleLayout?.();
+
+  adjustWorldToContent?.(160);
+  fitContentInView?.(40);
+  recomputeVisibility?.();
+  redraw?.();
+}
+
 
 // Ensure any icon-strip refresh also updates our dropdown state
 // (If updateLensIcons already exists earlier, this later definition overrides it.)
@@ -18555,4 +19107,99 @@ function parseCsvToRowObjects(text) {
     for (let i = 0; i < headers.length; i++) obj[headers[i]] = row[i] ?? '';
     return obj;
   });
+}
+// ─────────────────────────────────────────────────────────────
+// VIEW / LAYOUT dropdown (matches Data menu click behaviour)
+// ─────────────────────────────────────────────────────────────
+
+function attachViewMenuToLayoutIcon(btn) {
+  if (!btn?.elt) return;
+  viewMenuBtn = btn;
+
+  if (!viewMenu) {
+    viewMenu = createDiv('');
+    viewMenu.addClass('dropdown');
+    viewMenu.style('position','fixed');
+    viewMenu.style('display','none');
+    viewMenu.style('z-index','10050');
+    viewMenu.style('background', '#000');
+    viewMenu.style('border-radius','8px');
+    viewMenu.style('padding','6px 0');
+    viewMenu.style('box-shadow', '0 10px 28px rgba(0,0,0,0.45)');
+    viewMenu.style('backdrop-filter','');
+    captureUI?.(viewMenu.elt);
+
+    function addItem(label, onClick) {
+      const row = createDiv(label);
+      row.parent(viewMenu);
+      row.style('padding','8px 14px');
+      row.style('font','12px/1.2 system-ui, -apple-system, Segoe UI, Roboto');
+      row.style('color','#f0f3f6');
+      row.style('cursor','pointer');
+      row.mouseOver(()=> row.style('background','rgba(255,255,255,0.06)'));
+      row.mouseOut(()=>  row.style('background','transparent'));
+      captureUI?.(row.elt);
+
+      row.elt.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        try { onClick?.(); } finally { viewMenu.style('display','none'); }
+      }, { capture: true });
+    }
+
+    // Items
+    addItem('Citation graph (force layout)', () => {
+      // existing behaviour
+      toggleLayout?.();
+    });
+
+    addItem('Show thematic manifold', () => {
+      switchToThematicManifoldMode?.();
+    });
+
+    document.body.appendChild(viewMenu.elt);
+  }
+
+  // Use DOM click (like other menus), NOT mousePressed
+  btn.elt.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+
+    const vis = viewMenu.elt.style.display !== 'none';
+    if (vis) {
+      viewMenu.style('display','none');
+    } else {
+      const b = btn.elt.getBoundingClientRect();
+      viewMenu.style('left', `${b.left}px`);
+      viewMenu.style('top',  `${b.bottom + 6}px`);
+      viewMenu.style('display','block');
+    }
+  }, { capture: true });
+
+  // Close on outside click (same pattern as Data menu)
+  document.addEventListener('click', (ev) => {
+    if (viewMenu.elt.style.display === 'none') return;
+    if (!viewMenu.elt.contains(ev.target) && ev.target !== btn.elt) {
+      viewMenu.style('display','none');
+    }
+  }, { capture: true });
+}
+
+function reconstructAbstractFromInvertedIndex(inv) {
+  // OpenAlex abstract_inverted_index: { token: [pos1,pos2,...], ... }
+  if (!inv || typeof inv !== 'object') return '';
+  let maxPos = -1;
+  for (const k in inv) {
+    const arr = inv[k];
+    if (!Array.isArray(arr)) continue;
+    for (const p of arr) if (p > maxPos) maxPos = p;
+  }
+  if (maxPos < 0) return '';
+
+  const words = new Array(maxPos + 1);
+  for (const token in inv) {
+    const positions = inv[token];
+    if (!Array.isArray(positions)) continue;
+    for (const p of positions) words[p] = token;
+  }
+  // Some positions may be undefined; filter them out
+  return words.filter(Boolean).join(' ').trim();
 }
