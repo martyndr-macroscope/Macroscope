@@ -10222,7 +10222,9 @@ let _stash = {
   clusterColors: null,
   clusterSizesTotal: null,
   nodePos: null,          // [{x,y}, ...]
-  lensesShowEdges: null
+  lensesShowEdges: null,
+  edges: null,
+  adj: null
 };
 
 function ensureViewMenuBuilt(parent) {
@@ -10503,7 +10505,22 @@ function safeHDBSCAN(xy, minClusterSize) {
   }
 
   // fallback: single cluster (investor/probe friendly: never “fails”)
-  return new Array(N).fill(0);
+  // ── fallback: DBSCAN on the 2D manifold ──
+const minPts = Math.max(5, Number(minClusterSize || 12) | 0);
+
+// Estimate eps from the data
+const eps = estimateDbscanEps(xy, Math.max(5, Math.min(12, minPts)), 350);
+
+// Run DBSCAN
+const labels = dbscanHighDim(X, epsHD, minPts);
+
+// If DBSCAN is too strict (everything noise), relax eps once
+let anyCluster = labels.some(v => v >= 0);
+if (!anyCluster) {
+  const labels2 = dbscan2D(xy, eps * 1.6, minPts);
+  return labels2;
+}
+return labels;
 }
 
 function buildClusterSizes(labels) {
@@ -10596,9 +10613,78 @@ async function switchToThematicManifoldMode() {
     _stash.clusterColors = (Array.isArray(clusterColors) ? clusterColors.slice() : null);
     _stash.clusterSizesTotal = (Array.isArray(clusterSizesTotal) ? clusterSizesTotal.slice() : null);
     _stash.lensesShowEdges = !!lenses?.showEdges;
+      // ADD: stash citation graph edges/adj once
+  _stash.edges = Array.isArray(edges) ? edges.slice() : null;
+  _stash.adj   = Array.isArray(adj)   ? adj.map(r => r.slice()) : null;
   }
 
   viewMode = 'thematic';
+
+    // ─────────────────────────────────────────────────────────────
+  // THEME GRAPH MODE: build edges from Invisible University topics
+  // ─────────────────────────────────────────────────────────────
+  const threshold = Math.max(1, Number(prompt('Topic overlap threshold (shared topics to link)?', '1') || 1) | 0);
+  const topK = Math.max(4, Number(prompt('Max thematic links per paper (top-K)?', '24') || 24) | 0);
+  const maxDfFrac = Math.max(0.02, Math.min(0.5, Number(prompt('Ignore ultra-common topics (max DF fraction)?', '0.20') || 0.20)));
+
+  // build thematic edges
+  msg = 'Building thematic links (topics-as-citations)…'; updateInfo?.(); redraw?.();
+
+const built = buildThematicEdgesFromTopics({
+  topicThreshold: threshold,          // your prompt value
+  authorThreshold: 1,
+  includeAuthors: true,
+  authorEdgeWeight: 3,
+  topKPerNode: topK,
+  maxTopicDfFrac: maxDfFrac,
+  maxAuthorDfFrac: 0.03,
+  useVisibleMask: true,
+});
+
+  edges = built.edges || [];
+  buildAdjacency(nodes.length, edges);     // uses your existing adj builder :contentReference[oaicite:11]{index=11}
+
+  // clusters (use existing label-propagation over adj) :contentReference[oaicite:12]{index=12}
+  computeDomainClusters?.(60);
+
+  // build cluster labels from representative abstracts (reuses your helper) :contentReference[oaicite:13]{index=13}
+  // We need ids + xy + labels in its format; easiest is to compute centroid in WORLD coords directly.
+  // So we provide a tiny wrapper that works off clusterOf and node positions.
+  if (Array.isArray(clusterOf) && clusterOf.length === nodes.length) {
+    // Assign colours if not already
+    const k = (Array.isArray(clusterSizesTotal) && clusterSizesTotal.length) ? clusterSizesTotal.length : 0;
+    if (!Array.isArray(clusterColors) || !clusterColors.length) {
+      clusterColors = defaultClusterPalette(Math.max(1, k));
+    }
+
+    // crude names: pick docs nearest cluster centroid (in world coords) and extract top terms
+    const ids = [];
+    const xy = [];
+    const labels = [];
+    for (let i = 0; i < nodes.length; i++) {
+      if (Array.isArray(visibleMask) && visibleMask.length === nodes.length && !visibleMask[i]) continue;
+      const c = clusterOf[i];
+      if (c < 0) continue;
+      ids.push(i);
+      xy.push([nodes[i].x, nodes[i].y]);
+      labels.push(c);
+    }
+    // Reuse the same naming function (it only needs xy, ids, labels)
+    const names = nameClustersFromRepresentativeAbstracts(ids, xy, labels, 6);
+    // Store where your label renderer expects it (you already use clusterLabels/clusterNames patterns)
+    thematicState.clusterNames = names;
+  }
+
+  // restart force layout with the new thematic edges
+  initForceLayout?.();
+  layoutEverStarted = false;   // re-run footprint compaction once
+  layoutRunning = false;
+  toggleLayout?.();            // same button behaviour as citation graph :contentReference[oaicite:14]{index=14}
+
+  msg = `Thematic manifold: ${nodes.length} docs, ${edges.length} thematic links.`;
+  updateInfo?.();
+  redraw?.();
+  return;
 
   // Turn off force layout / edges emphasis (optional)
   try { layoutRunning = false; } catch(_) {}
@@ -10638,8 +10724,18 @@ if (ids.length < 30) {
   return;
 }
 console.log('Thematic manifold: sample text =', texts[0]?.slice(0,180));
-    const { X } = buildTfidfVectors(texts, { vocabMax: 900, minDf: 2, maxDfFrac: 0.6 });
-    const xy = safeUMAP2D(X);
+const { X } = buildTfidfVectors(texts, { vocabMax: 900, minDf: 2, maxDfFrac: 0.6 });
+
+// 1) Reduce TF–IDF space (C)
+let Z = reduceWithRandomizedSVD(X, 80, 20, 1);   // (k=80, oversample=20, 1 power iter)
+Z = l2NormalizeMatrix(Z);
+
+// 2) Cluster in high-D space (A) using your existing k-means style clustering
+// NOTE: this function is already in your codebase for Invisible University :contentReference[oaicite:1]{index=1}
+const labels0 = clusterInvisibleUniBySimilarity(Z, minCluster);
+
+// 3) 2D layout for display only
+const xy = safeUMAP2D(Z);
 
     // Normalize xy (so it fits your world coords nicely)
     let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
@@ -10656,7 +10752,6 @@ console.log('Thematic manifold: sample text =', texts[0]?.slice(0,180));
       pad + ((p[1]-minY)/h) * (targetH - pad*2)
     ]));
 
-    const labels0 = safeHDBSCAN(xy, minCluster);
     const { denseLabels, denseSizes } = buildClusterSizes(labels0);
     const K = denseSizes.length;
 
@@ -19202,4 +19297,575 @@ function reconstructAbstractFromInvertedIndex(inv) {
   }
   // Some positions may be undefined; filter them out
   return words.filter(Boolean).join(' ').trim();
+}
+
+// ─────────────────────────────────────────────────────────────
+// DBSCAN on 2D points with grid acceleration (no deps)
+// Returns labels length N (ints), -1 for noise
+// ─────────────────────────────────────────────────────────────
+function dbscan2D(points, eps, minPts) {
+  const N = points.length;
+  const labels = new Array(N).fill(undefined); // undefined=unvisited, -1=noise, >=0 cluster id
+  const visited = new Uint8Array(N);
+
+  const cellSize = eps;
+  const grid = new Map();
+
+  function cellKey(cx, cy) { return `${cx},${cy}`; }
+
+  // Build grid index
+  for (let i = 0; i < N; i++) {
+    const x = points[i][0], y = points[i][1];
+    const cx = Math.floor(x / cellSize);
+    const cy = Math.floor(y / cellSize);
+    const k = cellKey(cx, cy);
+    let arr = grid.get(k);
+    if (!arr) { arr = []; grid.set(k, arr); }
+    arr.push(i);
+  }
+
+  function regionQuery(i) {
+    const x = points[i][0], y = points[i][1];
+    const cx = Math.floor(x / cellSize);
+    const cy = Math.floor(y / cellSize);
+    const out = [];
+
+    // Search neighbouring 3x3 cells
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        const k = cellKey(cx + dx, cy + dy);
+        const bucket = grid.get(k);
+        if (!bucket) continue;
+        for (const j of bucket) {
+          const x2 = points[j][0], y2 = points[j][1];
+          const d2 = (x2 - x) * (x2 - x) + (y2 - y) * (y2 - y);
+          if (d2 <= eps * eps) out.push(j);
+        }
+      }
+    }
+    return out;
+  }
+
+  let clusterId = 0;
+
+  for (let i = 0; i < N; i++) {
+    if (visited[i]) continue;
+    visited[i] = 1;
+
+    const neighbours = regionQuery(i);
+
+    if (neighbours.length < minPts) {
+      labels[i] = -1; // noise
+      continue;
+    }
+
+    // start new cluster
+    labels[i] = clusterId;
+
+    // expand cluster using queue
+    const queue = neighbours.slice();
+    const inQueue = new Uint8Array(N);
+    for (const q of queue) inQueue[q] = 1;
+
+    for (let qi = 0; qi < queue.length; qi++) {
+      const j = queue[qi];
+
+      if (!visited[j]) {
+        visited[j] = 1;
+        const n2 = regionQuery(j);
+        if (n2.length >= minPts) {
+          // merge neighbours
+          for (const k of n2) {
+            if (!inQueue[k]) {
+              queue.push(k);
+              inQueue[k] = 1;
+            }
+          }
+        }
+      }
+
+      // assign to cluster (border points included)
+      if (labels[j] === undefined || labels[j] === -1) labels[j] = clusterId;
+    }
+
+    clusterId++;
+  }
+
+  // Fill any still-undefined labels as noise
+  for (let i = 0; i < N; i++) {
+    if (labels[i] === undefined) labels[i] = -1;
+  }
+
+  return labels;
+}
+
+// Estimate eps from k-NN distances (approx) using random sampling
+function estimateDbscanEps(points, k = 8, samples = 400) {
+  const N = points.length;
+  if (N < 3) return 1;
+
+  const S = Math.min(samples, N);
+  let acc = [];
+
+  // sample indices
+  for (let s = 0; s < S; s++) {
+    const i = (Math.random() * N) | 0;
+    const x = points[i][0], y = points[i][1];
+
+    // compute distances to all (O(N)); ok for S small and N ~ a few k
+    const d = [];
+    for (let j = 0; j < N; j++) {
+      if (j === i) continue;
+      const x2 = points[j][0], y2 = points[j][1];
+      d.push((x2 - x) * (x2 - x) + (y2 - y) * (y2 - y));
+    }
+    d.sort((a, b) => a - b);
+
+    const idx = Math.min(k - 1, d.length - 1);
+    acc.push(Math.sqrt(d[idx] || 0));
+  }
+
+  acc.sort((a, b) => a - b);
+  const med = acc[(acc.length / 2) | 0] || 1;
+
+  // Slightly inflate for UMAP "crowding"
+  return med * 1.15;
+}
+
+function l2NormalizeMatrix(mat) {
+  for (let i = 0; i < mat.length; i++) {
+    const v = mat[i];
+    let s = 0;
+    for (let j = 0; j < v.length; j++) s += v[j] * v[j];
+    const inv = s > 0 ? 1 / Math.sqrt(s) : 1;
+    for (let j = 0; j < v.length; j++) v[j] *= inv;
+  }
+  return mat;
+}
+// ─────────────────────────────────────────────────────────────
+// Randomized SVD / PCA reduction for dense TF–IDF matrices
+// X: Array<Float32Array(D)> length N
+// returns Array<Float32Array(k)> length N
+// ─────────────────────────────────────────────────────────────
+function reduceWithRandomizedSVD(X, k = 80, oversample = 20, nIter = 1) {
+  const N = X.length | 0;
+  if (!N) return [];
+  const D = (X[0]?.length | 0);
+  if (!D) return [];
+
+  const r = Math.min(D, k + oversample);
+
+  // Ω: D x r random gaussian-ish (Box-Muller-lite)
+  const Omega = new Float32Array(D * r);
+  for (let i = 0; i < Omega.length; i++) {
+    // approx N(0,1) from uniform(-1,1)
+    Omega[i] = (Math.random() * 2 - 1) + (Math.random() * 2 - 1);
+  }
+
+  // Y = X * Ω  => N x r
+  const Y = new Array(N);
+  for (let i = 0; i < N; i++) {
+    const yi = new Float32Array(r);
+    const xi = X[i];
+    for (let d = 0; d < D; d++) {
+      const xvd = xi[d];
+      if (!xvd) continue;
+      const base = d * r;
+      for (let t = 0; t < r; t++) yi[t] += xvd * Omega[base + t];
+    }
+    Y[i] = yi;
+  }
+
+  // Optional power iterations to sharpen subspace: Y = X*(X^T*Y)
+  for (let it = 0; it < nIter; it++) {
+    // Z = X^T * Y  => D x r
+    const Z = new Float32Array(D * r);
+    for (let i = 0; i < N; i++) {
+      const xi = X[i];
+      const yi = Y[i];
+      for (let d = 0; d < D; d++) {
+        const xvd = xi[d];
+        if (!xvd) continue;
+        const base = d * r;
+        for (let t = 0; t < r; t++) Z[base + t] += xvd * yi[t];
+      }
+    }
+    // Y = X * Z => N x r
+    for (let i = 0; i < N; i++) {
+      const yi2 = new Float32Array(r);
+      const xi = X[i];
+      for (let d = 0; d < D; d++) {
+        const xvd = xi[d];
+        if (!xvd) continue;
+        const base = d * r;
+        for (let t = 0; t < r; t++) yi2[t] += xvd * Z[base + t];
+      }
+      Y[i] = yi2;
+    }
+  }
+
+  // Orthonormalise columns of Y -> Q (N x r) via modified Gram-Schmidt
+  // Represent Q as N vectors of length r (row-major)
+  // We'll orthonormalise *columns*, so we keep a column set V[t][i]
+  const Q = new Array(N);
+  for (let i = 0; i < N; i++) Q[i] = new Float32Array(r);
+
+  // Copy Y into Q initially
+  for (let i = 0; i < N; i++) Q[i].set(Y[i]);
+
+  for (let j = 0; j < r; j++) {
+    // norm of column j
+    let norm = 0;
+    for (let i = 0; i < N; i++) {
+      const v = Q[i][j];
+      norm += v * v;
+    }
+    norm = Math.sqrt(norm) || 1;
+
+    // normalise column j
+    const inv = 1 / norm;
+    for (let i = 0; i < N; i++) Q[i][j] *= inv;
+
+    // subtract projections from remaining columns
+    for (let jj = j + 1; jj < r; jj++) {
+      let dot = 0;
+      for (let i = 0; i < N; i++) dot += Q[i][j] * Q[i][jj];
+      for (let i = 0; i < N; i++) Q[i][jj] -= dot * Q[i][j];
+    }
+  }
+
+  // B = Q^T X  => r x D
+  const B = new Float32Array(r * D);
+  for (let i = 0; i < N; i++) {
+    const qi = Q[i];
+    const xi = X[i];
+    for (let d = 0; d < D; d++) {
+      const xvd = xi[d];
+      if (!xvd) continue;
+      for (let t = 0; t < r; t++) B[t * D + d] += qi[t] * xvd;
+    }
+  }
+
+  // C = B * B^T  => r x r (symmetric)
+  const C = new Float32Array(r * r);
+  for (let i = 0; i < r; i++) {
+    for (let j = i; j < r; j++) {
+      let s = 0;
+      const iOff = i * D;
+      const jOff = j * D;
+      for (let d = 0; d < D; d++) s += B[iOff + d] * B[jOff + d];
+      C[i * r + j] = s;
+      C[j * r + i] = s;
+    }
+  }
+
+  // Power iteration eigen-decomp for top k eigenvectors of C
+  const kk = Math.min(k, r);
+  const eigVecs = new Array(kk);
+  const eigVals = new Float32Array(kk);
+
+  // helper: multiply C * v
+  function mulCv(v) {
+    const out = new Float32Array(r);
+    for (let i = 0; i < r; i++) {
+      let s = 0;
+      const off = i * r;
+      for (let j = 0; j < r; j++) s += C[off + j] * v[j];
+      out[i] = s;
+    }
+    return out;
+  }
+
+  // deflation
+  const Cwork = new Float32Array(C);
+
+  for (let m = 0; m < kk; m++) {
+    let v = new Float32Array(r);
+    for (let i = 0; i < r; i++) v[i] = Math.random() * 2 - 1;
+
+    // iterate
+    for (let it = 0; it < 20; it++) {
+      // w = Cwork * v
+      const w = new Float32Array(r);
+      for (let i = 0; i < r; i++) {
+        let s = 0;
+        const off = i * r;
+        for (let j = 0; j < r; j++) s += Cwork[off + j] * v[j];
+        w[i] = s;
+      }
+      // normalise
+      let nrm = 0;
+      for (let i = 0; i < r; i++) nrm += w[i] * w[i];
+      nrm = Math.sqrt(nrm) || 1;
+      const inv = 1 / nrm;
+      for (let i = 0; i < r; i++) v[i] = w[i] * inv;
+    }
+
+    // Rayleigh quotient for eigenvalue
+    const Cv = new Float32Array(r);
+    for (let i = 0; i < r; i++) {
+      let s = 0;
+      const off = i * r;
+      for (let j = 0; j < r; j++) s += Cwork[off + j] * v[j];
+      Cv[i] = s;
+    }
+    let lam = 0;
+    for (let i = 0; i < r; i++) lam += v[i] * Cv[i];
+
+    eigVecs[m] = v;
+    eigVals[m] = lam;
+
+    // deflate: Cwork -= lam * v v^T
+    for (let i = 0; i < r; i++) {
+      for (let j = 0; j < r; j++) {
+        Cwork[i * r + j] -= lam * v[i] * v[j];
+      }
+    }
+  }
+
+  // U (r x kk) = eigenvectors; Z = Q * U => N x kk
+  const Z = new Array(N);
+  for (let i = 0; i < N; i++) {
+    const zi = new Float32Array(kk);
+    const qi = Q[i];
+    for (let m = 0; m < kk; m++) {
+      const u = eigVecs[m];
+      let s = 0;
+      for (let t = 0; t < r; t++) s += qi[t] * u[t];
+      zi[m] = s;
+    }
+    Z[i] = zi;
+  }
+
+  return Z;
+}
+
+// ─────────────────────────────────────────────────────────────
+// Thematic edges: treat shared Invisible University topics as links
+// Requires: nodes[i] has topics in itemsData[i].invisibleUniTopics OR nodes[i].invisibleUniTopics
+// Writes: returns { edges, stats }
+// ─────────────────────────────────────────────────────────────
+function getTopicsForNodeIndex(i) {
+  // Prefer itemsData storage (that’s where your fingerprinting writes) :contentReference[oaicite:5]{index=5}
+  const meta = (typeof itemsData !== 'undefined' && itemsData) ? itemsData[i] : null;
+  const a = meta?.invisibleUniTopics;
+  if (Array.isArray(a) && a.length) return a;
+
+  // fallback if you ever copied onto node object
+  const b = nodes?.[i]?.invisibleUniTopics;
+  if (Array.isArray(b) && b.length) return b;
+
+  return [];
+}
+
+function normTopic(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function buildThematicEdgesFromTopics({
+  topicThreshold = 1,          // shared topics needed
+  authorThreshold = 1,         // shared authors needed (usually 1)
+  topKPerNode = 24,            // prune: keep only topK edges per node
+  maxTopicDfFrac = 0.20,        // ignore ultra-common topics
+  maxAuthorDfFrac = 0.03,       // ignore ultra-common authors (prolific) to avoid hairballs
+  authorEdgeWeight = 3,         // authorship edges get a boost vs topic edges
+  useVisibleMask = true,
+  includeAuthors = true,
+} = {}) {
+  const n = nodes?.length || 0;
+  if (!n) return { edges: [], stats: { n: 0 } };
+
+  const hasVis = useVisibleMask && Array.isArray(visibleMask) && visibleMask.length === n;
+
+  // 1) Build topic -> doc list
+  const topicToDocs = new Map();
+  const docTopics = new Array(n);
+
+  let docsUsed = 0;
+
+  for (let i = 0; i < n; i++) {
+    if (hasVis && !visibleMask[i]) { docTopics[i] = null; continue; }
+
+    const raw = getTopicsForNodeIndex(i);
+    const topics = raw
+      .map(normTopic)
+      .filter(t => t && t.length >= 3);
+
+    if (!topics.length) { docTopics[i] = null; continue; }
+
+    // de-dup within doc
+    const uniq = Array.from(new Set(topics));
+    docTopics[i] = uniq;
+    docsUsed++;
+
+    for (const t of uniq) {
+      if (!topicToDocs.has(t)) topicToDocs.set(t, []);
+      topicToDocs.get(t).push(i);
+    }
+  }
+
+  // 2) Prune very common topics
+  const maxTopicDf = Math.max(2, Math.floor(docsUsed * maxTopicDfFrac));
+  const keptTopics = [];
+  for (const [t, arr] of topicToDocs.entries()) {
+    if (arr.length <= maxTopicDf) keptTopics.push([t, arr]);
+  }
+
+    // 3) Count overlaps (pair -> shared count)
+  // Use a sparse map “a|b” -> count/weight
+  const pairCounts = new Map();
+  // ─────────────────────────────────────────────────────────────
+  // 2nd channel: author co-authorship links (optional)
+  // ─────────────────────────────────────────────────────────────
+  if (includeAuthors) {
+    const authorToDocs = new Map();
+    let docsWithAuthors = 0;
+
+    for (let i = 0; i < n; i++) {
+      if (hasVis && !visibleMask[i]) continue;
+
+      const raw = getAuthorKeysForNodeIndex(i);
+      if (!raw || !raw.length) continue;
+
+      docsWithAuthors++;
+      const keys = raw.map(normKey).filter(Boolean);
+      const uniq = Array.from(new Set(keys));
+
+      for (const a of uniq) {
+        if (!authorToDocs.has(a)) authorToDocs.set(a, []);
+        authorToDocs.get(a).push(i);
+      }
+    }
+
+    const maxAuthorDf = Math.max(2, Math.floor(docsWithAuthors * maxAuthorDfFrac));
+
+    for (const [, arr] of authorToDocs.entries()) {
+      // prune prolific authors (huge cliques)
+      if (arr.length > maxAuthorDf) continue;
+
+      // add pair counts; treat each shared author as +authorEdgeWeight
+      for (let u = 0; u < arr.length; u++) {
+        const a = arr[u];
+        for (let v = u + 1; v < arr.length; v++) {
+          const b = arr[v];
+          const key = (a < b) ? (a + "|" + b) : (b + "|" + a);
+          pairCounts.set(key, (pairCounts.get(key) || 0) + authorEdgeWeight);
+        }
+      }
+    }
+
+    // record for stats
+    // (safe: topicToDocs exists above; if you renamed it, keep as-is)
+    // We’ll expose these as best-effort
+    // eslint-disable-next-line no-unused-vars
+    var __authorStats = { docsWithAuthors, maxAuthorDf, authorsTotal: authorToDocs.size };
+  }
+
+
+  // 3) Count overlaps (pair -> shared count)
+  // Use a sparse map “a|b” -> count
+  for (const [, arr] of keptTopics) {
+    // all pairs within this topic’s doc list
+    // NOTE: if a topic appears in m docs, this is O(m^2) for that topic,
+    // but we pruned ultra-common topics above.
+    for (let u = 0; u < arr.length; u++) {
+      const a = arr[u];
+      for (let v = u + 1; v < arr.length; v++) {
+        const b = arr[v];
+        const key = (a < b) ? (a + "|" + b) : (b + "|" + a);
+        pairCounts.set(key, (pairCounts.get(key) || 0) + 1);
+      }
+    }
+  }
+
+  // 4) Build weighted edge list (count/weight >= threshold)
+  let rawEdges = [];
+
+  // If authors are included, an edge might exist purely due to authorship weight.
+  // We still respect the topicThreshold as the baseline for topic-only edges.
+  const minW = includeAuthors
+    ? Math.min(topicThreshold, authorEdgeWeight * Math.max(1, authorThreshold))
+    : topicThreshold;
+
+  for (const [key, c] of pairCounts.entries()) {
+    if (c < minW) continue;
+    const [aStr, bStr] = key.split("|");
+    const a = aStr | 0, b = bStr | 0;
+    rawEdges.push({ source: a, target: b, w: c });
+  }
+
+  // 5) Prune per node to topK strongest edges (keeps graph readable)
+  const perNode = Array.from({ length: n }, () => []);
+  for (const e of rawEdges) {
+    perNode[e.source].push(e);
+    perNode[e.target].push(e);
+  }
+
+  const keep = new Set();
+  for (let i = 0; i < n; i++) {
+    if (!perNode[i].length) continue;
+    perNode[i].sort((a,b) => (b.w - a.w) || ((a.source+a.target) - (b.source+b.target)));
+    const slice = perNode[i].slice(0, topKPerNode);
+    for (const e of slice) {
+      const a = Math.min(e.source, e.target);
+      const b = Math.max(e.source, e.target);
+      keep.add(a + "|" + b);
+    }
+  }
+
+  const edges = [];
+  for (const e of rawEdges) {
+    const a = Math.min(e.source, e.target);
+    const b = Math.max(e.source, e.target);
+    if (keep.has(a + "|" + b)) edges.push({ source: a, target: b, w: e.w });
+  }
+
+  const stats = {
+    n,
+    docsUsed,
+    topicsTotal: topicToDocs.size,
+    topicsKept: keptTopics.length,
+    rawEdges: rawEdges.length,
+    edges: edges.length,
+    topicThreshold,
+    topKPerNode,
+    maxTopicDf,
+  };
+
+  console.log("ThematicEdges stats:", stats);
+  return { edges, stats };
+}
+
+function getAuthorKeysForNodeIndex(i) {
+  const it = (typeof itemsData !== 'undefined' && itemsData) ? itemsData[i] : null;
+  const oa = it?.openalex || it?.openAlex || null;
+
+  // Prefer stable OpenAlex author IDs when available
+  if (Array.isArray(oa?.authorships) && oa.authorships.length) {
+    const ids = oa.authorships
+      .map(a => a?.author?.id || a?.author?.display_name)
+      .filter(Boolean)
+      .map(s => String(s).trim());
+    if (ids.length) return Array.from(new Set(ids));
+  }
+
+  // Fallback: flat authors list on item
+  if (Array.isArray(it?.authors) && it.authors.length) {
+    const names = it.authors
+      .map(s => String(s || '').trim())
+      .filter(Boolean);
+    if (names.length) return Array.from(new Set(names));
+  }
+
+  return [];
+}
+
+function normKey(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
 }
