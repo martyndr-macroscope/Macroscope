@@ -5244,6 +5244,44 @@ function createTopControlBar() {
   topBar.style('z-index','9995');
   captureUI(topBar.elt);
 
+
+// Force layout run/stop toggle (does NOT reseed/compact positions)
+if (typeof forceToggleBtn === 'undefined' || !forceToggleBtn) {
+  forceToggleBtn = createButton('Layout: OFF');
+  forceToggleBtn.parent(topBar);
+  forceToggleBtn.style('background','rgba(255,255,255,0.10)');
+  forceToggleBtn.style('border','1px solid rgba(255,255,255,0.25)');
+  forceToggleBtn.style('color','#fff');
+  forceToggleBtn.style('padding','6px 10px');
+  forceToggleBtn.style('border-radius','8px');
+  forceToggleBtn.style('cursor','pointer');
+  forceToggleBtn.style('font-size','12px');
+  forceToggleBtn.style('line-height','1');
+  forceToggleBtn.attribute('title', 'Run / stop force-directed layout');
+  captureUI?.(forceToggleBtn.elt);
+
+  const _syncForceToggleLabel = () => {
+    try {
+      const on = !!layoutRunning;
+      forceToggleBtn.html(on ? 'Layout: ON' : 'Layout: OFF');
+    } catch(_) {}
+  };
+
+  forceToggleBtn.elt.addEventListener('click', (ev) => {
+    ev.stopPropagation();
+    // Never compact/reseed positions when the user toggles physics.
+    // (prepareLayoutFootprint() is guarded by layoutEverStarted)
+    if (!layoutRunning) layoutEverStarted = true;
+    toggleLayout?.();
+    _syncForceToggleLabel();
+  }, { capture: true });
+
+  // keep label updated if other code toggles layout
+  window.__syncForceToggleLabel = _syncForceToggleLabel;
+  _syncForceToggleLabel();
+}
+
+
   // Import JSON icon
   const load = createImg('./Icons/Load_JSON.png', 'Import JSON');
   load.parent(topBar);
@@ -5452,6 +5490,7 @@ function updateLayoutIconState() {
     ctrlIcons.layout.attribute('title', 'Run Force Directed Graph (disabled in Demo mode)');
     return; // ← prevent normal styling from re-applying
   }
+  window.__syncForceToggleLabel?.();
 }
 
 
@@ -10601,249 +10640,298 @@ function nameClustersFromRepresentativeAbstracts(ids, xy, labels, nRep = 6) {
   return names;
 }
 // ─────────────────────────────────────────────────────────────
-// MODE SWITCHERS
+// MODE SWITCHERS (Citation graph ↔ Thematic manifold)
+// - First time entering Thematic manifold, prompt for settings.
+// - Thereafter, switching is a fast toggle that restores the last state
+//   for each view (positions, edges, clusters, labels).
+// - Force layout run/stop is controlled by the separate top-left button.
 // ─────────────────────────────────────────────────────────────
-async function switchToThematicManifoldMode() {
-  if (!nodes?.length) return;
 
-  // stash once
-  if (_stash.nodePos == null) {
-    _stash.nodePos = nodes.map(n => ({ x: n.x, y: n.y }));
-    _stash.clusterOf = (Array.isArray(clusterOf) ? clusterOf.slice() : null);
-    _stash.clusterColors = (Array.isArray(clusterColors) ? clusterColors.slice() : null);
-    _stash.clusterSizesTotal = (Array.isArray(clusterSizesTotal) ? clusterSizesTotal.slice() : null);
-    _stash.lensesShowEdges = !!lenses?.showEdges;
-      // ADD: stash citation graph edges/adj once
-  _stash.edges = Array.isArray(edges) ? edges.slice() : null;
-  _stash.adj   = Array.isArray(adj)   ? adj.map(r => r.slice()) : null;
+// Ensure viewMode exists
+if (typeof viewMode === 'undefined') window.viewMode = 'citation';
+
+// Per-view cache (keeps last positions + graph state)
+const __viewCache = (window.__viewCache ||= {
+  citation: {
+    pos: null,
+    edges: null,
+    clusterOf: null,
+    clusterSizesTotal: null,
+    clusterColors: null,
+    clusterLabels: null,
+    lensesShowEdges: null,
+  },
+  thematic: {
+    pos: null,
+    edges: null,
+    clusterOf: null,
+    clusterSizesTotal: null,
+    clusterColors: null,
+    clusterLabels: null,
+    clusterNames: null,
+    lensesShowEdges: null,
+    settings: null,   // {topicThreshold, topKPerNode, maxTopicDfFrac}
+    builtKey: null
   }
-
-  viewMode = 'thematic';
-
-    // ─────────────────────────────────────────────────────────────
-  // THEME GRAPH MODE: build edges from Invisible University topics
-  // ─────────────────────────────────────────────────────────────
-  const threshold = Math.max(1, Number(prompt('Topic overlap threshold (shared topics to link)?', '1') || 1) | 0);
-  const topK = Math.max(4, Number(prompt('Max thematic links per paper (top-K)?', '24') || 24) | 0);
-  const maxDfFrac = Math.max(0.02, Math.min(0.5, Number(prompt('Ignore ultra-common topics (max DF fraction)?', '0.20') || 0.20)));
-
-  // build thematic edges
-  msg = 'Building thematic links (topics-as-citations)…'; updateInfo?.(); redraw?.();
-
-const built = buildThematicEdgesFromTopics({
-  topicThreshold: threshold,          // your prompt value
-  authorThreshold: 1,
-  includeAuthors: true,
-  authorEdgeWeight: 3,
-  topKPerNode: topK,
-  maxTopicDfFrac: maxDfFrac,
-  maxAuthorDfFrac: 0.03,
-  useVisibleMask: true,
 });
 
-  edges = built.edges || [];
-  buildAdjacency(nodes.length, edges);     // uses your existing adj builder :contentReference[oaicite:11]{index=11}
+function __cloneEdges(es) {
+  if (!Array.isArray(es)) return null;
+  return es.map(e => ({ source: e.source|0, target: e.target|0, weight: e.weight }));
+}
 
-  // clusters (use existing label-propagation over adj) :contentReference[oaicite:12]{index=12}
-  computeDomainClusters?.(60);
+function __snapshotView(mode) {
+  if (!nodes?.length) return;
+  const c = __viewCache[mode];
+  if (!c) return;
 
-  // build cluster labels from representative abstracts (reuses your helper) :contentReference[oaicite:13]{index=13}
-  // We need ids + xy + labels in its format; easiest is to compute centroid in WORLD coords directly.
-  // So we provide a tiny wrapper that works off clusterOf and node positions.
-  if (Array.isArray(clusterOf) && clusterOf.length === nodes.length) {
-    // Assign colours if not already
-    const k = (Array.isArray(clusterSizesTotal) && clusterSizesTotal.length) ? clusterSizesTotal.length : 0;
-    if (!Array.isArray(clusterColors) || !clusterColors.length) {
-      clusterColors = defaultClusterPalette(Math.max(1, k));
-    }
+  c.pos = nodes.map(n => ({ x: n.x, y: n.y }));
+  c.edges = __cloneEdges(edges);
 
-    // crude names: pick docs nearest cluster centroid (in world coords) and extract top terms
-    const ids = [];
-    const xy = [];
-    const labels = [];
-    for (let i = 0; i < nodes.length; i++) {
-      if (Array.isArray(visibleMask) && visibleMask.length === nodes.length && !visibleMask[i]) continue;
-      const c = clusterOf[i];
-      if (c < 0) continue;
-      ids.push(i);
-      xy.push([nodes[i].x, nodes[i].y]);
-      labels.push(c);
-    }
-    // Reuse the same naming function (it only needs xy, ids, labels)
-    const names = nameClustersFromRepresentativeAbstracts(ids, xy, labels, 6);
-    // Store where your label renderer expects it (you already use clusterLabels/clusterNames patterns)
-    thematicState.clusterNames = names;
+  c.clusterOf = Array.isArray(clusterOf) ? clusterOf.slice() : null;
+  c.clusterSizesTotal = Array.isArray(clusterSizesTotal) ? clusterSizesTotal.slice() : null;
+  c.clusterColors = Array.isArray(clusterColors) ? clusterColors.slice() : null;
+  c.clusterLabels = Array.isArray(clusterLabels) ? clusterLabels.slice() : null;
+
+  c.lensesShowEdges = (typeof lenses === 'object' && lenses) ? !!lenses.showEdges : null;
+
+  if (mode === 'thematic') {
+    c.clusterNames = thematicState?.clusterNames ? Object.assign({}, thematicState.clusterNames) : null;
+  }
+}
+
+function __applyClustersFromCache(c) {
+  if (c.clusterOf) clusterOf = c.clusterOf.slice();
+  if (c.clusterSizesTotal) clusterSizesTotal = c.clusterSizesTotal.slice();
+  if (c.clusterColors) clusterColors = c.clusterColors.slice();
+  if (c.clusterLabels) clusterLabels = c.clusterLabels.slice();
+}
+
+function __ensureClusterLabelsForCurrentClusters() {
+  // Prefer your existing label path if it exists.
+  try { computeClusterLabels?.(); } catch(_) {}
+
+  const ok = Array.isArray(clusterLabels) && clusterLabels.length;
+  if (ok) return;
+
+  // Fallback: name clusters from representative abstracts
+  if (!Array.isArray(clusterOf) || clusterOf.length !== nodes.length) return;
+
+  const ids = [];
+  const xy  = [];
+  const lab = [];
+  for (let i = 0; i < nodes.length; i++) {
+    if (Array.isArray(visibleMask) && visibleMask.length === nodes.length && !visibleMask[i]) continue;
+    const c = clusterOf[i];
+    if (!Number.isFinite(c) || c < 0) continue;
+    ids.push(i);
+    xy.push([nodes[i].x, nodes[i].y]);
+    lab.push(c|0);
   }
 
-  // restart force layout with the new thematic edges
-  initForceLayout?.();
-  layoutEverStarted = false;   // re-run footprint compaction once
-  layoutRunning = false;
-  toggleLayout?.();            // same button behaviour as citation graph :contentReference[oaicite:14]{index=14}
+  const names = nameClustersFromRepresentativeAbstracts?.(ids, xy, lab, 6) || {};
+  const k = (Array.isArray(clusterSizesTotal) ? clusterSizesTotal.length : 0) || (Math.max(-1, ...lab) + 1);
+  clusterLabels = new Array(Math.max(0, k)).fill('').map((_, cid) => names[cid] || `Theme ${cid+1}`);
+}
+
+function __applyView(mode) {
+  if (!nodes?.length) return;
+  const c = __viewCache[mode];
+  if (!c) return;
+
+  // Positions
+  if (c.pos?.length === nodes.length) {
+    for (let i = 0; i < nodes.length; i++) {
+      nodes[i].x = c.pos[i].x;
+      nodes[i].y = c.pos[i].y;
+    }
+  }
+
+  // Graph edges + adjacency
+  if (Array.isArray(c.edges)) {
+    edges = __cloneEdges(c.edges) || [];
+    buildAdjacency?.(nodes.length, edges);
+  }
+
+  __applyClustersFromCache(c);
+
+  // Lens edges toggle (keeps visual edge display consistent per view)
+  if (typeof lenses === 'object' && lenses && c.lensesShowEdges != null) {
+    lenses.showEdges = !!c.lensesShowEdges;
+  }
+
+  // If thematic, restore thematic cluster names for label overlay if used
+  if (mode === 'thematic' && c.clusterNames) {
+    thematicState = thematicState || {};
+    thematicState.clusterNames = Object.assign({}, c.clusterNames);
+  }
+
+  buildDimensionsIndex?.();
+  updateDimSections?.();
+  initClusterFilterUI?.();
+
+  adjustWorldToContent?.(160);
+  fitContentInView?.(40);
+  recomputeVisibility?.();
+  redraw?.();
+}
+
+function __thematicSettingsPrompt() {
+  const thr = Math.max(1, Number(prompt('Topic overlap threshold (shared topics to link)?', '1') || 1) | 0);
+  const topK = Math.max(4, Number(prompt('Max thematic links per paper (top-K)?', '24') || 24) | 0);
+  const maxDfFrac = Math.max(0.02, Math.min(0.5, Number(prompt('Ignore ultra-common topics (max DF fraction)?', '0.20') || 0.20)));
+  return { topicThreshold: thr, topKPerNode: topK, maxTopicDfFrac: maxDfFrac };
+}
+
+function __makeThematicBuildKey(settings) {
+  const base = (typeof makeInstitutionCacheKey === 'function') ? makeInstitutionCacheKey() : String(nodes?.length || 0);
+  return `${base}|themeEdges|thr:${settings.topicThreshold}|topK:${settings.topKPerNode}|df:${settings.maxTopicDfFrac}`;
+}
+
+function __buildThematicGraphIfNeeded({ forcePrompt = false } = {}) {
+  if (!nodes?.length) return;
+
+  const tc = __viewCache.thematic;
+
+  if (!tc.settings || forcePrompt) {
+    tc.settings = __thematicSettingsPrompt();
+  }
+
+  const key = __makeThematicBuildKey(tc.settings);
+  const already = (tc.builtKey === key) && Array.isArray(tc.edges) && tc.edges.length;
+
+  if (already) return;
+
+  msg = 'Building thematic links (topics-as-citations)…'; updateInfo?.(); redraw?.();
+
+  const built = buildThematicEdgesFromTopics?.({
+    topicThreshold: tc.settings.topicThreshold,
+    authorThreshold: 1,
+    includeAuthors: true,
+    authorEdgeWeight: 3,
+    topKPerNode: tc.settings.topKPerNode,
+    maxTopicDfFrac: tc.settings.maxTopicDfFrac,
+    maxAuthorDfFrac: 0.03,
+    useVisibleMask: true,
+  }) || { edges: [] };
+
+  // Apply into globals so cluster computation reads the right graph
+  edges = built.edges || [];
+  buildAdjacency?.(nodes.length, edges);
+
+  // Cluster on thematic edges (re-using your existing cluster function)
+  computeDomainClusters?.(60);
+
+  // Ensure a stable palette
+  const k = (Array.isArray(clusterSizesTotal) && clusterSizesTotal.length) ? clusterSizesTotal.length : 0;
+  if ((!Array.isArray(clusterColors) || !clusterColors.length) && typeof defaultClusterPalette === 'function') {
+    clusterColors = defaultClusterPalette(Math.max(1, k)) || clusterColors;
+  }
+
+  // Thematic cluster names derived from abstracts (local)
+  __ensureClusterLabelsForCurrentClusters();
+  const namesObj = Object.create(null);
+  if (Array.isArray(clusterLabels)) {
+    for (let i = 0; i < clusterLabels.length; i++) namesObj[i] = clusterLabels[i];
+  }
+  thematicState = thematicState || {};
+  thematicState.clusterNames = namesObj;
+
+  // Snapshot into cache
+  tc.builtKey = key;
+  tc.edges = __cloneEdges(edges);
+  tc.clusterOf = Array.isArray(clusterOf) ? clusterOf.slice() : null;
+  tc.clusterSizesTotal = Array.isArray(clusterSizesTotal) ? clusterSizesTotal.slice() : null;
+  tc.clusterColors = Array.isArray(clusterColors) ? clusterColors.slice() : null;
+  tc.clusterLabels = Array.isArray(clusterLabels) ? clusterLabels.slice() : null;
+  tc.clusterNames = thematicState.clusterNames ? Object.assign({}, thematicState.clusterNames) : null;
+  tc.lensesShowEdges = (typeof lenses === 'object' && lenses) ? !!lenses.showEdges : null;
 
   msg = `Thematic manifold: ${nodes.length} docs, ${edges.length} thematic links.`;
   updateInfo?.();
   redraw?.();
-  return;
-
-  // Turn off force layout / edges emphasis (optional)
-  try { layoutRunning = false; } catch(_) {}
-  if (lenses) lenses.showEdges = false;
-
-  const nRep = Math.max(2, Number(prompt('Representative abstracts per cluster label?', '6') || 6) | 0);
-  const minCluster = Math.max(5, Number(prompt('HDBSCAN min cluster size?', '12') || 12) | 0);
-
-  await ensureThematicDeps();
-
-  const cacheKey = makeInstitutionCacheKey();
-  if (thematicState.computedForKey !== cacheKey) {
-    msg = 'Building thematic manifold…'; updateInfo?.(); redraw?.();
-
-    // corpus = visible nodes with some text
-    const ids = [];
-    const texts = [];
-const hasVisibleMask = Array.isArray(visibleMask) && visibleMask.length === nodes.length;
-
-for (let i=0;i<nodes.length;i++){
-  // Prefer visibleMask if available; otherwise include all nodes
-  if (hasVisibleMask && !visibleMask[i]) continue;
-
-  const t = getNodeTextForTheme(nodes[i]);
-  if (!t) continue;
-
-  ids.push(i);
-  texts.push(t);
-
-  if (ids.length >= 20000) break; // safety cap
 }
 
-if (ids.length < 30) {
-  console.warn('Thematic manifold: not enough documents with text to embed. ids.length=', ids.length);
-  msg = `Thematic manifold needs more text-bearing docs (found ${ids.length}).`;
-  updateInfo?.();
-  return;
+// Public entry points used by the View/Layout menu
+async function switchToThematicManifoldMode() {
+  if (!nodes?.length) return;
+
+  // save current view state first
+  __snapshotView(viewMode || 'citation');
+
+  // build thematic graph (prompts only the first time per dataset/settings)
+  __buildThematicGraphIfNeeded({ forcePrompt: !__viewCache.thematic.settings });
+
+  // move into thematic mode
+  viewMode = 'thematic';
+
+  // If this is the first time and there is no saved thematic pos, keep current positions
+  // and let the user run the layout from the separate toggle button.
+  if (!__viewCache.thematic.pos) {
+    __viewCache.thematic.pos = nodes.map(n => ({ x: n.x, y: n.y }));
+  }
+
+  __applyView('thematic');
 }
-console.log('Thematic manifold: sample text =', texts[0]?.slice(0,180));
-const { X } = buildTfidfVectors(texts, { vocabMax: 900, minDf: 2, maxDfFrac: 0.6 });
 
-// 1) Reduce TF–IDF space (C)
-let Z = reduceWithRandomizedSVD(X, 80, 20, 1);   // (k=80, oversample=20, 1 power iter)
-Z = l2NormalizeMatrix(Z);
+function __ensureCitationCacheInitialised() {
+  const cc = __viewCache.citation;
+  if (cc.edges && cc.pos) return;
 
-// 2) Cluster in high-D space (A) using your existing k-means style clustering
-// NOTE: this function is already in your codebase for Invisible University :contentReference[oaicite:1]{index=1}
-const labels0 = clusterInvisibleUniBySimilarity(Z, minCluster);
-
-// 3) 2D layout for display only
-const xy = safeUMAP2D(Z);
-
-    // Normalize xy (so it fits your world coords nicely)
-    let minX=Infinity, minY=Infinity, maxX=-Infinity, maxY=-Infinity;
-    for (const p of xy){ if (p[0]<minX) minX=p[0]; if (p[0]>maxX) maxX=p[0]; if (p[1]<minY) minY=p[1]; if (p[1]>maxY) maxY=p[1]; }
-    const w = Math.max(1e-9, maxX-minX), h = Math.max(1e-9, maxY-minY);
-
-    // map into world space with padding
-    const pad = 140;
-    const targetW = Math.max(world?.w || 2000, 2400);
-    const targetH = Math.max(world?.h || 2000, 2400);
-
-    const xyWorld = xy.map(p => ([
-      pad + ((p[0]-minX)/w) * (targetW - pad*2),
-      pad + ((p[1]-minY)/h) * (targetH - pad*2)
-    ]));
-
-    const { denseLabels, denseSizes } = buildClusterSizes(labels0);
-    const K = denseSizes.length;
-
-    // Build global-per-node clusterOf
-    const cOf = new Array(nodes.length).fill(-1);
-    for (let r=0;r<ids.length;r++){
-      cOf[ids[r]] = denseLabels[r];
+  // Prefer original citation edges, if available
+  let citationEdges = null;
+  try {
+    if (typeof _stash === 'object' && _stash && Array.isArray(_stash.edges) && _stash.edges.length) {
+      citationEdges = __cloneEdges(_stash.edges);
     }
+  } catch(_) {}
 
-    const cols = defaultClusterPalette(Math.max(1,K));
-    const names = nameClustersFromRepresentativeAbstracts(ids, xy, denseLabels, nRep);
-
-    thematicState = {
-      computedForKey: cacheKey,
-      ids,
-      vectors: null,
-      xy: xyWorld,
-      labels: denseLabels,
-      probs: null,
-      clusterOf: cOf,
-      clusterSizesTotal: denseSizes,
-      clusterColors: cols,
-      clusterNames: names
-    };
-    // Make thematic clusters visible to the existing UI/overlays
-clusterCount = Math.max(0, K);
-clusterLabels = new Array(clusterCount).fill('').map((_, cid) => {
-  return (thematicState.clusterNames && thematicState.clusterNames[cid]) ? thematicState.clusterNames[cid] : `Theme ${cid+1}`;
-});
-
-// Ensure sizes/colours are consistent
-clusterSizesTotal = thematicState.clusterSizesTotal;
-clusterColors     = thematicState.clusterColors;
-clusterOf         = thematicState.clusterOf;
-
-// Rebuild cluster dimension index (so “Dimensions → Clusters” works)
-buildDimensionsIndex?.();
-updateDimSections?.();
-initClusterFilterUI?.();
-
-    msg = `Thematic manifold: ${ids.length} docs, ${K} themes`; updateInfo?.();
+  // Otherwise rebuild from cites_internal on itemsData if possible
+  if (!citationEdges) {
+    try {
+      if (typeof buildEdgesFromItems === 'function' && Array.isArray(itemsData) && itemsData.length === nodes.length) {
+        citationEdges = buildEdgesFromItems(itemsData);
+      }
+    } catch(_) {}
   }
 
-  // Apply positions
-  const ids = thematicState.ids;
-  const xyW = thematicState.xy;
-  for (let r=0;r<ids.length;r++){
-    const i = ids[r];
-    nodes[i].x = xyW[r][0];
-    nodes[i].y = xyW[r][1];
-  }
+  // Final fallback: use whatever is currently in edges
+  if (!citationEdges) citationEdges = __cloneEdges(edges) || [];
 
-  // Swap cluster arrays so your existing node colouring path just works
-  clusterOf = thematicState.clusterOf;
-  clusterSizesTotal = thematicState.clusterSizesTotal;
-  clusterColors = thematicState.clusterColors;
+  cc.pos = nodes.map(n => ({ x: n.x, y: n.y }));
+  cc.edges = __cloneEdges(citationEdges);
 
-  // Make it visible even if slider is low
-  try { ovClusterColors = Math.max(ovClusterColors, 0.85); } catch(_) {}
+  // Compute citation clusters/labels once, now, so the citation view is always coherent
+  edges = __cloneEdges(citationEdges) || [];
+  buildAdjacency?.(nodes.length, edges);
+  computeDomainClusters?.(60);
+  __ensureClusterLabelsForCurrentClusters();
 
-  adjustWorldToContent?.(160);
-  fitContentInView?.(40);
-  recomputeVisibility?.();
-  redraw?.();
+  cc.clusterOf = Array.isArray(clusterOf) ? clusterOf.slice() : null;
+  cc.clusterSizesTotal = Array.isArray(clusterSizesTotal) ? clusterSizesTotal.slice() : null;
+  cc.clusterColors = Array.isArray(clusterColors) ? clusterColors.slice() : null;
+  cc.clusterLabels = Array.isArray(clusterLabels) ? clusterLabels.slice() : null;
+  cc.lensesShowEdges = (typeof lenses === 'object' && lenses) ? !!lenses.showEdges : null;
 }
 
 function switchToCitationGraphMode() {
+  if (!nodes?.length) return;
+
+  // save current view state first
+  __snapshotView(viewMode || 'thematic');
+
+  __ensureCitationCacheInitialised();
+
   viewMode = 'citation';
 
-  // Restore positions (if we have them)
-  if (_stash.nodePos?.length === nodes.length) {
-    for (let i=0;i<nodes.length;i++){
-      nodes[i].x = _stash.nodePos[i].x;
-      nodes[i].y = _stash.nodePos[i].y;
-    }
-  }
+  // Restore citation graph state
+  __applyView('citation');
 
-  // Restore cluster arrays
-  if (_stash.clusterOf) clusterOf = _stash.clusterOf;
-  if (_stash.clusterSizesTotal) clusterSizesTotal = _stash.clusterSizesTotal;
-  if (_stash.clusterColors) clusterColors = _stash.clusterColors;
+  // Ensure citation clusters have labels
+  __ensureClusterLabelsForCurrentClusters();
 
-  // Restore lens edges toggle
-  if (lenses) lenses.showEdges = !!_stash.lensesShowEdges;
-
-  // Optionally re-run the force layout if you want it to “snap back”
-  // toggleLayout?.();
-
-  adjustWorldToContent?.(160);
-  fitContentInView?.(40);
-  recomputeVisibility?.();
-  redraw?.();
+  // re-snapshot citation after any label fill-in
+  __snapshotView('citation');
 }
 
 
@@ -19242,12 +19330,12 @@ function attachViewMenuToLayoutIcon(btn) {
     }
 
     // Items
-    addItem('Citation graph (force layout)', () => {
-      // existing behaviour
-      toggleLayout?.();
+    // Items
+    addItem('Citation graph view', () => {
+      switchToCitationGraphMode?.();
     });
 
-    addItem('Show thematic manifold', () => {
+    addItem('Thematic manifold view', () => {
       switchToThematicManifoldMode?.();
     });
 
