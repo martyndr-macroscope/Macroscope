@@ -10825,12 +10825,28 @@ function __thematicSettingsPrompt() {
   const thr = Math.max(1, Number(prompt('Topic overlap threshold (shared topics to link)?', '1') || 1) | 0);
   const topK = Math.max(4, Number(prompt('Max thematic links per paper (top-K)?', '24') || 24) | 0);
   const maxDfFrac = Math.max(0.02, Math.min(0.5, Number(prompt('Ignore ultra-common topics (max DF fraction)?', '0.20') || 0.20)));
-  return { topicThreshold: thr, topKPerNode: topK, maxTopicDfFrac: maxDfFrac };
+
+  const incAuth = String(prompt('Include author boost? (y/n)', 'y') || 'y').trim().toLowerCase().startsWith('y');
+  const allowAuthOnly = incAuth
+    ? String(prompt('Allow author-only links (ignore topic threshold)? (y/n)', 'n') || 'n').trim().toLowerCase().startsWith('y')
+    : false;
+
+  const authThr = incAuth ? Math.max(1, Number(prompt('Author overlap threshold (shared authors)?', '1') || 1) | 0) : 1;
+
+  return {
+    topicThreshold: thr,
+    topKPerNode: topK,
+    maxTopicDfFrac: maxDfFrac,
+    includeAuthors: incAuth,
+    allowAuthorOnlyLinks: allowAuthOnly,
+    authorThreshold: authThr
+  };
 }
 
 function __makeThematicBuildKey(settings) {
   const base = (typeof makeInstitutionCacheKey === 'function') ? makeInstitutionCacheKey() : String(nodes?.length || 0);
-  return `${base}|themeEdges|thr:${settings.topicThreshold}|topK:${settings.topKPerNode}|df:${settings.maxTopicDfFrac}`;
+  return `${base}|themeEdges|thr:${settings.topicThreshold}|topK:${settings.topKPerNode}|df:${settings.maxTopicDfFrac}`
+       + `|incAuth:${settings.includeAuthors?1:0}|authOnly:${settings.allowAuthorOnlyLinks?1:0}|authThr:${settings.authorThreshold||1}`;
 }
 
 function __buildThematicGraphIfNeeded({ forcePrompt = false } = {}) {
@@ -10849,16 +10865,19 @@ function __buildThematicGraphIfNeeded({ forcePrompt = false } = {}) {
 
   msg = 'Building thematic links (topics-as-citations)…'; updateInfo?.(); redraw?.();
 
-  const built = buildThematicEdgesFromTopics?.({
-    topicThreshold: tc.settings.topicThreshold,
-    authorThreshold: 1,
-    includeAuthors: true,
-    authorEdgeWeight: 3,
-    topKPerNode: tc.settings.topKPerNode,
-    maxTopicDfFrac: tc.settings.maxTopicDfFrac,
-    maxAuthorDfFrac: 0.03,
-    useVisibleMask: true,
-  }) || { edges: [] };
+const built = buildThematicEdgesFromTopics?.({
+  topicThreshold: tc.settings.topicThreshold,
+  topKPerNode: tc.settings.topKPerNode,
+  maxTopicDfFrac: tc.settings.maxTopicDfFrac,
+
+  includeAuthors: !!tc.settings.includeAuthors,
+  allowAuthorOnlyLinks: !!tc.settings.allowAuthorOnlyLinks,
+  authorThreshold: tc.settings.authorThreshold || 1,
+
+  authorEdgeWeight: 3,
+  maxAuthorDfFrac: 0.03,
+  useVisibleMask: true,
+}) || { edges: [] };
 
   // Apply into globals so cluster computation reads the right graph
   edges = built.edges || [];
@@ -19799,15 +19818,17 @@ function normTopic(s) {
 }
 
 function buildThematicEdgesFromTopics({
-  topicThreshold = 1,          // shared topics needed
-  authorThreshold = 1,         // shared authors needed (usually 1)
-  topKPerNode = 24,            // prune: keep only topK edges per node
-  maxTopicDfFrac = 0.20,        // ignore ultra-common topics
-  maxAuthorDfFrac = 0.03,       // ignore ultra-common authors (prolific) to avoid hairballs
-  authorEdgeWeight = 3,         // authorship edges get a boost vs topic edges
+  topicThreshold = 1,
+  authorThreshold = 1,
+  topKPerNode = 24,
+  maxTopicDfFrac = 0.20,
+  maxAuthorDfFrac = 0.03,
+  authorEdgeWeight = 3,
   useVisibleMask = true,
   includeAuthors = true,
+  allowAuthorOnlyLinks = false,   // ✅ NEW: if false, authors only BOOST existing topic edges
 } = {}) {
+
   const n = nodes?.length || 0;
   if (!n) return { edges: [], stats: { n: 0 } };
 
@@ -19925,11 +19946,14 @@ function buildThematicEdgesFromTopics({
     const t = rec?.t || 0; // shared topics
     const a = rec?.a || 0; // shared authors
 
-    // Include if it meets topic overlap threshold OR author overlap threshold
-    const topicOk  = (t >= topicThreshold);
-    const authorOk = (includeAuthors && a >= Math.max(1, authorThreshold));
+    // ✅ Topic threshold is the primary gate.
+// Authors can either:
+// - BOOST weight on topic edges (default)
+// - OR create author-only edges if allowAuthorOnlyLinks=true
+const topicOk  = (t >= topicThreshold);
+const authorOk = (includeAuthors && a >= Math.max(1, authorThreshold));
 
-    if (!topicOk && !authorOk) continue;
+if (!topicOk && !(allowAuthorOnlyLinks && authorOk)) continue;
 
     const [aStr, bStr] = key.split("|");
     const u = aStr | 0, v = bStr | 0;
@@ -19955,7 +19979,7 @@ function buildThematicEdgesFromTopics({
   const keep = new Set();
   for (let i = 0; i < n; i++) {
     if (!perNode[i].length) continue;
-    perNode[i].sort((a,b) => (b.w - a.w) || ((a.source+a.target) - (b.source+b.target)));
+    perNode[i].sort((a,b) => (b.weight - a.weight) || ((a.source+a.target) - (b.source+b.target)));
     const slice = perNode[i].slice(0, topKPerNode);
     for (const e of slice) {
       const a = Math.min(e.source, e.target);
