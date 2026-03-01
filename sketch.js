@@ -19847,8 +19847,8 @@ function buildThematicEdgesFromTopics({
     if (arr.length <= maxTopicDf) keptTopics.push([t, arr]);
   }
 
-    // 3) Count overlaps (pair -> shared count)
-  // Use a sparse map “a|b” -> count/weight
+  // 3) Count overlaps (pair -> {t: shared topics, a: shared authors})
+  // Use a sparse map “a|b” -> { t: number, a: number }
   const pairCounts = new Map();
   // ─────────────────────────────────────────────────────────────
   // 2nd channel: author co-authorship links (optional)
@@ -19885,7 +19885,9 @@ function buildThematicEdgesFromTopics({
         for (let v = u + 1; v < arr.length; v++) {
           const b = arr[v];
           const key = (a < b) ? (a + "|" + b) : (b + "|" + a);
-          pairCounts.set(key, (pairCounts.get(key) || 0) + authorEdgeWeight);
+          const rec = pairCounts.get(key) || { t: 0, a: 0 };
+          rec.a += 1; // count shared authors (not weighted yet)
+          pairCounts.set(key, rec);
         }
       }
     }
@@ -19909,25 +19911,38 @@ function buildThematicEdgesFromTopics({
       for (let v = u + 1; v < arr.length; v++) {
         const b = arr[v];
         const key = (a < b) ? (a + "|" + b) : (b + "|" + a);
-        pairCounts.set(key, (pairCounts.get(key) || 0) + 1);
+        const rec = pairCounts.get(key) || { t: 0, a: 0 };
+        rec.t += 1; // count shared topics
+        pairCounts.set(key, rec);
       }
     }
   }
 
   // 4) Build weighted edge list (count/weight >= threshold)
-  let rawEdges = [];
+    const rawEdges = [];
 
-  // If authors are included, an edge might exist purely due to authorship weight.
-  // We still respect the topicThreshold as the baseline for topic-only edges.
-  const minW = includeAuthors
-    ? Math.min(topicThreshold, authorEdgeWeight * Math.max(1, authorThreshold))
-    : topicThreshold;
+  for (const [key, rec] of pairCounts.entries()) {
+    const t = rec?.t || 0; // shared topics
+    const a = rec?.a || 0; // shared authors
 
-  for (const [key, c] of pairCounts.entries()) {
-    if (c < minW) continue;
+    // Include if it meets topic overlap threshold OR author overlap threshold
+    const topicOk  = (t >= topicThreshold);
+    const authorOk = (includeAuthors && a >= Math.max(1, authorThreshold));
+
+    if (!topicOk && !authorOk) continue;
+
     const [aStr, bStr] = key.split("|");
-    const a = aStr | 0, b = bStr | 0;
-    rawEdges.push({ source: a, target: b, w: c });
+    const u = aStr | 0, v = bStr | 0;
+
+    const w = t + (includeAuthors ? (authorEdgeWeight * a) : 0);
+
+    rawEdges.push({
+      source: u,
+      target: v,
+      weight: w,
+      topicCount: t,
+      authorCount: a
+    });
   }
 
   // 5) Prune per node to topK strongest edges (keeps graph readable)
