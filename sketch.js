@@ -19818,15 +19818,15 @@ function normTopic(s) {
 }
 
 function buildThematicEdgesFromTopics({
-  topicThreshold = 1,
-  authorThreshold = 1,
-  topKPerNode = 24,
-  maxTopicDfFrac = 0.20,
-  maxAuthorDfFrac = 0.03,
-  authorEdgeWeight = 3,
+  topicThreshold = 1,          // shared topics needed
+  authorThreshold = 1,         // shared authors needed (usually 1)
+  topKPerNode = 24,            // prune: keep only topK edges per node
+  maxTopicDfFrac = 0.20,       // ignore ultra-common topics
+  maxAuthorDfFrac = 0.03,      // ignore ultra-common authors (prolific) to avoid hairballs
+  authorEdgeWeight = 3,        // authorship boost added to topic edges
   useVisibleMask = true,
   includeAuthors = true,
-  allowAuthorOnlyLinks = false,   // ✅ NEW: if false, authors only BOOST existing topic edges
+  allowAuthorOnlyLinks = false // ✅ if true, authors can create edges even with 0 topic overlap
 } = {}) {
 
   const n = nodes?.length || 0;
@@ -19836,24 +19836,21 @@ function buildThematicEdgesFromTopics({
 
   // 1) Build topic -> doc list
   const topicToDocs = new Map();
-  const docTopics = new Array(n);
-
   let docsUsed = 0;
 
   for (let i = 0; i < n; i++) {
-    if (hasVis && !visibleMask[i]) { docTopics[i] = null; continue; }
+    if (hasVis && !visibleMask[i]) continue;
 
     const raw = getTopicsForNodeIndex(i);
-    const topics = raw
+    const topics = (raw || [])
       .map(normTopic)
       .filter(t => t && t.length >= 3);
 
-    if (!topics.length) { docTopics[i] = null; continue; }
+    if (!topics.length) continue;
+    docsUsed++;
 
     // de-dup within doc
     const uniq = Array.from(new Set(topics));
-    docTopics[i] = uniq;
-    docsUsed++;
 
     for (const t of uniq) {
       if (!topicToDocs.has(t)) topicToDocs.set(t, []);
@@ -19868,15 +19865,28 @@ function buildThematicEdgesFromTopics({
     if (arr.length <= maxTopicDf) keptTopics.push([t, arr]);
   }
 
-  // 3) Count overlaps (pair -> {t: shared topics, a: shared authors})
-  // Use a sparse map “a|b” -> { t: number, a: number }
-  const pairCounts = new Map();
-  // ─────────────────────────────────────────────────────────────
-  // 2nd channel: author co-authorship links (optional)
-  // ─────────────────────────────────────────────────────────────
+  // 3) Count TOPIC overlaps only: pair -> topicCount
+  const topicPairCounts = new Map();
+
+  for (const [, arr] of keptTopics) {
+    for (let u = 0; u < arr.length; u++) {
+      const a = arr[u];
+      for (let v = u + 1; v < arr.length; v++) {
+        const b = arr[v];
+        const key = (a < b) ? (a + "|" + b) : (b + "|" + a);
+        topicPairCounts.set(key, (topicPairCounts.get(key) || 0) + 1);
+      }
+    }
+  }
+
+  // 4) Count AUTHOR overlaps separately: pair -> authorCount (unweighted)
+  const authorPairCounts = new Map();
+  let docsWithAuthors = 0;
+  let authorsTotal = 0;
+  let maxAuthorDf = 0;
+
   if (includeAuthors) {
     const authorToDocs = new Map();
-    let docsWithAuthors = 0;
 
     for (let i = 0; i < n; i++) {
       if (hasVis && !visibleMask[i]) continue;
@@ -19894,82 +19904,67 @@ function buildThematicEdgesFromTopics({
       }
     }
 
-    const maxAuthorDf = Math.max(2, Math.floor(docsWithAuthors * maxAuthorDfFrac));
+    authorsTotal = authorToDocs.size;
+    maxAuthorDf = Math.max(2, Math.floor(docsWithAuthors * maxAuthorDfFrac));
 
     for (const [, arr] of authorToDocs.entries()) {
-      // prune prolific authors (huge cliques)
-      if (arr.length > maxAuthorDf) continue;
+      if (arr.length > maxAuthorDf) continue; // prune prolific authors
 
-      // add pair counts; treat each shared author as +authorEdgeWeight
       for (let u = 0; u < arr.length; u++) {
         const a = arr[u];
         for (let v = u + 1; v < arr.length; v++) {
           const b = arr[v];
           const key = (a < b) ? (a + "|" + b) : (b + "|" + a);
-          const rec = pairCounts.get(key) || { t: 0, a: 0 };
-          rec.a += 1; // count shared authors (not weighted yet)
-          pairCounts.set(key, rec);
+          authorPairCounts.set(key, (authorPairCounts.get(key) || 0) + 1);
         }
       }
     }
-
-    // record for stats
-    // (safe: topicToDocs exists above; if you renamed it, keep as-is)
-    // We’ll expose these as best-effort
-    // eslint-disable-next-line no-unused-vars
-    var __authorStats = { docsWithAuthors, maxAuthorDf, authorsTotal: authorToDocs.size };
   }
 
+  // 5) Build rawEdges:
+  //    - Primary gate: topicThreshold (so changing it matters)
+  //    - Authors boost weights on edges that already pass topicThreshold
+  //    - Optional: allow author-only links to create edges even when topic overlap is 0
+  const rawEdges = [];
+  const authorThr = Math.max(1, authorThreshold|0);
 
-  // 3) Count overlaps (pair -> shared count)
-  // Use a sparse map “a|b” -> count
-  for (const [, arr] of keptTopics) {
-    // all pairs within this topic’s doc list
-    // NOTE: if a topic appears in m docs, this is O(m^2) for that topic,
-    // but we pruned ultra-common topics above.
-    for (let u = 0; u < arr.length; u++) {
-      const a = arr[u];
-      for (let v = u + 1; v < arr.length; v++) {
-        const b = arr[v];
-        const key = (a < b) ? (a + "|" + b) : (b + "|" + a);
-        const rec = pairCounts.get(key) || { t: 0, a: 0 };
-        rec.t += 1; // count shared topics
-        pairCounts.set(key, rec);
-      }
-    }
-  }
+  // Start from topic pairs (the main set)
+  for (const [key, tCount] of topicPairCounts.entries()) {
+    if (tCount < topicThreshold) continue;
 
-  // 4) Build weighted edge list (count/weight >= threshold)
-    const rawEdges = [];
-
-  for (const [key, rec] of pairCounts.entries()) {
-    const t = rec?.t || 0; // shared topics
-    const a = rec?.a || 0; // shared authors
-
-    // ✅ Topic threshold is the primary gate.
-// Authors can either:
-// - BOOST weight on topic edges (default)
-// - OR create author-only edges if allowAuthorOnlyLinks=true
-const topicOk  = (t >= topicThreshold);
-const authorOk = (includeAuthors && a >= Math.max(1, authorThreshold));
-
-if (!topicOk && !(allowAuthorOnlyLinks && authorOk)) continue;
-
+    const aCount = includeAuthors ? (authorPairCounts.get(key) || 0) : 0;
     const [aStr, bStr] = key.split("|");
-    const u = aStr | 0, v = bStr | 0;
-
-    const w = t + (includeAuthors ? (authorEdgeWeight * a) : 0);
+    const a = aStr|0, b = bStr|0;
 
     rawEdges.push({
-      source: u,
-      target: v,
-      weight: w,
-      topicCount: t,
-      authorCount: a
+      source: a,
+      target: b,
+      w: tCount + (includeAuthors ? (authorEdgeWeight * aCount) : 0),
+      t: tCount,
+      a: aCount
     });
   }
 
-  // 5) Prune per node to topK strongest edges (keeps graph readable)
+  // Optional: add author-only edges (if desired)
+  if (includeAuthors && allowAuthorOnlyLinks) {
+    for (const [key, aCount] of authorPairCounts.entries()) {
+      if (aCount < authorThr) continue;
+      if (topicPairCounts.has(key) && (topicPairCounts.get(key) >= topicThreshold)) continue; // already included above
+
+      const [aStr, bStr] = key.split("|");
+      const a = aStr|0, b = bStr|0;
+
+      rawEdges.push({
+        source: a,
+        target: b,
+        w: (authorEdgeWeight * aCount),
+        t: 0,
+        a: aCount
+      });
+    }
+  }
+
+  // 6) Prune per node to topK strongest edges
   const perNode = Array.from({ length: n }, () => []);
   for (const e of rawEdges) {
     perNode[e.source].push(e);
@@ -19979,7 +19974,7 @@ if (!topicOk && !(allowAuthorOnlyLinks && authorOk)) continue;
   const keep = new Set();
   for (let i = 0; i < n; i++) {
     if (!perNode[i].length) continue;
-    perNode[i].sort((a,b) => (b.weight - a.weight) || ((a.source+a.target) - (b.source+b.target)));
+    perNode[i].sort((a,b) => (b.w - a.w) || ((a.source+a.target) - (b.source+b.target)));
     const slice = perNode[i].slice(0, topKPerNode);
     for (const e of slice) {
       const a = Math.min(e.source, e.target);
@@ -20000,11 +19995,18 @@ if (!topicOk && !(allowAuthorOnlyLinks && authorOk)) continue;
     docsUsed,
     topicsTotal: topicToDocs.size,
     topicsKept: keptTopics.length,
+    topicPairKeys: topicPairCounts.size,
+    authorPairKeys: authorPairCounts.size,
     rawEdges: rawEdges.length,
     edges: edges.length,
     topicThreshold,
     topKPerNode,
     maxTopicDf,
+    includeAuthors,
+    allowAuthorOnlyLinks,
+    docsWithAuthors,
+    authorsTotal,
+    maxAuthorDf
   };
 
   console.log("ThematicEdges stats:", stats);
