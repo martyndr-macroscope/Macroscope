@@ -7538,7 +7538,10 @@ Scoring anchors (IMPORTANT):
 - 55–74: solid/competent but not exceptional
 - 35–54: limited (incremental, narrow, or weakly evidenced)
 - 0–34: poor/very weak or insufficient evidence in provided text
-
+Return scores as integers from 0–100.
+DO NOT round to multiples of 5 or 10.
+Use the full range; prefer precise distinctions (e.g., 63 vs 67 vs 71) where justified.
+If you notice you are choosing a multiple of 5, reconsider and choose a more precise integer unless it is exactly warranted.
 Be willing to use the full range. Many competent but incremental papers should land in 55–70.
 
 Return ONLY valid JSON:
@@ -7782,7 +7785,7 @@ async function runREFLens() {
 
       const msg = buildREFPrompt(d, uoaListText);
       raw = await openaiChatDirect(msg, {
-        temperature: 0.1,
+        temperature: 0.35,
         max_tokens: MAX_TOKENS,
         retries: 2,            // don’t spiral
         throttleMs: 0,         // we’ll pace explicitly below
