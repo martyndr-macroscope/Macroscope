@@ -4730,14 +4730,12 @@ function updateDimSections() {
   dimSectionsWrap.html('');  // clear only the lists area
   dimSections = {};
 
-  const clusterSectionTitle = (window.viewMode === 'thematic') ? 'Themes' : 'Clusters';
-
   const sections = [
     ['Authors',      'authors',      dimsIndex.authors],
     ['Venues',       'venues',       dimsIndex.venues],
     ['Concepts',     'concepts',     dimsIndex.concepts],
     ['Institutions', 'institutions', dimsIndex.institutions],
-    [clusterSectionTitle, 'clusters', dimsIndex.clusters],
+    ['Clusters',     'clusters',     dimsIndex.clusters],
   ];
 
   // Tokenize the query (AND match)
@@ -7424,25 +7422,6 @@ if (totalSize < minForAI) {
   const finalReaderText = outEl?.innerText || finalMarkdownString || '';
 addAIFootprintFromItems('reader', _footprintItems, finalReaderText, 'Reader extract');
   updateInfo(); redraw();
-
-  // Persist labels to the active view (citation vs thematic)
-  try { __saveCurrentClustersToCache?.(); } catch (e) { console.warn(e); }
-
-  // If we're in thematic mode, keep thematicState.clusterNames coherent too
-  try {
-    if (window.viewMode === 'thematic') {
-      if (!window.thematicState) window.thematicState = {};
-      // clusterLabels is the thing the renderer uses; keep clusterNames in step if you rely on it elsewhere
-      if (Array.isArray(clusterLabels)) {
-        thematicState.clusterNames = thematicState.clusterNames || {};
-        for (let cid = 0; cid < clusterLabels.length; cid++) {
-          const lab = String(clusterLabels[cid] || '').trim();
-          if (lab) thematicState.clusterNames[cid] = lab;
-        }
-      }
-    }
-  } catch (e) { console.warn(e); }
-
 }
 
 // =======================
@@ -10281,8 +10260,6 @@ let _stash = {
   clusterOf: null,
   clusterColors: null,
   clusterSizesTotal: null,
-  clusterLabels: null,    // ✅ citation labels
-  clusterCount: null,     // ✅ citation clusterCount
   nodePos: null,          // [{x,y}, ...]
   lensesShowEdges: null,
   edges: null,
@@ -10728,29 +10705,7 @@ function __applyClustersFromCache(c) {
   if (c.clusterSizesTotal) clusterSizesTotal = c.clusterSizesTotal.slice();
   if (c.clusterColors) clusterColors = c.clusterColors.slice();
   if (c.clusterLabels) clusterLabels = c.clusterLabels.slice();
-
-  // Rebuild Dimensions so "Clusters/Themes" matches the active view
-  try { buildDimensionsIndex?.(); } catch (_) {}
-  try { updateDimSections?.(); } catch (_) {}
-  try { initClusterFilterUI?.(); } catch (_) {}
 }
-
-function __saveCurrentClustersToCache() {
-  const mode = (window.viewMode === 'thematic') ? 'thematic' : 'citation';
-  const c = __viewCache?.[mode];
-  if (!c) return;
-
-  c.clusterOf         = Array.isArray(clusterOf) ? clusterOf.slice() : null;
-  c.clusterSizesTotal = Array.isArray(clusterSizesTotal) ? clusterSizesTotal.slice() : null;
-  c.clusterColors     = Array.isArray(clusterColors) ? clusterColors.slice() : null;
-  c.clusterLabels     = Array.isArray(clusterLabels) ? clusterLabels.slice() : null;
-
-  if (mode === 'thematic') {
-    c.clusterNames = thematicState?.clusterNames ? Object.assign({}, thematicState.clusterNames) : null;
-  }
-}
-
-
 
 function __ensureClusterLabelsForCurrentClusters() {
   // Prefer your existing label path if it exists.
