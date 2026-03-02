@@ -7438,25 +7438,26 @@ window.__refLensLast = window.__refLensLast || null;
 
 // ---- [ADD] Global REF threshold config (percent 0..100) ----
 window.REF_THRESHOLDS = window.REF_THRESHOLDS || {
-  four: 80,      // 80..100 => 4*
-  three: 60,     // 60..79  => 3*
-  two: 40,       // 40..59  => 2*
-  one: 20,       // 20..39  => 1*
-  ungraded: 0    //  0..19  => ungraded (0)
+  four: 82,
+  three: 76,
+  two: 72
 };
 
 function clamp01(x){ x = Number(x); return Number.isFinite(x) ? Math.max(0, Math.min(1, x)) : 0; }
 function clampInt(x, lo, hi){ x = Math.round(Number(x)); return Number.isFinite(x) ? Math.max(lo, Math.min(hi, x)) : lo; }
 function clampPct(x){ x = Number(x); return Number.isFinite(x) ? Math.max(0, Math.min(100, x)) : 0; }
 
+// Map overall percent to REF star rating
 function refStarsFromPercent(pct) {
   const t = window.REF_THRESHOLDS || {};
   const p = clampPct(pct);
-  if (p >= (t.four ?? 80))  return 4;
-  if (p >= (t.three ?? 60)) return 3;
-  if (p >= (t.two ?? 40))   return 2;
-  if (p >= (t.one ?? 20))   return 1;
-  return 0; // ungraded
+  // if pct is missing / invalid, keep "ungraded"
+  if (!Number.isFinite(+pct)) return 0;
+  if (p >= (t.four ?? 82))  return 4;
+  if (p >= (t.three ?? 76)) return 3;
+  if (p >= (t.two ?? 72))   return 2;
+  // Below 72 is still a 1* (per your spec)
+  return 1;
 }
 
 function refOverallPctFromOSR(o, s, r, weights) {
@@ -7712,13 +7713,23 @@ function getRefUoaFromDocOrItem(d) {
 
 
 // Main entry point (wired from AI dropdown)
-// Main entry point (wired from AI dropdown)
 async function runREFLens() {
   // 0) Collect visible cached full texts (same mechanism as Reader)
-  const docs = (typeof collectVisibleFulltextCorpus === 'function')
+  const docsRaw = (typeof collectVisibleFulltextCorpus === 'function')
     ? collectVisibleFulltextCorpus()
     : [];
-  if (!docs.length) { openSynthPanel('No cached full texts visible.'); return; }
+  if (!docsRaw.length) { openSynthPanel('No cached full texts visible.'); return; }
+
+  // IMPORTANT: ensure each doc has x,y so the lens/marker is placed correctly
+  const docs = docsRaw.map(d => {
+    const i = d?.idx;
+    const p = (Number.isFinite(i) && (typeof parallaxWorldPos === 'function'))
+      ? parallaxWorldPos(i)
+      : (nodes?.[i] || {});
+    const px = Number.isFinite(p?.x) ? p.x : 0;
+    const py = Number.isFinite(p?.y) ? p.y : 0;
+    return { ...d, x: px, y: py };
+  });
 
   // Open panel + prep
   openSynthPanel(`REF assessing ${docs.length} full texts…`);
@@ -7823,7 +7834,7 @@ async function runREFLens() {
       uoa_source = 'AI';
     }
 
-    // 0–100 criterion scores (NEW)
+    // 0–100 criterion scores
     const o100 = clampPct(j.originality_100);
     const s100 = clampPct(j.significance_100);
     const r100 = clampPct(j.rigour_100);
@@ -7834,10 +7845,10 @@ async function runREFLens() {
     // Overall percentage (0–100); equal weights by default
     const ref_percent = refOverallPctFromOSR(o100, s100, r100);
 
-    // Stars derived ONLY from thresholds (no model star output)
+    // Stars derived ONLY from thresholds
     const overall_star = refStarsFromPercent(ref_percent);
 
-    // Persist onto the publication item so you can recalibrate later with new thresholds
+    // Persist onto the publication item so it is saveable with the project
     try {
       const it = itemsData?.[d.idx];
       if (it) {
@@ -7892,14 +7903,14 @@ async function runREFLens() {
     results
   };
 
-  // Summarise in panel (uses your existing summary + markdown functions)
+  // Summarise in panel + export files
+  let md = '';
   try {
     const confMin = 0.5;
     const summary = computeRefSummary(results, confMin);
-    const md = refSummaryMarkdown(summary);
+    md = refSummaryMarkdown(summary);
     setSynthBodyText(md, 'ref_assessment.md');
 
-    // Offer CSV downloads (keep headers aligned with your updated exporter)
     const headers = [
       'idx','title','authors','year','venue','doi',
       'uoa_number','uoa_name','uoa_source',
@@ -7909,13 +7920,24 @@ async function runREFLens() {
     ];
     const csv = toCSV(results, headers);
     downloadTextFile('ref_assessment.csv', csv, 'text/csv');
-
   } catch (e) {
     console.warn('REF summary/export failed:', e);
-    setSynthBodyText(`REF completed for ${results.length} papers, but summary/export failed: ${e.message || e}`, 'ref_assessment.txt');
+    md = `REF completed for ${results.length} papers, but summary/export failed: ${e.message || e}`;
+    setSynthBodyText(md, 'ref_assessment.txt');
   }
 
   setSynthProgressHtml(`<div>Done. Assessed ${results.length} papers.</div>`);
+
+  // ✅ Create a lens icon/handle + link lines AND make it persist in saves:
+  try {
+    // Title includes "REF" so aiKindOf() picks the correct icon (Lens_REF.png)
+    const title = `REF Assessment (${results.length} outputs)`;
+    addAIFootprintFromItems('ref', docs, md, title);
+    if (typeof updateInfo === 'function') updateInfo();
+    if (typeof redraw === 'function') redraw();
+  } catch (e) {
+    console.warn('Footprint (REF assessment) failed:', e);
+  }
 }
 
 // ---- [ADD] REF summary stats helpers (GPA, distribution, Publication Power) ----
