@@ -7429,7 +7429,53 @@ addAIFootprintFromItems('reader', _footprintItems, finalReaderText, 'Reader extr
 // =======================
 
 // Keep results from the last run available globally (for debug / re-export)
+// =======================
+// REF AI LENS (full text)
+// =======================
+
+// Keep results from the last run available globally (for debug / re-export)
 window.__refLensLast = window.__refLensLast || null;
+
+// ---- [ADD] Global REF threshold config (percent 0..100) ----
+window.REF_THRESHOLDS = window.REF_THRESHOLDS || {
+  four: 80,      // 80..100 => 4*
+  three: 60,     // 60..79  => 3*
+  two: 40,       // 40..59  => 2*
+  one: 20,       // 20..39  => 1*
+  ungraded: 0    //  0..19  => ungraded (0)
+};
+
+function clamp01(x){ x = Number(x); return Number.isFinite(x) ? Math.max(0, Math.min(1, x)) : 0; }
+function clampInt(x, lo, hi){ x = Math.round(Number(x)); return Number.isFinite(x) ? Math.max(lo, Math.min(hi, x)) : lo; }
+function clampPct(x){ x = Number(x); return Number.isFinite(x) ? Math.max(0, Math.min(100, x)) : 0; }
+
+function refStarsFromPercent(pct) {
+  const t = window.REF_THRESHOLDS || {};
+  const p = clampPct(pct);
+  if (p >= (t.four ?? 80))  return 4;
+  if (p >= (t.three ?? 60)) return 3;
+  if (p >= (t.two ?? 40))   return 2;
+  if (p >= (t.one ?? 20))   return 1;
+  return 0; // ungraded
+}
+
+function refOverallPctFromOSR(o, s, r, weights) {
+  // default equal weights
+  const w = weights || { o: 1, s: 1, r: 1 };
+  const wo = Number(w.o ?? 1), ws = Number(w.s ?? 1), wr = Number(w.r ?? 1);
+  const denom = Math.max(1e-9, wo + ws + wr);
+  const pct = (clampPct(o)*wo + clampPct(s)*ws + clampPct(r)*wr) / denom;
+  return clampPct(pct);
+}
+
+// Apply thresholds to existing stored ref_percent values (no new AI calls)
+function applyRefThresholdsToResults(results) {
+  for (const r of (results || [])) {
+    const pct = clampPct(r.ref_percent ?? r.percent ?? r.overall_percent ?? 0);
+    r.overall_star = refStarsFromPercent(pct);
+  }
+  return results;
+}
 
 // Minimal CSV helper
 function csvEscape(v) {
@@ -7467,59 +7513,44 @@ function buildREFPrompt(doc, uoaListText) {
   const sys =
 `You are assessing ONE research output using only the provided text and metadata.
 
-REF Output Criteria:
-- Originality: importance and innovation of the contribution.
-- Significance: influence or credible capacity to influence knowledge.
-- Rigour: intellectual coherence and methodological robustness.
+Score three REF criteria on a 0–100 scale:
+- Originality (0–100)
+- Significance (0–100)
+- Rigour (0–100)
 
-Star definitions:
-4★ = World-leading in originality, significance and rigour.
-3★ = Internationally excellent but short of the highest standards.
-2★ = Recognised internationally.
-1★ = Recognised nationally.
-0★ = Unclassified.
+Definitions (use these strictly):
 
-IMPORTANT: You must score RELATIVELY, not absolutely.
+ORIGINALITY = substantive novelty relative to prior published work.
+Not: just being recent; fashionable topic; minor variation on established method; scale alone.
+High signals: new concept/framework/theory; genuinely new method; non-obvious recombination; opens new direction; boundary-crossing that changes interpretation.
 
-Assume this output is being compared to other outputs likely submitted to REF in the same Unit of Assessment.
+SIGNIFICANCE = importance/reach: influence or credible capacity to influence knowledge/practice/policy/technology/future research.
+Not: novelty alone.
+High signals: clear advancement; adopted/built upon; influences practice/standards; enables new lines of inquiry; reference point within a cluster.
 
-Use percentile reasoning:
+RIGOUR = robustness, transparency, methodological soundness, evidential adequacy.
+Not: “exciting”.
+High signals: appropriate methods; enough detail for replication; correct analysis; limitations; internal coherence.
 
-- If this output appears within the top ~30–35% of UK submissions in this field → 4★
-- If it appears in the next ~45% → 3★
-- If it appears in the next ~18–20% → 2★
-- If in the bottom few percent → 1★ or 0★
+Scoring anchors (IMPORTANT):
+- 90–100: exceptional / field-leading for that criterion
+- 75–89: very strong
+- 55–74: solid/competent but not exceptional
+- 35–54: limited (incremental, narrow, or weakly evidenced)
+- 0–34: poor/very weak or insufficient evidence in provided text
 
-You are NOT grading against perfection.
-You are estimating relative standing among REF-submitted outputs.
-
-EVIDENCE-BASED PROCESS (internal reasoning):
-1. Identify novelty signals (conceptual advance, new theory, new dataset, new method).
-2. Identify robustness signals (clear methods, validation, scale of study, limitations).
-3. Identify significance signals (generalisability, field-wide implications).
-4. Estimate approximate percentile position relative to UK REF submissions.
-5. Map percentile to star rating using the distribution above.
-
-UNCERTAINTY:
-- If the text is partial or truncated, increase uncertainty.
-- Do NOT automatically cap at 3★.
-- Instead reflect uncertainty in probability distribution and confidence score.
+Be willing to use the full range. Many competent but incremental papers should land in 55–70.
 
 Return ONLY valid JSON:
-
 {
   "uoa_number": 0,
   "uoa_name": "",
-  "percentile_estimate": 0.0,
-  "originality": 0,
-  "significance": 0,
-  "rigour": 0,
-  "overall_star": 0,
-  "overall_probs": { "0":0.0, "1":0.0, "2":0.0, "3":0.0, "4":0.0 },
+  "originality_100": 0,
+  "significance_100": 0,
+  "rigour_100": 0,
   "confidence": 0.0,
   "notes": ""
 }`;
-
 
   const coverageLine =
     (doc && (doc.ref_total_chars != null) && (doc.ref_provided_chars != null))
@@ -7532,28 +7563,30 @@ Return ONLY valid JSON:
     ? `UNIT OF ASSESSMENT IS PROVIDED (from REF dataset). DO NOT PREDICT OR CHANGE IT.
 Use EXACTLY:
 uoa_number: ${refUoa.uoa_number}
-uoa_name: ${refUoa.uoa_name}
-
-In your JSON, set uoa_number/uoa_name exactly to those values.`
+uoa_name: ${refUoa.uoa_name}`
     : `Choose ONE Unit of Assessment from this list (use EXACT number + name):
 ${uoaListText}`;
 
   const user =
 `${uoaInstruction}
 
-PAPER METADATA:
-Title: ${doc.title || 'Untitled'}
-Authors: ${doc.authors || 'Unknown'}
+${coverageLine}
+
+METADATA:
+Title: ${doc.title || ''}
+Authors: ${doc.authors || ''}
 Year: ${doc.year || ''}
 Venue: ${doc.venue || ''}
-DOI: ${doc.doi ? ('https://doi.org/' + doc.doi) : 'n/a'}
+DOI: ${doc.doi || ''}
 
-${coverageLine}
-TEXT PROVIDED:
-${String(doc.text_for_ref || doc.text || '').slice(0, 120000)}
+TEXT (may be partial):
+${String(doc.text_for_ref || doc.text || '').slice(0, 16000)}
 `;
 
-  return [{ role: 'system', content: sys }, { role: 'user', content: user }];
+  return [
+    { role: 'system', content: sys },
+    { role: 'user', content: user }
+  ];
 }
 
 
@@ -7676,6 +7709,7 @@ function getRefUoaFromDocOrItem(d) {
 
 
 // Main entry point (wired from AI dropdown)
+// Main entry point (wired from AI dropdown)
 async function runREFLens() {
   // 0) Collect visible cached full texts (same mechanism as Reader)
   const docs = (typeof collectVisibleFulltextCorpus === 'function')
@@ -7699,157 +7733,128 @@ async function runREFLens() {
 
     let raw = '';
     try {
+      // If full text is huge, use distributed sampling across the document (NOT just the beginning).
+      // This avoids "intro-only" bias that inflates high scores.
+      const rawText = String(d.text || '');
+      const CHAR_HARD_CAP = 16000;   // beyond this, use chunk sampling
+      const EXCERPT_CAP   = 12000;   // keep direct excerpts small
+      const CHUNK_SIZE    = 6000;    // smaller chunk
+      const CHUNK_MAX     = 3;       // fewer chunks
 
-// If full text is huge, chunk-summarise first to avoid truncation/context overflow
-// If full text is huge, use distributed chunk summaries; otherwise use a representative excerpt.
+      d.ref_total_chars = rawText.length;
 
+      if (rawText.length > CHAR_HARD_CAP) {
+        const total = rawText.length;
+        const starts = [];
+        const slots = Math.min(CHUNK_MAX, Math.max(3, Math.ceil(total / CHUNK_SIZE)));
 
-// This avoids "intro-only" bias that inflates high scores.
-const rawText = String(d.text || '');
-const CHAR_HARD_CAP = 16000;   // beyond this, use chunk sampling
-const EXCERPT_CAP   = 12000;   // keep direct excerpts small
-const CHUNK_SIZE    = 6000;    // smaller chunk
-const CHUNK_MAX     = 3;       // fewer chunks
+        // Always include head/middle/tail
+        starts.push(0);
+        starts.push(Math.max(0, Math.floor(total / 2) - Math.floor(CHUNK_SIZE / 2)));
+        starts.push(Math.max(0, total - CHUNK_SIZE));
 
-d.ref_total_chars = rawText.length;
+        // Fill remaining slots evenly
+        while (starts.length < slots) {
+          const t = (starts.length) / (slots - 1);
+          const s = Math.max(0, Math.min(total - CHUNK_SIZE, Math.floor(t * (total - CHUNK_SIZE))));
+          starts.push(s);
+        }
 
-if (rawText.length > CHAR_HARD_CAP) {
-  // ---- distributed sampling across the document (NOT just the beginning) ----
-  const total = rawText.length;
-  const starts = [];
-  const slots = Math.min(CHUNK_MAX, Math.max(3, Math.ceil(total / CHUNK_SIZE)));
+        // De-dup and sort
+        const uniq = Array.from(
+          new Set(starts.map(x => Math.max(0, Math.min(total - CHUNK_SIZE, x))))
+        ).sort((a,b)=>a-b);
 
-  // Always include head/middle/tail
-  starts.push(0);
-  starts.push(Math.max(0, Math.floor(total / 2) - Math.floor(CHUNK_SIZE / 2)));
-  starts.push(Math.max(0, total - CHUNK_SIZE));
+        const chunks = uniq.map(s => rawText.slice(s, s + CHUNK_SIZE));
+        const joined = chunks.join('\n\n--- CHUNK BREAK ---\n\n');
 
-  // Fill remaining slots evenly
-  while (starts.length < slots) {
-    const t = (starts.length) / (slots - 1);
-    const s = Math.max(0, Math.min(total - CHUNK_SIZE, Math.floor(t * (total - CHUNK_SIZE))));
-    starts.push(s);
-  }
-
-  // De-dup and sort
-  const uniq = Array.from(new Set(starts.map(x => Math.max(0, Math.min(total - CHUNK_SIZE, x))))).sort((a,b)=>a-b);
-
-  const chunks = uniq.map(s => rawText.slice(s, s + CHUNK_SIZE));
-
-  // ---- Summarise chunks into a REF-relevant brief ----
-  let combinedBrief = '';
-  for (let c = 0; c < chunks.length; c++) {
-    const sumMsg = [
-      { role: 'system', content: 'You summarise academic papers for REF-style assessment.' },
-      { role: 'user', content:
-`Summarise this excerpt of a paper for REF assessment.
-Extract: (1) contribution/novelty, (2) methods/rigour signals, (3) key results, (4) limitations/weaknesses, (5) likely UoA cues.
-Return 6 bullet points, concise, evidence-led.
-
-EXCERPT ${c+1}/${chunks.length} (position=${uniq[c]} chars):
-${chunks[c]}`
+        d.text_for_ref = `NOTE: Full text too long; using distributed excerpts across the paper.\n\n${joined}`.slice(0, CHAR_HARD_CAP);
+      } else {
+        d.text_for_ref = rawText.slice(0, EXCERPT_CAP);
       }
-    ];
-    const seg = await openaiChatDirect(sumMsg, { temperature: 0.2, max_tokens: 260 });
-    combinedBrief += `\n\nEXCERPT ${c+1} BRIEF:\n${String(seg || '').trim()}`;
-    await new Promise(r => setTimeout(r, 120));
-  }
 
-  d.text_for_ref = `NOTE: Full text too long; REF scoring based on distributed excerpt-briefs.\n${combinedBrief}`.slice(0, 120000);
-  d.ref_chunked = true;
-} else {
-  // Representative excerpt (head/middle/tail) to reduce truncation bias
-  const ex = makeRepresentativeExcerpt(rawText, EXCERPT_CAP);
-  d.text_for_ref = ex.excerpt || '';
-  d.ref_provided_chars = (ex.providedChars != null) ? ex.providedChars : String(d.text_for_ref).length;
-  d.ref_coverage = ex.coverage;
-  d.ref_chunked = false;
-}
-
-// Ensure coverage stats exist even in chunked mode
-if (d.ref_provided_chars == null) d.ref_provided_chars = String(d.text_for_ref || '').length;
-if (d.ref_coverage == null) {
-  d.ref_coverage = d.ref_total_chars ? (d.ref_provided_chars / d.ref_total_chars) : 0;
-}
-if (typeof d.ref_coverage === 'number') d.ref_coverage = d.ref_coverage.toFixed(3);
-
+      // Ensure coverage stats exist even in chunked mode
+      if (d.ref_provided_chars == null) d.ref_provided_chars = String(d.text_for_ref || '').length;
+      if (d.ref_coverage == null) {
+        d.ref_coverage = d.ref_total_chars ? (d.ref_provided_chars / d.ref_total_chars) : 0;
+      }
+      if (typeof d.ref_coverage === 'number') d.ref_coverage = d.ref_coverage.toFixed(3);
 
       const msg = buildREFPrompt(d, uoaListText);
       raw = await openaiChatDirect(msg, {
-  temperature: 0.1,
-  max_tokens: MAX_TOKENS,
-  retries: 2,            // don’t spiral
-  throttleMs: 0,         // we’ll pace explicitly below
-  onRetry: (st, wait, k) => {
-    setSynthProgressHtml(`<div>REF retry ${k+1}: ${st} — waiting ${(wait/1000).toFixed(1)}s…</div>`);
-  }
-});
+        temperature: 0.1,
+        max_tokens: MAX_TOKENS,
+        retries: 2,            // don’t spiral
+        throttleMs: 0,         // we’ll pace explicitly below
+        onRetry: (st, wait, k) => {
+          setSynthProgressHtml(`<div>REF retry ${k+1}: ${st} — waiting ${(wait/1000).toFixed(1)}s…</div>`);
+        }
+      });
 
+    } catch (e) {
+      console.warn('REF call failed:', e);
 
-} catch (e) {
-  console.warn('REF call failed:', e);
+      // If we hit rate limits, pause longer before continuing the loop.
+      if (e && (e.status === 429 || String(e.message||'').includes('429'))) {
+        const coolOffMs = 20000 + Math.round(Math.random() * 10000); // 20–30s
+        setSynthProgressHtml(`<div>Rate-limited (429). Cooling off ${(coolOffMs/1000).toFixed(0)}s…</div>`);
+        await new Promise(r => setTimeout(r, coolOffMs));
+      }
 
-  // If we hit rate limits, pause longer before continuing the loop.
-  if (e && (e.status === 429 || String(e.message||'').includes('429'))) {
-    const coolOffMs = 20000 + Math.round(Math.random() * 10000); // 20–30s
-    setSynthProgressHtml(`<div>Rate-limited (429). Cooling off ${(coolOffMs/1000).toFixed(0)}s…</div>`);
-    await new Promise(r => setTimeout(r, coolOffMs));
-  }
-
-  raw = '';
-}
+      raw = '';
+    }
 
     const j = extractFirstJsonObject(raw) || {};
 
-const refUoa = getRefUoaFromDocOrItem(d);
+    // Use REF-provided UoA if present; otherwise take model choice
+    const refUoa = getRefUoaFromDocOrItem(d);
 
-let uoa_number, uoa_name, uoa_source;
+    let uoa_number, uoa_name, uoa_source;
+    if (refUoa.hasRefUoa) {
+      uoa_number = refUoa.uoa_number;
+      uoa_name   = refUoa.uoa_name || '';
+      uoa_source = 'REF';
+    } else {
+      uoa_number = clampInt(j.uoa_number, 1, 34);
+      uoa_name   = String(j.uoa_name || '').trim();
+      uoa_source = 'AI';
+    }
 
-if (refUoa.hasRefUoa) {
-  uoa_number = refUoa.uoa_number;
-  uoa_name   = refUoa.uoa_name || '';
-  uoa_source = 'REF';
-} else {
-  uoa_number = clampInt(j.uoa_number, 1, 34);
-  uoa_name   = String(j.uoa_name || '').trim();
-  uoa_source = 'AI';
-}
+    // 0–100 criterion scores (NEW)
+    const o100 = clampPct(j.originality_100);
+    const s100 = clampPct(j.significance_100);
+    const r100 = clampPct(j.rigour_100);
 
-let originality  = clampInt(j.originality, 0, 4);
-let significance = clampInt(j.significance, 0, 4);
-let rigour       = clampInt(j.rigour, 0, 4);
-// --- Hard anti-inflation guard ---
-// If we used chunk-briefs or coverage is low, prevent 4s.
-
-const flags = Array.isArray(j.evidence_flags) ? j.evidence_flags.map(String) : [];
-const hasMethods = flags.includes('methods_present');
-const hasResults = flags.includes('results_present');
-const hasEval    = flags.includes('evaluation_present');
-const strongInternalEvidence = hasMethods && hasResults && (hasEval || flags.includes('replication_or_validation'));
-
-const coverageNum   = Number(d.ref_coverage);
-const lowCoverage   = Number.isFinite(coverageNum) && coverageNum < 0.45;
-const usedChunkBrief = String(d.text_for_ref || '').startsWith('NOTE: Full text too long;');
-
-const conf = clamp01(j.confidence);
-
-// Only cap 4s when coverage is poor AND evidence is not strong.
-const shouldCap4 = (lowCoverage || usedChunkBrief) && !(strongInternalEvidence && conf >= 0.70);
-
-if (shouldCap4) {
-  originality  = Math.min(originality, 3);
-  significance = Math.min(significance, 3);
-  rigour       = Math.min(rigour, 3);
-}
-
-
-
-
-    const confidence   = clamp01(j.confidence);
-
+    const confidence = clamp01(j.confidence);
     const notes = String(j.notes || '').trim().slice(0, 600);
 
-    const avg = ((originality + significance + rigour) / 3).toFixed(2);
+    // Overall percentage (0–100); equal weights by default
+    const ref_percent = refOverallPctFromOSR(o100, s100, r100);
+
+    // Stars derived ONLY from thresholds (no model star output)
+    const overall_star = refStarsFromPercent(ref_percent);
+
+    // Persist onto the publication item so you can recalibrate later with new thresholds
+    try {
+      const it = itemsData?.[d.idx];
+      if (it) {
+        it.ref_uoa_number = uoa_number;
+        it.ref_uoa_name   = uoa_name;
+        it.ref_uoa_source = uoa_source;
+
+        it.ref_originality_100  = o100;
+        it.ref_significance_100 = s100;
+        it.ref_rigour_100       = r100;
+
+        it.ref_percent    = ref_percent;
+        it.ref_star       = overall_star;
+        it.ref_confidence = confidence;
+        it.ref_notes      = notes;
+        it.ref_scored_at  = new Date().toISOString();
+      }
+    } catch (e) {
+      console.warn('Failed to persist REF scores onto item:', e);
+    }
 
     results.push({
       idx: d.idx,
@@ -7860,143 +7865,103 @@ if (shouldCap4) {
       doi: d.doi || '',
       uoa_number,
       uoa_name,
-      originality,
-      significance,
-      rigour,
-      avg,
+      uoa_source,
+      originality_100: o100,
+      significance_100: s100,
+      rigour_100: r100,
+      ref_percent: +ref_percent.toFixed(2),
+      overall_star,
       confidence,
       notes
     });
 
-    // gentle pacing
-    if (typeof sleep === 'function') await sleep(CALL_DELAY_MS);
-    else await new Promise(r => setTimeout(r, CALL_DELAY_MS));
+    // Small pacing delay
+    if (CALL_DELAY_MS > 0) {
+      await new Promise(r => setTimeout(r, CALL_DELAY_MS));
+    }
   }
 
-  // Save globally for debug / quick re-export
-  window.__refLensLast = { when: Date.now(), count: results.length, results };
-
-  // Build markdown summary for the panel + AI footprint
-  const top = results
-    .slice()
-    .sort((a,b) => (+b.avg) - (+a.avg))
-    .slice(0, Math.min(12, results.length));
-
-  const mdTable = (rows) => {
-    const header = `| Avg | O | S | R | UoA | Year | Title |\n|---:|---:|---:|---:|---|---:|---|\n`;
-    const lines = rows.map(r => {
-      const u = `${r.uoa_number} ${r.uoa_name || ''}`.trim();
-      const t = String(r.title || '').replace(/\|/g,'—');
-      return `| ${r.avg} | ${r.originality} | ${r.significance} | ${r.rigour} | ${u.replace(/\|/g,'—')} | ${r.year || ''} | ${t} |`;
-    }).join('\n');
-    return header + lines;
+  // Store last run globally for re-export / later recalibration
+  window.__refLensLast = {
+    when: Date.now(),
+    count: results.length,
+    thresholds: { ...(window.REF_THRESHOLDS || {}) },
+    results
   };
 
-  const outMd =
-`# REF assessment (AI lens)
-
-Processed **${results.length}** visible publications with cached full text.
-
-Scoring scale used (REF-aligned):
-- **4** = World-leading (4★)
-- **3** = Internationally excellent (3★)
-- **2** = Recognised internationally (2★)
-- **1** = Recognised nationally (1★)
-- **0** = Unclassified
-
-## Top items (by average O/S/R)
-
-${mdTable(top)}
-
-## Notes
-- These are **AI estimates** based on available full text (often truncated) + metadata.
-- Use *confidence* + *notes* to triage what needs human reading.
-${refSummaryMarkdown(computeRefSummary(results, 0.5))}
-`;
-
-  setSynthProgressHtml('');
-  setSynthBodyText(outMd, 'ref_assessment.md');
-
-  // Add AI footprint linked to the assessed items
+  // Summarise in panel (uses your existing summary + markdown functions)
   try {
-    addAIFootprintFromItems('ref', docs, outMd, 'REF assessment (full-text)');
-    redraw();
-  } catch (e) {
-    console.warn('Footprint (ref) failed:', e);
-  }
+    const confMin = 0.5;
+    const summary = computeRefSummary(results, confMin);
+    const md = refSummaryMarkdown(summary);
+    setSynthBodyText(md, 'ref_assessment.md');
 
-  // CSV export
-  const headers = [
-    'idx','title','authors','year','venue','doi',
-    'uoa_number','uoa_name',
-    'originality','significance','rigour','avg',
-    'confidence','notes'
-  ];
-  const csv = toCSV(results, headers);
-
-  // ---- [ADD] Summary CSV (confidence-filtered) ----
-const summary = computeRefSummary(results, 0.5);
-const summaryRows = [
-  {
-    uoa: 'ALL',
-    n: summary.usedRows,
-    gpa: summary.gpa.toFixed(4),
-    publication_power: (summary.power).toFixed(4),
-    c4: summary.distAll[4]||0,
-    c3: summary.distAll[3]||0,
-    c2: summary.distAll[2]||0,
-    c1: summary.distAll[1]||0,
-    c0: summary.distAll[0]||0
-  },
-  ...(summary.uoaRows || []).map(r => ({
-    uoa: r.uoa,
-    n: r.n,
-    gpa: Number(r.gpa).toFixed(4),
-    publication_power: Number(r.power).toFixed(4),
-    c4: r.c4, c3: r.c3, c2: r.c2, c1: r.c1, c0: r.c0
-  }))
-];
-const summaryCsvHeaders = ['uoa','n','gpa','publication_power','c4','c3','c2','c1','c0'];
-const summaryCsv = toCSV(summaryRows, summaryCsvHeaders);
-
-
-  // Enable “download” via Synth panel download button if your UI uses it,
-  // but also force a direct CSV download link via a small inline button.
-  // (We don’t assume your enableSynthDownload supports CSV MIME types.)
-  try {
-    // If your synth panel has custom HTML, you can add a button there:
-    const btnHtml =
-      `<div style="margin:10px 0 0">
-        <button id="refCsvBtn"
-          style="padding:8px 10px;border-radius:10px;border:1px solid rgba(255,255,255,0.18);
-                 background:rgba(255,255,255,0.08);color:#fff;cursor:pointer;">
-          Download REF CSV
-        </button>
-      </div>`;
-    setSynthHtml(btnHtml);
-    setTimeout(() => {
-      const b = document.getElementById('refCsvBtn');
-      if (b) b.onclick = () => downloadTextFile('ref_assessment.csv', csv, 'text/csv');
-    }, 30);
-  } catch (e) {
-    console.warn('REF CSV button failed:', e);
-    // fallback: just download immediately
+    // Offer CSV downloads (keep headers aligned with your updated exporter)
+    const headers = [
+      'idx','title','authors','year','venue','doi',
+      'uoa_number','uoa_name','uoa_source',
+      'originality_100','significance_100','rigour_100',
+      'ref_percent','overall_star',
+      'confidence','notes'
+    ];
+    const csv = toCSV(results, headers);
     downloadTextFile('ref_assessment.csv', csv, 'text/csv');
+
+  } catch (e) {
+    console.warn('REF summary/export failed:', e);
+    setSynthBodyText(`REF completed for ${results.length} papers, but summary/export failed: ${e.message || e}`, 'ref_assessment.txt');
   }
+
+  setSynthProgressHtml(`<div>Done. Assessed ${results.length} papers.</div>`);
 }
 
 // ---- [ADD] REF summary stats helpers (GPA, distribution, Publication Power) ----
 function refOverallScoreFromRow(r) {
-  // Convert avg (string) to number safely; fall back to mean of O/S/R
-  const a = Number(r.avg);
-  let v = Number.isFinite(a)
-    ? a
-    : (Number(r.originality || 0) + Number(r.significance || 0) + Number(r.rigour || 0)) / 3;
+  // Prefer explicit derived star
+  const s = Number(r.overall_star);
+  if (Number.isFinite(s)) return Math.max(0, Math.min(4, Math.round(s)));
 
-  // REF-style “overall score” per output as an integer band 0..4
-  // (Using nearest-integer rounding of the O/S/R mean.)
-  v = Math.round(v);
-  return Math.max(0, Math.min(4, v));
+  // Fallback: derive from percent if present
+  const p = Number(r.ref_percent);
+  if (Number.isFinite(p)) return refStarsFromPercent(p);
+
+  return 0;
+}
+
+function rebuildRefLensFromStoredScores(confMin = 0.5) {
+  // Build a results array from itemsData (no new calls)
+  const results = [];
+  for (let idx = 0; idx < (itemsData?.length || 0); idx++) {
+    const it = itemsData[idx];
+    if (!it) continue;
+    if (it.ref_percent == null) continue;
+
+    const confidence = Number(it.ref_confidence ?? 0);
+    const r = {
+      idx,
+      title: it.label || it?.openalex?.title || it?.openalex?.display_name || '',
+      authors: it.authors || '',
+      year: it.year || '',
+      venue: it.venue || '',
+      doi: it.doi || it?.openalex?.doi || '',
+      uoa_number: it.ref_uoa_number,
+      uoa_name: it.ref_uoa_name,
+      uoa_source: it.ref_uoa_source,
+      originality_100: it.ref_originality_100,
+      significance_100: it.ref_significance_100,
+      rigour_100: it.ref_rigour_100,
+      ref_percent: it.ref_percent,
+      overall_star: refStarsFromPercent(it.ref_percent),
+      confidence,
+      notes: it.ref_notes || ''
+    };
+
+    // optional: confidence filter here or leave it for computeRefSummary
+    if (confidence >= confMin) results.push(r);
+  }
+
+  window.__refLensLast = { when: Date.now(), count: results.length, results };
+  return results;
 }
 
 function computeRefSummary(results, confMin = 0.5) {
