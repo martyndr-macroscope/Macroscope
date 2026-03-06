@@ -7511,60 +7511,50 @@ function downloadTextFile(fileName, text, mime = 'text/plain') {
 // NOTE: user asked for a 5-point scale; we define a mapping to REF star levels.
 // Prompt builder: REF-style scoring + UoA assignment.
 function buildREFPrompt(doc, uoaListText) {
-    const sys =
-`You are an expert Sub-Panel Chair for the UK Research Excellence Framework (REF).
-Your task is to evaluate ONE research output based strictly on REF criteria:
-Originality, Significance, and Rigour.
+  const sys =
+`You are assessing ONE research output using only the provided text and metadata.
 
-CRITICAL INSTRUCTION ON SCORING:
-- Avoid "safe" middle-tier scoring.
-- You are explicitly authorized and encouraged to use the absolute extremes of the scale (0–40 and 90–100) if warranted.
-- Do NOT round to multiples of 5 or 10. Use precise integers.
+Score three REF criteria on a 0–100 scale:
+- Originality (0–100)
+- Significance (0–100)
+- Rigour (0–100)
 
-Step 1: Categorical Triage (LOCK THIS FIRST)
-Place the output into ONE absolute REF category based on overall merit:
+Definitions (use these strictly):
 
-4-Star (World-Leading): Sets a new paradigm / definitive breakthrough. (85–100)
-3-Star (Internationally Excellent): Important, rigorous contribution; not paradigm-altering. (70–84)
-2-Star (Recognized Internationally): Incremental but useful; limited significance or originality. (50–69)
-1-Star (Recognized Nationally): Valid but limited/local, or identifiable rigour issues. (30–49)
-Unclassified: Falls below standard; fatally flawed or negligible contribution. (0–29)
+ORIGINALITY = substantive novelty relative to prior published work.
+Not: just being recent; fashionable topic; minor variation on established method; scale alone.
+High signals: new concept/framework/theory; genuinely new method; non-obvious recombination; opens new direction; boundary-crossing that changes interpretation.
 
-Step 2: Justification and Elimination
-Write a short paragraph explicitly arguing:
-- why it did NOT achieve the category above, AND
-- why it did NOT fall into the category below.
+SIGNIFICANCE = importance/reach: influence or credible capacity to influence knowledge/practice/policy/technology/future research.
+Not: novelty alone.
+High signals: clear advancement; adopted/built upon; influences practice/standards; enables new lines of inquiry; reference point within a cluster.
 
-Step 3: Component Scoring and Final Score
-After triage is locked:
-- Assign Originality (0–100), Significance (0–100), Rigour (0–100) as integers.
-- These component scores MUST align with the triage bracket you chose:
-  * 4-Star => each score should usually be within 85–100
-  * 3-Star => within 70–84
-  * 2-Star => within 50–69
-  * 1-Star => within 30–49
-  * Unclassified => within 0–29
-- Then compute Final Overall Score as the average of the three component scores (0–100, can be non-integer).
+RIGOUR = robustness, transparency, methodological soundness, evidential adequacy.
+Not: “exciting”.
+High signals: appropriate methods; enough detail for replication; correct analysis; limitations; internal coherence.
 
-Important: Use ONLY what is present in the provided text+metadata. If evidence is missing due to partial text, reflect that in the scores and justification.
+Scoring anchors (IMPORTANT):
+- 90–100: exceptional / field-leading for that criterion
+- 75–89: very strong
+- 55–74: solid/competent but not exceptional
+- 35–54: limited (incremental, narrow, or weakly evidenced)
+- 0–34: poor/very weak or insufficient evidence in provided text
+Return scores as integers from 0–100.
+DO NOT round to multiples of 5 or 10.
+Use the full range; prefer precise distinctions (e.g., 63 vs 67 vs 71) where justified.
+If you notice you are choosing a multiple of 5, reconsider and choose a more precise integer unless it is exactly warranted.
+Be willing to use the full range. Many competent but incremental papers should land in 55–70.
 
-RETURN ONLY valid JSON (no markdown, no extra text) in exactly this shape:
+Return ONLY valid JSON:
 {
   "uoa_number": 0,
   "uoa_name": "",
-  "triage_category": "2-Star",
-  "justification": "",
   "originality_100": 0,
   "significance_100": 0,
   "rigour_100": 0,
-  "final_overall_100": 0,
   "confidence": 0.0,
   "notes": ""
-}
-
-Set "notes" to a compact, human-readable version of the required output format, like:
-"Triage Category: 2-Star\\nJustification: ...\\nOriginality Score: 62/100\\nSignificance Score: 58/100\\nRigour Score: 66/100\\nFinal Overall Score: 62.0/100"
-`;
+}`;
 
   const coverageLine =
     (doc && (doc.ref_total_chars != null) && (doc.ref_provided_chars != null))
@@ -7749,7 +7739,7 @@ async function runREFLens() {
 
   const results = [];
   const CALL_DELAY_MS = 160;
-  const MAX_TOKENS = 520; // JSON only, keep small
+  const MAX_TOKENS = 260; // JSON only, keep small
 
   for (let i = 0; i < docs.length; i++) {
     const d = docs[i];
