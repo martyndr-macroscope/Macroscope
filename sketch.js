@@ -3895,6 +3895,23 @@ const refsTotal = Array.isArray(w.referenced_works)
     const hasFullText = typeof item.fulltext === 'string' && item.fulltext.trim().length > 0;
     const canExtract  = _hasFTCand(w, doiUrl);
 
+    // REF score display (if available)
+    const refBand = String(item.ref_score_band || '').trim();
+    const refPct  = Number(item.ref_percent);
+    const refUoaNo = item.ref_uoa_number ?? '';
+    const refUoaName = String(item.ref_uoa_name || '').trim();
+    const hasRefScore = !!refBand || Number.isFinite(refPct);
+
+    const refDisplay = refBand
+      ? `${refBand}${Number.isFinite(refPct) ? ` (${refPct.toFixed(1)}%)` : ''}`
+      : (Number.isFinite(refPct)
+          ? `${refPct.toFixed(1)}%${Number.isFinite(+item.ref_star) ? ` (${item.ref_star}★)` : ''}`
+          : '');
+
+    const refDetail = refUoaNo
+      ? `UoA ${refUoaNo}${refUoaName ? ` – ${refUoaName}` : ''}`
+      : '';
+
     // IDs
     const absId       = `abs_${i}_${Date.now()}`;
     const absToggleId = `absT_${i}_${Date.now()}`;
@@ -3918,6 +3935,15 @@ const refsTotal = Array.isArray(w.referenced_works)
         <div style="opacity:.7">Cited by</div><div>${citedBy}</div>
 <div style="opacity:.7">Network Citations</div><div>${citing}</div>
 <div style="opacity:.7">References</div><div>${refsTotal}</div>
+        ${
+          hasRefScore
+            ? `<div style="opacity:.7">REF score</div>
+               <div>
+                 <span style="font-weight:600;color:#ffd166">${safe(refDisplay)}</span>
+                 ${refDetail ? `<div style="opacity:.7;font-size:11px;margin-top:2px">${safe(refDetail)}</div>` : ''}
+               </div>`
+            : ''
+        }
         <div style="opacity:.7">Open access</div>
         <div>${
           isOA ? ('Yes' + oaStatus)
@@ -4118,9 +4144,29 @@ console.log('Pill counts updated', { i, refs: it.refsCount, citedBy: it.cbc });
     const abstractFull  = (d.abstract || '').toString();
     const hasAbstract   = abstractFull.trim().length > 0;
     const abstractShort = abstractFull.length > 1000 ? abstractFull.slice(0,1000)+'…' : abstractFull;
-const iuTopics = Array.isArray(d.invisibleUniTopics)
+
+    const iuTopics = Array.isArray(d.invisibleUniTopics)
       ? d.invisibleUniTopics.map(s => String(s || '').trim()).filter(Boolean)
       : [];
+
+    // REF score display (prefer itemsData because REF scoring is stored there)
+    const item = itemsData[i] || {};
+    const refBand = String(item.ref_score_band || d.ref_score_band || '').trim();
+    const refPctRaw = (item.ref_percent ?? d.ref_percent);
+    const refPct = Number(refPctRaw);
+    const refUoaNo = item.ref_uoa_number ?? d.ref_uoa_number ?? '';
+    const refUoaName = String(item.ref_uoa_name || d.ref_uoa_name || '').trim();
+    const hasRefScore = !!refBand || Number.isFinite(refPct);
+
+    const refDisplay = refBand
+      ? `${refBand}${Number.isFinite(refPct) ? ` (${refPct.toFixed(1)}%)` : ''}`
+      : (Number.isFinite(refPct)
+          ? `${refPct.toFixed(1)}%${Number.isFinite(+(item.ref_star ?? d.ref_star)) ? ` (${(item.ref_star ?? d.ref_star)}★)` : ''}`
+          : '');
+
+    const refDetail = refUoaNo
+      ? `UoA ${refUoaNo}${refUoaName ? ` – ${refUoaName}` : ''}`
+      : '';
     const absId      = `abs_${i}_${Date.now()}`;
     const absToggleId= `absTgl_${i}_${Date.now()}`;
 
@@ -4137,6 +4183,15 @@ const iuTopics = Array.isArray(d.invisibleUniTopics)
         <div style="opacity:.7">Cited by</div><div>${citedBy}</div>
         <div style="opacity:.7">Network Citations</div><div>${citing}</div>
         <div style="opacity:.7">References</div><div>${refsTotal}</div>
+        ${
+          hasRefScore
+            ? `<div style="opacity:.7">REF score</div>
+               <div>
+                 <span style="font-weight:600;color:#ffd166">${safe(refDisplay)}</span>
+                 ${refDetail ? `<div style="opacity:.7;font-size:11px;margin-top:2px">${safe(refDetail)}</div>` : ''}
+               </div>`
+            : ''
+        }
         <div style="opacity:.7">Open access</div>
         <div>${isOA ? ('Yes' + oaStatus) : 'No / unknown'}</div>
         <div style="opacity:.7">DOI</div><div>${clean ? `<a href="${doiUrl}" target="_blank" style="color:#8ecbff;text-decoration:none">${clean}</a>` : '-'}</div>
@@ -7436,32 +7491,117 @@ addAIFootprintFromItems('reader', _footprintItems, finalReaderText, 'Reader extr
 // Keep results from the last run available globally (for debug / re-export)
 window.__refLensLast = window.__refLensLast || null;
 
-// ---- [ADD] Global REF threshold config (percent 0..100) ----
-window.REF_THRESHOLDS = window.REF_THRESHOLDS || {
-  four: 82,
-  three: 76,
-  two: 72
-};
-
 function clamp01(x){ x = Number(x); return Number.isFinite(x) ? Math.max(0, Math.min(1, x)) : 0; }
 function clampInt(x, lo, hi){ x = Math.round(Number(x)); return Number.isFinite(x) ? Math.max(lo, Math.min(hi, x)) : lo; }
 function clampPct(x){ x = Number(x); return Number.isFinite(x) ? Math.max(0, Math.min(100, x)) : 0; }
 
-// Map overall percent to REF star rating
-function refStarsFromPercent(pct) {
-  const t = window.REF_THRESHOLDS || {};
+// -----------------------------------------------------------------------------
+// UoA-specific REF calibration bands
+// Source: UoA_Confidence_Sub_Bands.csv
+// Labels are: 4+, 4, 4-, 3+, 3, 3-, 2+, 2, 2-
+// Anything below the lowest calibrated band is treated as 1.
+// -----------------------------------------------------------------------------
+window.REF_UOA_BANDS_RAW = window.REF_UOA_BANDS_RAW || {"1":["Clinical Medicine","94.0-100.0","88.0-94.0","82.0-88.0","81.3-82.0","80.7-81.3","80.0-80.7","66.7-80.0","53.3-66.7","40.0-53.3"],"2":["Public Health, Health Services and Primary Care","93.8-100.0","87.7-93.8","81.5-87.7","79.2-81.5","76.8-79.2","74.5-76.8","63.0-74.5","51.5-63.0","40.0-51.5"],"3":["Allied Health Professions, Dentistry, Nursing and Pharmacy","93.8-100.0","87.7-93.8","81.5-87.7","79.2-81.5","76.8-79.2","74.5-76.8","63.0-74.5","51.5-63.0","40.0-51.5"],"4":["Psychology, Psychiatry and Neuroscience","93.8-100.0","87.7-93.8","81.5-87.7","80.5-81.5","79.5-80.5","78.5-79.5","65.7-78.5","52.8-65.7","40.0-52.8"],"5":["Biological Sciences","94.0-100.0","88.0-94.0","82.0-88.0","81.5-82.0","81.0-81.5","80.5-81.0","67.0-80.5","53.5-67.0","40.0-53.5"],"6":["Agriculture, Food and Veterinary Sciences","94.0-100.0","88.0-94.0","82.0-88.0","81.2-82.0","80.3-81.2","79.5-80.3","66.3-79.5","53.2-66.3","40.0-53.2"],"7":["Earth Systems and Environmental Sciences","94.0-100.0","88.0-94.0","82.0-88.0","81.2-82.0","80.3-81.2","79.5-80.3","66.3-79.5","53.2-66.3","40.0-53.2"],"8":["Chemistry","94.0-100.0","88.0-94.0","82.0-88.0","80.2-82.0","78.3-80.2","76.5-78.3","64.3-76.5","52.2-64.3","40.0-52.2"],"9":["Physics","94.8-100.0","89.7-94.8","84.5-89.7","83.0-84.5","81.5-83.0","80.0-81.5","66.7-80.0","53.3-66.7","40.0-53.3"],"10":["Mathematical Sciences","94.8-100.0","89.7-94.8","84.5-89.7","82.3-84.5","80.2-82.3","78.0-80.2","65.3-78.0","52.7-65.3","40.0-52.7"],"11":["Computer Science and Informatics","93.7-100.0","87.3-93.7","81.0-87.3","79.7-81.0","78.3-79.7","77.0-78.3","64.7-77.0","52.3-64.7","40.0-52.3"],"12":["Engineering","94.3-100.0","88.7-94.3","83.0-88.7","81.8-83.0","80.7-81.8","79.5-80.7","66.0-79.5","52.5-66.0","40.0-52.5"],"13":["Architecture, Built Environment and Planning","93.0-100.0","86.0-93.0","79.0-86.0","77.7-79.0","76.3-77.7","75.0-76.3","63.3-75.0","51.7-63.3","40.0-51.7"],"14":["Geography and Environmental Studies","94.0-100.0","88.0-94.0","82.0-88.0","80.7-82.0","79.3-80.7","78.0-79.3","65.3-78.0","52.7-65.3","40.0-52.7"],"15":["Law","93.3-100.0","86.7-93.3","80.0-86.7","77.8-80.0","75.7-77.8","73.5-75.7","62.3-73.5","51.2-62.3","40.0-51.2"],"16":["Economics and Econometrics","94.3-100.0","88.7-94.3","83.0-88.7","81.2-83.0","79.3-81.2","77.5-79.3","65.0-77.5","52.5-65.0","40.0-52.5"],"17":["Business and Management Studies","93.7-100.0","87.3-93.7","81.0-87.3","79.5-81.0","78.0-79.5","76.5-78.0","63.7-76.5","51.8-63.7","40.0-51.8"],"18":["Politics and International Studies","93.5-100.0","87.0-93.5","80.5-87.0","79.0-80.5","77.5-79.0","76.0-77.5","63.3-76.0","51.7-63.3","40.0-51.7"],"19":["Social Work and Social Policy","93.7-100.0","87.3-93.7","81.0-87.3","79.5-81.0","78.0-79.5","76.5-78.0","63.7-76.5","51.8-63.7","40.0-51.8"],"20":["Sociology","93.5-100.0","87.0-93.5","80.5-87.0","78.5-80.5","76.5-78.5","74.5-76.5","63.0-74.5","51.5-63.0","40.0-51.5"],"21":["Area Studies","92.3-100.0","84.7-92.3","77.0-84.7","75.7-77.0","74.3-75.7","73.0-74.3","61.0-73.0","50.5-61.0","40.0-50.5"],"22":["Anthropology and Development Studies","93.3-100.0","86.7-93.3","80.0-86.7","78.7-80.0","77.3-78.7","76.0-77.3","63.3-76.0","51.7-63.3","40.0-51.7"],"23":["Education","93.5-100.0","87.0-93.5","80.5-87.0","79.0-80.5","77.5-79.0","76.0-77.5","63.3-76.0","51.7-63.3","40.0-51.7"],"24":["Sport and Exercise Sciences, Leisure and Tourism","94.0-100.0","88.0-94.0","82.0-88.0","81.2-82.0","80.3-81.2","79.5-80.3","66.3-79.5","53.2-66.3","40.0-53.2"],"25":["English Language and Literature","92.0-100.0","84.0-92.0","76.0-84.0","74.5-76.0","73.0-74.5","71.5-73.0","60.0-71.5","50.0-60.0","40.0-50.0"],"26":["Modern Languages and Linguistics","92.3-100.0","84.7-92.3","77.0-84.7","75.8-77.0","74.7-75.8","73.5-74.7","61.7-73.5","50.8-61.7","40.0-50.8"],"27":["History","92.5-100.0","85.0-92.5","77.5-85.0","76.0-77.5","74.5-76.0","73.0-74.5","61.7-73.0","50.8-61.7","40.0-50.8"],"28":["Classics","92.7-100.0","85.3-92.7","78.0-85.3","76.5-78.0","75.0-76.5","73.5-75.0","62.0-73.5","51.0-62.0","40.0-51.0"],"29":["Archaeology","93.0-100.0","86.0-93.0","79.0-86.0","77.5-79.0","76.0-77.5","74.5-76.0","62.7-74.5","51.3-62.7","40.0-51.3"],"30":["Philosophy","92.0-100.0","84.0-92.0","76.0-84.0","74.8-76.0","73.7-74.8","72.5-73.7","60.8-72.5","50.3-60.8","40.0-50.3"],"31":["Theology and Religious Studies","92.0-100.0","84.0-92.0","76.0-84.0","75.0-76.0","74.0-75.0","73.0-74.0","61.0-73.0","50.5-61.0","40.0-50.5"],"32":["Art and Design: History, Practice and Theory","92.0-100.0","84.0-92.0","76.0-84.0","74.3-76.0","72.7-74.3","71.0-72.7","60.0-71.0","50.0-60.0","40.0-50.0"],"33":["Music, Drama, Dance, Performing Arts, Film and Screen Studies","92.0-100.0","84.0-92.0","76.0-84.0","74.7-76.0","73.3-74.7","72.0-73.3","60.7-72.0","50.3-60.7","40.0-50.3"],"34":["Communication, Cultural and Media Studies, Library and Information Management","92.5-100.0","85.0-92.5","77.5-85.0","76.0-77.5","74.5-76.0","73.0-74.5","61.7-73.0","50.8-61.7","40.0-50.8"]};
+
+window.REF_BAND_LABELS = window.REF_BAND_LABELS || ['4+','4','4-','3+','3','3-','2+','2','2-'];
+
+function parseRefBandRange(s) {
+  const m = String(s || '').trim().match(/^(-?\d+(?:\.\d+)?)\s*-\s*(-?\d+(?:\.\d+)?)$/);
+  if (!m) return null;
+  return { min: Number(m[1]), max: Number(m[2]) };
+}
+
+function buildRefUoaBands(rawMap) {
+  const out = {};
+  for (const [uoa, arr] of Object.entries(rawMap || {})) {
+    const uoaName = String(arr?.[0] || '').trim();
+    const bands = [];
+    for (let i = 0; i < window.REF_BAND_LABELS.length; i++) {
+      const label = window.REF_BAND_LABELS[i];
+      const range = parseRefBandRange(arr?.[i + 1]);
+      if (range) bands.push({ label, min: range.min, max: range.max });
+    }
+    out[String(uoa)] = { uoa_name: uoaName, bands };
+  }
+  return out;
+}
+
+window.REF_UOA_BANDS = window.REF_UOA_BANDS || buildRefUoaBands(window.REF_UOA_BANDS_RAW);
+
+function refBandToBaseStar(label) {
+  const m = String(label || '').match(/^(\d)/);
+  return m ? clampInt(m[1], 0, 4) : 0;
+}
+
+function refBandToModifier(label) {
+  if (String(label).endsWith('+')) return '+';
+  if (String(label).endsWith('-')) return '-';
+  return '';
+}
+
+function refBandSortValue(label) {
+  const base = refBandToBaseStar(label);
+  const mod  = refBandToModifier(label);
+  if (mod === '+') return base + 0.25;
+  if (mod === '-') return base - 0.25;
+  return base;
+}
+
+function refLegacyBandFromPercent(pct) {
   const p = clampPct(pct);
-  // if pct is missing / invalid, keep "ungraded"
-  if (!Number.isFinite(+pct)) return 0;
-  if (p >= (t.four ?? 82))  return 4;
-  if (p >= (t.three ?? 76)) return 3;
-  if (p >= (t.two ?? 72))   return 2;
-  // Below 72 is still a 1* (per your spec)
-  return 1;
+  if (!Number.isFinite(+pct)) {
+    return { band: '0', star: 0, modifier: '', sort_value: 0, min: null, max: null };
+  }
+  if (p >= 82) return { band: '4', star: 4, modifier: '', sort_value: 4.0, min: 82, max: 100 };
+  if (p >= 76) return { band: '3', star: 3, modifier: '', sort_value: 3.0, min: 76, max: 82 };
+  if (p >= 72) return { band: '2', star: 2, modifier: '', sort_value: 2.0, min: 72, max: 76 };
+  return { band: '1', star: 1, modifier: '', sort_value: 1.0, min: 0, max: 72 };
+}
+
+function refScoreFromPercentAndUoa(pct, uoaNumber) {
+  const p = clampPct(pct);
+  const uoaKey = String(clampInt(uoaNumber, 1, 34));
+  const rec = window.REF_UOA_BANDS?.[uoaKey];
+
+  if (!rec || !Array.isArray(rec.bands) || !rec.bands.length) {
+    return refLegacyBandFromPercent(p);
+  }
+
+  for (let i = 0; i < rec.bands.length; i++) {
+    const b = rec.bands[i];
+    const isTopBand = (i === 0);
+    const hit = isTopBand
+      ? (p >= b.min && p <= b.max)
+      : (p >= b.min && p < b.max);
+
+    if (hit) {
+      return {
+        band: b.label,
+        star: refBandToBaseStar(b.label),
+        modifier: refBandToModifier(b.label),
+        sort_value: refBandSortValue(b.label),
+        min: b.min,
+        max: b.max
+      };
+    }
+  }
+
+  // Below calibrated floor => 1*
+  const floorMin = Number(rec.bands?.[rec.bands.length - 1]?.min ?? 40);
+  if (p < floorMin) {
+    return { band: '1', star: 1, modifier: '', sort_value: 1.0, min: 0, max: floorMin };
+  }
+
+  // Safety fallback
+  return refLegacyBandFromPercent(p);
+}
+
+// Keep this helper name because other code uses it
+function refStarsFromPercent(pct, uoaNumber = null) {
+  return refScoreFromPercentAndUoa(pct, uoaNumber).star;
 }
 
 function refOverallPctFromOSR(o, s, r, weights) {
-  // default equal weights
   const w = weights || { o: 1, s: 1, r: 1 };
   const wo = Number(w.o ?? 1), ws = Number(w.s ?? 1), wr = Number(w.r ?? 1);
   const denom = Math.max(1e-9, wo + ws + wr);
@@ -7469,11 +7609,16 @@ function refOverallPctFromOSR(o, s, r, weights) {
   return clampPct(pct);
 }
 
-// Apply thresholds to existing stored ref_percent values (no new AI calls)
 function applyRefThresholdsToResults(results) {
   for (const r of (results || [])) {
     const pct = clampPct(r.ref_percent ?? r.percent ?? r.overall_percent ?? 0);
-    r.overall_star = refStarsFromPercent(pct);
+    const uoa = r.uoa_number ?? r.ref_uoa_number ?? 0;
+    const score = refScoreFromPercentAndUoa(pct, uoa);
+
+    r.ref_score_band = score.band;
+    r.ref_score_modifier = score.modifier;
+    r.ref_score_sort_value = score.sort_value;
+    r.overall_star = score.star;
   }
   return results;
 }
@@ -7843,51 +7988,63 @@ async function runREFLens() {
     const notes = String(j.notes || '').trim().slice(0, 600);
 
     // Overall percentage (0–100); equal weights by default
-    const ref_percent = refOverallPctFromOSR(o100, s100, r100);
+    // Overall percentage (0–100); same AI prompt, same criterion scoring
+const ref_percent = refOverallPctFromOSR(o100, s100, r100);
 
-    // Stars derived ONLY from thresholds
-    const overall_star = refStarsFromPercent(ref_percent);
+// UoA-calibrated band score
+const refScore = refScoreFromPercentAndUoa(ref_percent, uoa_number);
+const overall_star = refScore.star;
 
-    // Persist onto the publication item so it is saveable with the project
-    try {
-      const it = itemsData?.[d.idx];
-      if (it) {
-        it.ref_uoa_number = uoa_number;
-        it.ref_uoa_name   = uoa_name;
-        it.ref_uoa_source = uoa_source;
+// Persist onto the publication item so it is saveable with the project JSON
+try {
+  const it = itemsData?.[d.idx];
+  if (it) {
+    it.ref_uoa_number = uoa_number;
+    it.ref_uoa_name   = uoa_name;
+    it.ref_uoa_source = uoa_source;
 
-        it.ref_originality_100  = o100;
-        it.ref_significance_100 = s100;
-        it.ref_rigour_100       = r100;
+    it.ref_originality_100  = o100;
+    it.ref_significance_100 = s100;
+    it.ref_rigour_100       = r100;
 
-        it.ref_percent    = ref_percent;
-        it.ref_star       = overall_star;
-        it.ref_confidence = confidence;
-        it.ref_notes      = notes;
-        it.ref_scored_at  = new Date().toISOString();
-      }
-    } catch (e) {
-      console.warn('Failed to persist REF scores onto item:', e);
-    }
+    it.ref_percent           = +ref_percent.toFixed(2);
+    it.ref_score_band        = refScore.band;          // e.g. "3+"
+    it.ref_score_modifier    = refScore.modifier;      // "+", "-", or ""
+    it.ref_score_sort_value  = refScore.sort_value;    // e.g. 3.25 / 3 / 2.75
+    it.ref_score_min         = refScore.min;
+    it.ref_score_max         = refScore.max;
+    it.ref_star              = overall_star;           // collapsed star band
+    it.ref_confidence        = confidence;
+    it.ref_notes             = notes;
+    it.ref_scored_at         = new Date().toISOString();
+  }
+} catch (e) {
+  console.warn('Failed to persist REF scores onto item:', e);
+}
 
-    results.push({
-      idx: d.idx,
-      title: d.title || '',
-      authors: d.authors || '',
-      year: d.year || '',
-      venue: d.venue || '',
-      doi: d.doi || '',
-      uoa_number,
-      uoa_name,
-      uoa_source,
-      originality_100: o100,
-      significance_100: s100,
-      rigour_100: r100,
-      ref_percent: +ref_percent.toFixed(2),
-      overall_star,
-      confidence,
-      notes
-    });
+results.push({
+  idx: d.idx,
+  title: d.title || '',
+  authors: d.authors || '',
+  year: d.year || '',
+  venue: d.venue || '',
+  doi: d.doi || '',
+  uoa_number,
+  uoa_name,
+  uoa_source,
+  originality_100: o100,
+  significance_100: s100,
+  rigour_100: r100,
+  ref_percent: +ref_percent.toFixed(2),
+  ref_score_band: refScore.band,
+  ref_score_modifier: refScore.modifier,
+  ref_score_sort_value: refScore.sort_value,
+  ref_score_min: refScore.min,
+  ref_score_max: refScore.max,
+  overall_star,
+  confidence,
+  notes
+});
 
     // Small pacing delay
     if (CALL_DELAY_MS > 0) {
@@ -7911,13 +8068,16 @@ async function runREFLens() {
     md = refSummaryMarkdown(summary);
     setSynthBodyText(md, 'ref_assessment.md');
 
-    const headers = [
-      'idx','title','authors','year','venue','doi',
-      'uoa_number','uoa_name','uoa_source',
-      'originality_100','significance_100','rigour_100',
-      'ref_percent','overall_star',
-      'confidence','notes'
-    ];
+const headers = [
+  'idx','title','authors','year','venue','doi',
+  'uoa_number','uoa_name','uoa_source',
+  'originality_100','significance_100','rigour_100',
+  'ref_percent',
+  'ref_score_band','ref_score_modifier','ref_score_sort_value',
+  'ref_score_min','ref_score_max',
+  'overall_star',
+  'confidence','notes'
+];
     const csv = toCSV(results, headers);
     downloadTextFile('ref_assessment.csv', csv, 'text/csv');
   } catch (e) {
@@ -7942,26 +8102,41 @@ async function runREFLens() {
 
 // ---- [ADD] REF summary stats helpers (GPA, distribution, Publication Power) ----
 function refOverallScoreFromRow(r) {
-  // Prefer explicit derived star
   const s = Number(r.overall_star);
   if (Number.isFinite(s)) return Math.max(0, Math.min(4, Math.round(s)));
 
-  // Fallback: derive from percent if present
   const p = Number(r.ref_percent);
-  if (Number.isFinite(p)) return refStarsFromPercent(p);
+  if (Number.isFinite(p)) {
+    const uoa = r.uoa_number ?? r.ref_uoa_number ?? 0;
+    return refStarsFromPercent(p, uoa);
+  }
 
   return 0;
 }
 
 function rebuildRefLensFromStoredScores(confMin = 0.5) {
-  // Build a results array from itemsData (no new calls)
   const results = [];
+
   for (let idx = 0; idx < (itemsData?.length || 0); idx++) {
     const it = itemsData[idx];
     if (!it) continue;
     if (it.ref_percent == null) continue;
 
     const confidence = Number(it.ref_confidence ?? 0);
+    const uoa_number = it.ref_uoa_number;
+    const pct = Number(it.ref_percent ?? 0);
+
+    const refScore = (it.ref_score_band != null)
+      ? {
+          band: String(it.ref_score_band),
+          modifier: String(it.ref_score_modifier || ''),
+          sort_value: Number(it.ref_score_sort_value ?? refBandSortValue(it.ref_score_band)),
+          min: Number.isFinite(+it.ref_score_min) ? +it.ref_score_min : null,
+          max: Number.isFinite(+it.ref_score_max) ? +it.ref_score_max : null,
+          star: Number.isFinite(+it.ref_star) ? +it.ref_star : refStarsFromPercent(pct, uoa_number)
+        }
+      : refScoreFromPercentAndUoa(pct, uoa_number);
+
     const r = {
       idx,
       title: it.label || it?.openalex?.title || it?.openalex?.display_name || '',
@@ -7969,19 +8144,23 @@ function rebuildRefLensFromStoredScores(confMin = 0.5) {
       year: it.year || '',
       venue: it.venue || '',
       doi: it.doi || it?.openalex?.doi || '',
-      uoa_number: it.ref_uoa_number,
+      uoa_number,
       uoa_name: it.ref_uoa_name,
       uoa_source: it.ref_uoa_source,
       originality_100: it.ref_originality_100,
       significance_100: it.ref_significance_100,
       rigour_100: it.ref_rigour_100,
-      ref_percent: it.ref_percent,
-      overall_star: refStarsFromPercent(it.ref_percent),
+      ref_percent: pct,
+      ref_score_band: refScore.band,
+      ref_score_modifier: refScore.modifier,
+      ref_score_sort_value: refScore.sort_value,
+      ref_score_min: refScore.min,
+      ref_score_max: refScore.max,
+      overall_star: refScore.star,
       confidence,
       notes: it.ref_notes || ''
     };
 
-    // optional: confidence filter here or leave it for computeRefSummary
     if (confidence >= confMin) results.push(r);
   }
 
