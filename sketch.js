@@ -622,12 +622,18 @@ let visAIDims  = 1.0;      // scales nodes in *AI* dimensions + their handles + 
 let visEdges   = 1.0;
 let visConceptMap = 0.0;
 
-let ovAbstracts = 0;     // outline ring on docs that have abstracts
-let ovOpenAccess = 0;    // green halo on OA docs
-let ovClusterColors = 0; // node tint saturation for clusters
-let ovClusterLabels = 0; // label pill opacity for clusters
+let ovAbstracts = 0;       // outline ring on docs that have abstracts
+let ovOpenAccess = 0;      // green halo on OA docs
+let ovClusterColors = 0;   // node tint saturation for clusters
+let ovClusterLabels = 0;   // label pill opacity for clusters
+let ovRefAssessment = 0;   // coloured REF asterisk overlay
+
 // Keep handles to overlay sliders so we can restore UI positions on load
-let ovAbsSlider = null, ovOASlider = null, ovClustColorSlider = null, ovClustLabelSlider = null;
+let ovAbsSlider = null,
+    ovOASlider = null,
+    ovClustColorSlider = null,
+    ovClustLabelSlider = null,
+    ovRefAssessmentSlider = null;
 let nodeSizeSlider = null;
 
 
@@ -2328,6 +2334,7 @@ const side = (r * 2 * getFulltextBoxMult()) * SELECT_SQUARE_MULT;
       }
     }
 // --- OA halo (under node) ---
+// --- OA halo (under node) ---
 if (ovOpenAccess > 0 && n.oa) {
   const stw   = 4 / cam.scale;                          // 4pt screen-space
   const bump  = (2 / cam.scale) + (stw * 0.5);          // extends beyond 2pt abstracts ring
@@ -2345,6 +2352,34 @@ rect(p.x, p.y, w, h, 2 / cam.scale);
   } else {
     const d = (r * 2) + bump;
     circle(p.x, p.y, d);
+  }
+}
+
+// --- REF Assessment overlay (coloured asterisk on scored outputs) ---
+if (ovRefAssessment > 0 && alpha > 0) {
+  const refScore = getNodeRefOverlayValue(i);
+  if (Number.isFinite(refScore)) {
+    const [rr, gg, bb] = refOverlayRGB(refScore);
+    const refA = Math.round(255 * ovRefAssessment);
+
+    push();
+    textAlign(CENTER, CENTER);
+    textStyle(BOLD);
+
+    // keep legible at different zoom levels / node sizes
+    const baseSize =
+      isSquare
+        ? (r * 2 * getFulltextBoxMult() * 0.95)
+        : (r * 2.1);
+
+    textSize(Math.max(10 / cam.scale, baseSize));
+
+    stroke(0, Math.round(refA * 0.75));
+    strokeWeight(2 / cam.scale);
+    fill(rr, gg, bb, refA);
+
+    text('*', p.x, p.y + (0.2 / cam.scale));
+    pop();
   }
 }
 
@@ -8114,6 +8149,54 @@ function refOverallScoreFromRow(r) {
   return 0;
 }
 
+function getNodeRefOverlayValue(i) {
+  const it = itemsData?.[i];
+  if (!it) return null;
+
+  // Best source: stored sortable calibrated REF band value
+  const sv = Number(it.ref_score_sort_value);
+  if (Number.isFinite(sv)) return Math.max(1, Math.min(4, sv));
+
+  // Fallback: derive from stored percent + UoA
+  const pct = Number(it.ref_percent);
+  if (Number.isFinite(pct)) {
+    const uoa = it.ref_uoa_number ?? 0;
+    const score = refScoreFromPercentAndUoa(pct, uoa);
+    const out = Number(score?.sort_value);
+    if (Number.isFinite(out)) return Math.max(1, Math.min(4, out));
+  }
+
+  // Older saved projects may only have collapsed star
+  const star = Number(it.ref_star);
+  if (Number.isFinite(star)) return Math.max(1, Math.min(4, star));
+
+  return null;
+}
+
+function lerpRGB(a, b, t) {
+  const tt = Math.max(0, Math.min(1, Number(t) || 0));
+  return [
+    Math.round(a[0] + (b[0] - a[0]) * tt),
+    Math.round(a[1] + (b[1] - a[1]) * tt),
+    Math.round(a[2] + (b[2] - a[2]) * tt)
+  ];
+}
+
+// 1 = green, 2 = yellow, 3 = orange, 4 = red, with interpolation between
+function refOverlayRGB(score) {
+  const s = Math.max(1, Math.min(4, Number(score) || 1));
+
+  const C1 = [ 70, 170,  95];  // green
+  const C2 = [235, 210,  65];  // yellow
+  const C3 = [245, 145,  45];  // orange
+  const C4 = [220,  60,  60];  // red
+
+  if (s <= 2) return lerpRGB(C1, C2, s - 1);
+  if (s <= 3) return lerpRGB(C2, C3, s - 2);
+  return lerpRGB(C3, C4, s - 3);
+}
+
+
 function rebuildRefLensFromStoredScores(confMin = 0.5) {
   const results = [];
 
@@ -8447,7 +8530,8 @@ const overlays = {
   ovAbstracts,
   ovOpenAccess,
   ovClusterColors,
-  ovClusterLabels     // ← no nodeSizeScale here
+  ovClusterLabels,
+  ovRefAssessment
 };
 
 
@@ -8711,20 +8795,22 @@ else { recomputeVisibility(); redraw(); }
 
 // Overlays (use new slider refs we captured in buildOverlaysInto)
 if (save.overlays) {
-  if (Number.isFinite(save.overlays.ovAbstracts))      ovAbstracts      = +save.overlays.ovAbstracts;
-  if (Number.isFinite(save.overlays.ovOpenAccess))     ovOpenAccess     = +save.overlays.ovOpenAccess;
-  if (Number.isFinite(save.overlays.ovClusterColors))  ovClusterColors  = +save.overlays.ovClusterColors;
-  if (Number.isFinite(save.overlays.ovClusterLabels))  ovClusterLabels  = +save.overlays.ovClusterLabels;
+  if (Number.isFinite(save.overlays.ovAbstracts))       ovAbstracts       = +save.overlays.ovAbstracts;
+  if (Number.isFinite(save.overlays.ovOpenAccess))      ovOpenAccess      = +save.overlays.ovOpenAccess;
+  if (Number.isFinite(save.overlays.ovClusterColors))   ovClusterColors   = +save.overlays.ovClusterColors;
+  if (Number.isFinite(save.overlays.ovClusterLabels))   ovClusterLabels   = +save.overlays.ovClusterLabels;
+  if (Number.isFinite(save.overlays.ovRefAssessment))   ovRefAssessment   = +save.overlays.ovRefAssessment;
 
   // Keep the 'domainClusters' lens in sync with the two overlay sliders
   lenses.domainClusters = (ovClusterColors > 0) || (ovClusterLabels > 0);
 
   // Push overlay values back into sliders if they're mounted
   try {
-    if (ovAbsSlider?.elt)         ovAbsSlider.elt.value        = String(Math.round(ovAbstracts*100));
-    if (ovOASlider?.elt)          ovOASlider.elt.value         = String(Math.round(ovOpenAccess*100));
-    if (ovClustColorSlider?.elt)  ovClustColorSlider.elt.value = String(Math.round(ovClusterColors*100));
-    if (ovClustLabelSlider?.elt)  ovClustLabelSlider.elt.value = String(Math.round(ovClusterLabels*100));
+    if (ovAbsSlider?.elt)            ovAbsSlider.elt.value            = String(Math.round(ovAbstracts*100));
+    if (ovOASlider?.elt)             ovOASlider.elt.value             = String(Math.round(ovOpenAccess*100));
+    if (ovClustColorSlider?.elt)     ovClustColorSlider.elt.value     = String(Math.round(ovClusterColors*100));
+    if (ovClustLabelSlider?.elt)     ovClustLabelSlider.elt.value     = String(Math.round(ovClusterLabels*100));
+    if (ovRefAssessmentSlider?.elt)  ovRefAssessmentSlider.elt.value  = String(Math.round(ovRefAssessment*100));
   } catch {}
 
   // Ensure cluster data exists if overlays are on
@@ -14266,6 +14352,12 @@ function buildOverlaysInto(containerBody) {
     redraw();
   });
 
+  // REF Assessment
+  ovRefAssessmentSlider = mkSlider('REF Assessment', Math.round(ovRefAssessment*100), (e) => {
+    ovRefAssessment = Number(e.target.value) / 100;
+    redraw();
+  });
+
 }
 
 
@@ -14707,18 +14799,20 @@ if (indexObj?.view) {
 
   // Overlays
   if (v.overlays) {
-    if (Number.isFinite(v.overlays.ovAbstracts))      ovAbstracts      = +v.overlays.ovAbstracts;
-    if (Number.isFinite(v.overlays.ovOpenAccess))     ovOpenAccess     = +v.overlays.ovOpenAccess;
-    if (Number.isFinite(v.overlays.ovClusterColors))  ovClusterColors  = +v.overlays.ovClusterColors;
-    if (Number.isFinite(v.overlays.ovClusterLabels))  ovClusterLabels  = +v.overlays.ovClusterLabels;
+    if (Number.isFinite(v.overlays.ovAbstracts))       ovAbstracts       = +v.overlays.ovAbstracts;
+    if (Number.isFinite(v.overlays.ovOpenAccess))      ovOpenAccess      = +v.overlays.ovOpenAccess;
+    if (Number.isFinite(v.overlays.ovClusterColors))   ovClusterColors   = +v.overlays.ovClusterColors;
+    if (Number.isFinite(v.overlays.ovClusterLabels))   ovClusterLabels   = +v.overlays.ovClusterLabels;
+    if (Number.isFinite(v.overlays.ovRefAssessment))   ovRefAssessment   = +v.overlays.ovRefAssessment;
 
     lenses.domainClusters = (ovClusterColors > 0) || (ovClusterLabels > 0);
 
     try {
-      if (ovAbsSlider?.elt)         ovAbsSlider.elt.value        = String(Math.round(ovAbstracts*100));
-      if (ovOASlider?.elt)          ovOASlider.elt.value         = String(Math.round(ovOpenAccess*100));
-      if (ovClustColorSlider?.elt)  ovClustColorSlider.elt.value = String(Math.round(ovClusterColors*100));
-      if (ovClustLabelSlider?.elt)  ovClustLabelSlider.elt.value = String(Math.round(ovClusterLabels*100));
+      if (ovAbsSlider?.elt)            ovAbsSlider.elt.value            = String(Math.round(ovAbstracts*100));
+      if (ovOASlider?.elt)             ovOASlider.elt.value             = String(Math.round(ovOpenAccess*100));
+      if (ovClustColorSlider?.elt)     ovClustColorSlider.elt.value     = String(Math.round(ovClusterColors*100));
+      if (ovClustLabelSlider?.elt)     ovClustLabelSlider.elt.value     = String(Math.round(ovClusterLabels*100));
+      if (ovRefAssessmentSlider?.elt)  ovRefAssessmentSlider.elt.value  = String(Math.round(ovRefAssessment*100));
     } catch {}
   }
 
@@ -14801,7 +14895,7 @@ const _userText  = (metaOverrides && typeof metaOverrides.userText  === 'string'
   camera: { x: cam.x, y: cam.y, scale: cam.scale },
   lenses: { ...lenses },  // shallow copy
   visibility: { visAllPubs, visDims, visAIDims, visEdges, nodeSizeScale},
-  overlays: { ovAbstracts, ovOpenAccess, ovClusterColors, ovClusterLabels }
+    overlays: { ovAbstracts, ovOpenAccess, ovClusterColors, ovClusterLabels, ovRefAssessment }
 };
 
   // Make sure dimsIndex is up-to-date for snapshotting
