@@ -2369,8 +2369,8 @@ if (ovRefAssessment > 0 && alpha > 0) {
     // keep legible at different zoom levels / node sizes
     const baseSize =
       isSquare
-        ? (r * 2 * getFulltextBoxMult() * 0.95)
-        : (r * 2.1);
+        ? (r * 2 * getFulltextBoxMult() * 1.9)
+        : (r * 4.2);
 
     textSize(Math.max(10 / cam.scale, baseSize));
 
@@ -3931,7 +3931,7 @@ const refsTotal = Array.isArray(w.referenced_works)
     const canExtract  = _hasFTCand(w, doiUrl);
 
     // REF score display (if available)
-    const refBand = String(item.ref_score_band || '').trim();
+        const refBand = String(item.ref_score_band || '').trim();
     const refPct  = Number(item.ref_percent);
     const refUoaNo = item.ref_uoa_number ?? '';
     const refUoaName = String(item.ref_uoa_name || '').trim();
@@ -3947,6 +3947,8 @@ const refsTotal = Array.isArray(w.referenced_works)
       ? `UoA ${refUoaNo}${refUoaName ? ` – ${refUoaName}` : ''}`
       : '';
 
+    const refUoaSelectId = `ref-uoa-select-${i}`;
+    const refUoaApplyMsgId = `ref-uoa-msg-${i}`;
     // IDs
     const absId       = `abs_${i}_${Date.now()}`;
     const absToggleId = `absT_${i}_${Date.now()}`;
@@ -3976,6 +3978,21 @@ const refsTotal = Array.isArray(w.referenced_works)
                <div>
                  <span style="font-weight:600;color:#ffd166">${safe(refDisplay)}</span>
                  ${refDetail ? `<div style="opacity:.7;font-size:11px;margin-top:2px">${safe(refDetail)}</div>` : ''}
+                 <div style="margin-top:8px">
+                   <label style="display:block;opacity:.7;font-size:11px;margin-bottom:4px">Change UoA</label>
+                   <select id="${refUoaSelectId}" style="
+                     width:100%;
+                     background:rgba(255,255,255,0.06);
+                     color:#fff;
+                     border:1px solid rgba(255,255,255,0.18);
+                     border-radius:6px;
+                     padding:6px 8px;
+                     font-size:12px;
+                   ">
+                     ${refUoaOptionsHtml(refUoaNo)}
+                   </select>
+                   <div id="${refUoaApplyMsgId}" style="opacity:.65;font-size:11px;margin-top:5px"></div>
+                 </div>
                </div>`
             : ''
         }
@@ -4108,7 +4125,21 @@ if (ftDlBtn) {
   if (typeof captureUI === 'function') captureUI(ftDlBtn);
   ftDlBtn.addEventListener('click', () => downloadExtractedFullText(i));
 }
-  }
+const refUoaSelect = document.getElementById(refUoaSelectId);
+if (refUoaSelect) {
+  if (typeof captureUI === 'function') captureUI(refUoaSelect);
+  refUoaSelect.addEventListener('change', (e) => {
+    const num = Math.round(Number(e.target.value));
+    const ok = recalibrateRefItemUoa(i, num);
+    const msg = document.getElementById(refUoaApplyMsgId);
+    if (msg) {
+      msg.textContent = ok ? 'REF score recalibrated for selected UoA.' : 'Unable to recalibrate REF score.';
+    }
+    try { updateInfo(); } catch {}
+  });
+}
+
+}
 async _renderRemoteNode(i) {
   try {
     // Resolve shard URL from node ID
@@ -4184,6 +4215,8 @@ console.log('Pill counts updated', { i, refs: it.refsCount, citedBy: it.cbc });
       ? d.invisibleUniTopics.map(s => String(s || '').trim()).filter(Boolean)
       : [];
 
+      
+
     // REF score display (prefer itemsData because REF scoring is stored there)
     const item = itemsData[i] || {};
     const refBand = String(item.ref_score_band || d.ref_score_band || '').trim();
@@ -4224,6 +4257,21 @@ console.log('Pill counts updated', { i, refs: it.refsCount, citedBy: it.cbc });
                <div>
                  <span style="font-weight:600;color:#ffd166">${safe(refDisplay)}</span>
                  ${refDetail ? `<div style="opacity:.7;font-size:11px;margin-top:2px">${safe(refDetail)}</div>` : ''}
+                 <div style="margin-top:8px">
+                   <label style="display:block;opacity:.7;font-size:11px;margin-bottom:4px">Change UoA</label>
+                   <select id="${refUoaSelectId}" style="
+                     width:100%;
+                     background:rgba(255,255,255,0.06);
+                     color:#fff;
+                     border:1px solid rgba(255,255,255,0.18);
+                     border-radius:6px;
+                     padding:6px 8px;
+                     font-size:12px;
+                   ">
+                     ${refUoaOptionsHtml(refUoaNo)}
+                   </select>
+                   <div id="${refUoaApplyMsgId}" style="opacity:.65;font-size:11px;margin-top:5px"></div>
+                 </div>
                </div>`
             : ''
         }
@@ -8250,6 +8298,119 @@ function rebuildRefLensFromStoredScores(confMin = 0.5) {
   window.__refLensLast = { when: Date.now(), count: results.length, results };
   return results;
 }
+function getRefUoaOptions() {
+  const out = [];
+
+  // Prefer parsed calibrated schema
+  const bands = window.REF_UOA_BANDS || {};
+  const keys = Object.keys(bands)
+    .map(k => Number(k))
+    .filter(n => Number.isFinite(n))
+    .sort((a, b) => a - b);
+
+  for (const n of keys) {
+    const rec = bands[String(n)] || {};
+    out.push({
+      number: n,
+      name: String(rec.uoa_name || '').trim()
+    });
+  }
+
+  // Fallback to raw map if needed
+  if (!out.length && window.REF_UOA_BANDS_RAW) {
+    const rawKeys = Object.keys(window.REF_UOA_BANDS_RAW)
+      .map(k => Number(k))
+      .filter(n => Number.isFinite(n))
+      .sort((a, b) => a - b);
+
+    for (const n of rawKeys) {
+      const arr = window.REF_UOA_BANDS_RAW[String(n)] || [];
+      out.push({
+        number: n,
+        name: String(arr[0] || '').trim()
+      });
+    }
+  }
+
+  return out;
+}
+
+function refUoaOptionsHtml(selectedNumber) {
+  const sel = Math.round(Number(selectedNumber) || 0);
+  return getRefUoaOptions().map(u => {
+    const chosen = (u.number === sel) ? ' selected' : '';
+    const label = `UoA ${u.number} – ${String(u.name || '').replace(/"/g, '&quot;')}`;
+    return `<option value="${u.number}"${chosen}>${label}</option>`;
+  }).join('');
+}
+
+function recalibrateRefItemUoa(idx, newUoaNumber, newUoaName = '') {
+  const i = Number(idx);
+  const it = itemsData?.[i];
+  if (!it) return false;
+
+  const uoa_number = Math.round(Number(newUoaNumber));
+  if (!Number.isFinite(uoa_number) || uoa_number < 1 || uoa_number > 34) return false;
+
+  const derivedName =
+    String(newUoaName || '').trim() ||
+    String(window.REF_UOA_BANDS?.[String(uoa_number)]?.uoa_name || '').trim() ||
+    String(window.REF_UOA_BANDS_RAW?.[String(uoa_number)]?.[0] || '').trim();
+
+  // Use stored criterion scores; no new AI call
+  const o100 = clampPct(it.ref_originality_100);
+  const s100 = clampPct(it.ref_significance_100);
+  const r100 = clampPct(it.ref_rigour_100);
+
+  const ref_percent = refOverallPctFromOSR(o100, s100, r100);
+  const refScore = refScoreFromPercentAndUoa(ref_percent, uoa_number);
+
+  it.ref_uoa_number = uoa_number;
+  it.ref_uoa_name = derivedName;
+  it.ref_uoa_source = 'Manual';
+
+  it.ref_percent = +ref_percent.toFixed(2);
+  it.ref_score_band = refScore.band;
+  it.ref_score_modifier = refScore.modifier;
+  it.ref_score_sort_value = refScore.sort_value;
+  it.ref_score_min = refScore.min;
+  it.ref_score_max = refScore.max;
+  it.ref_star = refScore.star;
+  it.ref_scored_at = new Date().toISOString();
+
+  // Keep the cached lens results in sync if present
+  try {
+    const rows = window.__refLensLast?.results;
+    if (Array.isArray(rows)) {
+      const row = rows.find(r => Number(r.idx) === i);
+      if (row) {
+        row.uoa_number = uoa_number;
+        row.uoa_name = derivedName;
+        row.uoa_source = 'Manual';
+        row.ref_percent = +ref_percent.toFixed(2);
+        row.ref_score_band = refScore.band;
+        row.ref_score_modifier = refScore.modifier;
+        row.ref_score_sort_value = refScore.sort_value;
+        row.ref_score_min = refScore.min;
+        row.ref_score_max = refScore.max;
+        row.overall_star = refScore.star;
+      }
+    }
+  } catch (e) {
+    console.warn('REF recalibration cache sync failed:', e);
+  }
+
+  try {
+    if (typeof updateInfo === 'function') updateInfo();
+  } catch {}
+
+  try {
+    if (typeof redraw === 'function') redraw();
+  } catch {}
+
+  return true;
+}
+
 
 function computeRefSummary(results, confMin = 0.5) {
   const kept = (results || []).filter(r => Number(r.confidence) >= confMin);
