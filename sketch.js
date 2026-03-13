@@ -2851,11 +2851,24 @@ forEachEdge((ai, bi, L) => {
     clusterOf[ai] != null &&
     clusterOf[ai] === clusterOf[bi];
 
+  const edgeWeight = Math.max(1, Number(L?.weight || 1));
+
+  const conceptBoost =
+    (viewMode === 'concept')
+      ? Math.min(4.0, 1 + (edgeWeight - 1) * 0.45)
+      : 1.0;
+
   const k = physics.spring *
             (sameCluster ? physics.clusterSpringBoost : physics.crossSpringFactor) *
+            conceptBoost *
             layoutAlpha;
 
-  const rl = physics.restLength;
+  const rl =
+    (viewMode === 'concept')
+      ? Math.max(38, physics.restLength - (edgeWeight - 1) * 10)
+      : physics.restLength;
+
+
   const f  = k * (d - rl);
   const fx = (f * dx / d);
   const fy = (f * dy / d);
@@ -4594,12 +4607,27 @@ function recomputeVisibility() {
     // NEW: cluster-size filter (0 = off)
   const cid = (Array.isArray(clusterOf) ? clusterOf[i] : -1);
   const csz = (cid != null && cid >= 0 && Array.isArray(clusterSizesTotal)) ? (clusterSizesTotal[cid] || 0) : 0;
-  const passCluster = (clusterSizeThreshold <= 0) ? true : (csz >= clusterSizeThreshold);
+    const passCluster = (clusterSizeThreshold <= 0) ? true : (csz >= clusterSizeThreshold);
+
+    // In Concept mode, only show nodes that belong to a qualifying concept cluster
+    const passConceptMode = (viewMode === 'concept')
+      ? (cid >= 0 && csz >= CONCEPT_CLUSTER_MIN_NODES)
+      : true;
 
     // NEW: viability — highest-wins scale; 0 means OFF
     const passViab = visScaleForNode(i) > 0;
-const passFocus = focusNodes ? focusNodes.has(i) : true;
-visibleMask[i] = passDeg && passYear && passDim && passOA && passExt && passViab && passCluster && passFocus;
+    const passFocus = focusNodes ? focusNodes.has(i) : true;
+
+    visibleMask[i] =
+      passDeg &&
+      passYear &&
+      passDim &&
+      passOA &&
+      passExt &&
+      passViab &&
+      passCluster &&
+      passConceptMode &&
+      passFocus;
   }
 
   // Drop hover immediately if its node just turned invisible
@@ -10671,6 +10699,27 @@ let viewMenu = null;
 
 let viewMode = 'citation'; // 'citation' | 'thematic'
 
+// ─────────────────────────────────────────────────────────────
+// Concept Cluster view (publication graph built from shared OpenAlex concepts)
+// ─────────────────────────────────────────────────────────────
+const CONCEPT_CLUSTER_MIN_NODES = 5;
+
+// Current threshold: Level 1 = share >=1 concept, Level 2 = share >=2 concepts, etc.
+let conceptClusterLevel = 1;
+
+// Filter UI
+let conceptLevelSlider = null;
+let conceptLevelLabel  = null;
+let conceptLevelInput  = null;
+
+// Runtime/cache state for publication-level concept clustering
+let conceptClusterState = {
+  pairWeights: null,       // Map "i|j" -> shared concept count
+  maxShared: 1,            // max number of shared concepts on any pair
+  conceptsByNode: [],      // concepts per node (normalised strings)
+  builtForDatasetKey: null
+};
+
 // Stash for restoring
 let _stash = {
   clusterOf: null,
@@ -11088,6 +11137,17 @@ const __viewCache = (window.__viewCache ||= {
     lensesShowEdges: null,
     settings: null,   // {topicThreshold, topKPerNode, maxTopicDfFrac}
     builtKey: null
+  },
+  concept: {
+    pos: null,
+    edges: null,
+    clusterOf: null,
+    clusterSizesTotal: null,
+    clusterColors: null,
+    clusterLabels: null,
+    lensesShowEdges: null,
+    builtKey: null,
+    level: 1
   }
 });
 
@@ -11121,6 +11181,7 @@ function __applyClustersFromCache(c) {
   if (c.clusterSizesTotal) clusterSizesTotal = c.clusterSizesTotal.slice();
   if (c.clusterColors) clusterColors = c.clusterColors.slice();
   if (c.clusterLabels) clusterLabels = c.clusterLabels.slice();
+  clusterCount = Array.isArray(clusterSizesTotal) ? clusterSizesTotal.length : 0;
 }
 
 function __ensureClusterLabelsForCurrentClusters() {
@@ -11149,6 +11210,239 @@ function __ensureClusterLabelsForCurrentClusters() {
   const k = (Array.isArray(clusterSizesTotal) ? clusterSizesTotal.length : 0) || (Math.max(-1, ...lab) + 1);
   clusterLabels = new Array(Math.max(0, k)).fill('').map((_, cid) => names[cid] || `Theme ${cid+1}`);
 }
+function __conceptDatasetKey() {
+  const base = (typeof makeInstitutionCacheKey === 'function')
+    ? makeInstitutionCacheKey()
+    : `n:${nodes?.length || 0}`;
+  return `${base}|conceptClusters`;
+}
+
+function getOpenAlexConceptsForNodeIndex(i) {
+  const item = itemsData?.[i] || {};
+  const w = item.openalex || {};
+  const arr = Array.isArray(w.concepts) ? w.concepts : [];
+  if (!arr.length) return [];
+
+  const out = [];
+  const seen = new Set();
+
+  for (const c of arr) {
+    if (!c) continue;
+    const name = String(c.display_name || c.id || '').trim().toLowerCase();
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    out.push(name);
+  }
+  return out;
+}
+
+function rebuildConceptClusterInventory() {
+  const n = nodes.length | 0;
+  const datasetKey = __conceptDatasetKey();
+
+  if (conceptClusterState.builtForDatasetKey === datasetKey &&
+      Array.isArray(conceptClusterState.conceptsByNode) &&
+      conceptClusterState.conceptsByNode.length === n &&
+      conceptClusterState.pairWeights instanceof Map) {
+    return conceptClusterState;
+  }
+
+  const conceptsByNode = new Array(n);
+  const conceptToNodes = new Map();
+
+  for (let i = 0; i < n; i++) {
+    const arr = getOpenAlexConceptsForNodeIndex(i);
+    conceptsByNode[i] = arr;
+
+    for (const name of arr) {
+      if (!conceptToNodes.has(name)) conceptToNodes.set(name, []);
+      conceptToNodes.get(name).push(i);
+    }
+  }
+
+  // Build pairwise shared-concept counts using inverted index
+  const pairWeights = new Map();
+  let maxShared = 1;
+
+  for (const ids of conceptToNodes.values()) {
+    const m = ids.length;
+    if (m < 2) continue;
+
+    for (let a = 0; a < m; a++) {
+      const i = ids[a] | 0;
+      for (let b = a + 1; b < m; b++) {
+        const j = ids[b] | 0;
+        const key = i < j ? `${i}|${j}` : `${j}|${i}`;
+        const next = (pairWeights.get(key) || 0) + 1;
+        pairWeights.set(key, next);
+        if (next > maxShared) maxShared = next;
+      }
+    }
+  }
+
+  conceptClusterState = {
+    pairWeights,
+    maxShared: Math.max(1, maxShared),
+    conceptsByNode,
+    builtForDatasetKey: datasetKey
+  };
+
+  return conceptClusterState;
+}
+
+function randomiseConceptClusterPositions() {
+  const n = nodes.length | 0;
+  if (!n) return;
+
+  setWorldSizeForN?.(n);
+
+  const cols = Math.ceil(Math.sqrt(n));
+  const rows = Math.ceil(n / cols);
+  const gapX = Math.max(110, Math.floor(world.w / (cols + 1)));
+  const gapY = Math.max(110, Math.floor(world.h / (rows + 1)));
+  const jitter = 28;
+
+  for (let i = 0; i < n; i++) {
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    nodes[i].x = (col + 1) * gapX + (Math.random() * 2 - 1) * jitter;
+    nodes[i].y = (row + 1) * gapY + (Math.random() * 2 - 1) * jitter;
+  }
+
+  adjustWorldToContent?.(160);
+}
+
+function buildConceptClusterGraphForLevel(level = 1) {
+  const n = nodes.length | 0;
+  const inv = rebuildConceptClusterInventory();
+  const minShared = Math.max(1, level | 0);
+
+  const nextEdges = [];
+  const localAdj = Array.from({ length: n }, () => []);
+
+  if (inv?.pairWeights instanceof Map) {
+    for (const [key, shared] of inv.pairWeights.entries()) {
+      if ((shared | 0) < minShared) continue;
+      const [aStr, bStr] = key.split('|');
+      const a = aStr | 0, b = bStr | 0;
+      nextEdges.push({ source: a, target: b, weight: shared });
+      localAdj[a].push(b);
+      localAdj[b].push(a);
+    }
+  }
+
+  // Connected components on the thresholded graph
+  const visited = new Array(n).fill(false);
+  const rawComponents = [];
+
+  for (let i = 0; i < n; i++) {
+    if (visited[i]) continue;
+    visited[i] = true;
+
+    if (!localAdj[i].length) {
+      rawComponents.push([i]);
+      continue;
+    }
+
+    const comp = [];
+    const q = [i];
+
+    while (q.length) {
+      const cur = q.pop();
+      comp.push(cur);
+      const nbrs = localAdj[cur];
+      for (let k = 0; k < nbrs.length; k++) {
+        const nb = nbrs[k] | 0;
+        if (visited[nb]) continue;
+        visited[nb] = true;
+        q.push(nb);
+      }
+    }
+
+    rawComponents.push(comp);
+  }
+
+  // Keep only clusters with at least 5 nodes
+  const kept = rawComponents.filter(arr => (arr?.length || 0) >= CONCEPT_CLUSTER_MIN_NODES);
+
+  const nextClusterOf = new Array(n).fill(-1);
+  const nextClusterSizes = [];
+  const nextClusterLabels = [];
+
+  for (let cid = 0; cid < kept.length; cid++) {
+    const arr = kept[cid];
+    nextClusterSizes[cid] = arr.length;
+    nextClusterLabels[cid] = `L${minShared}.${cid + 1}`;
+    for (const idx of arr) nextClusterOf[idx] = cid;
+  }
+
+  const paletteN = Math.max(1, kept.length);
+  const nextClusterColors = (typeof defaultClusterPalette === 'function')
+    ? (defaultClusterPalette(paletteN) || [])
+    : [];
+
+  return {
+    level: minShared,
+    edges: nextEdges,
+    clusterOf: nextClusterOf,
+    clusterSizesTotal: nextClusterSizes,
+    clusterLabels: nextClusterLabels,
+    clusterColors: nextClusterColors
+  };
+}
+
+function __buildConceptGraphIfNeeded(level = conceptClusterLevel) {
+  const cc = __viewCache.concept;
+  const datasetKey = __conceptDatasetKey();
+  const key = `${datasetKey}|level:${Math.max(1, level|0)}`;
+
+  if (cc.builtKey === key &&
+      Array.isArray(cc.edges) &&
+      Array.isArray(cc.clusterOf) &&
+      cc.clusterOf.length === nodes.length) {
+    return;
+  }
+
+  const built = buildConceptClusterGraphForLevel(level);
+
+  edges = built.edges || [];
+  buildAdjacency?.(nodes.length, edges);
+
+  clusterOf = built.clusterOf || new Array(nodes.length).fill(-1);
+  clusterSizesTotal = built.clusterSizesTotal || [];
+  clusterLabels = built.clusterLabels || [];
+  clusterColors = built.clusterColors || [];
+  clusterCount = clusterSizesTotal.length | 0;
+
+  cc.builtKey = key;
+  cc.level = built.level;
+  cc.edges = __cloneEdges(edges);
+  cc.clusterOf = clusterOf.slice();
+  cc.clusterSizesTotal = clusterSizesTotal.slice();
+  cc.clusterLabels = clusterLabels.slice();
+  cc.clusterColors = clusterColors.slice();
+  cc.lensesShowEdges = (typeof lenses === 'object' && lenses) ? !!lenses.showEdges : null;
+}
+
+function switchToConceptClusterMode() {
+  if (!nodes?.length) return;
+
+  __snapshotView(viewMode || 'citation');
+
+  conceptClusterLevel = Math.max(1, conceptClusterLevel | 0);
+  __buildConceptGraphIfNeeded(conceptClusterLevel);
+
+  viewMode = 'concept';
+
+  // First time in this mode: start from a fresh random scatter
+  if (!__viewCache.concept.pos || __viewCache.concept.pos.length !== nodes.length) {
+    randomiseConceptClusterPositions();
+    __viewCache.concept.pos = nodes.map(n => ({ x: n.x, y: n.y }));
+  }
+
+  __applyView('concept');
+}
+
 
 function __applyView(mode) {
   if (!nodes?.length) return;
@@ -11185,6 +11479,11 @@ function __applyView(mode) {
   buildDimensionsIndex?.();
   updateDimSections?.();
   initClusterFilterUI?.();
+  initConceptLevelFilterUI?.();
+
+  if (mode === 'concept') {
+    conceptClusterLevel = Math.max(1, (__viewCache.concept?.level || conceptClusterLevel || 1) | 0);
+  }
 
   adjustWorldToContent?.(160);
   fitContentInView?.(40);
@@ -14212,6 +14511,31 @@ function mixRGB(a, b, t){
     Math.round(a[2]*u + b[2]*(1-u)),
   ];
 }
+function initConceptLevelFilterUI() {
+  if (!conceptLevelSlider) return;
+
+  const inv = rebuildConceptClusterInventory();
+  const max = Math.max(1, Number(inv?.maxShared || 1));
+
+  conceptLevelSlider.elt.min = '1';
+  conceptLevelSlider.elt.max = String(max);
+
+  if (conceptClusterLevel > max) conceptClusterLevel = max;
+  if (conceptClusterLevel < 1) conceptClusterLevel = 1;
+
+  conceptLevelSlider.elt.value = String(conceptClusterLevel);
+
+  if (conceptLevelInput) {
+    conceptLevelInput.attribute('min', '1');
+    conceptLevelInput.attribute('max', String(max));
+    conceptLevelInput.elt.value = String(conceptClusterLevel);
+  }
+
+  if (conceptLevelLabel) {
+    conceptLevelLabel.html(`Concept cluster level ≥ ${conceptClusterLevel} shared concepts`);
+  }
+}
+
 
 function buildFiltersInto(containerBody) {
   if (!containerBody) return;
@@ -14297,6 +14621,49 @@ function buildFiltersInto(containerBody) {
     updateDegLabel?.();
     applyDegreeFilter(degThreshold);
   });
+
+  // --- Concept cluster level ---
+  conceptLevelLabel = createDiv(`Concept cluster level ≥ ${conceptClusterLevel|0} shared concepts`);
+  conceptLevelLabel.parent(containerBody);
+  conceptLevelLabel.style('color','#eaeaea');
+  conceptLevelLabel.style('font-size','12px');
+  conceptLevelLabel.style('margin','10px 0 6px');
+
+  const conceptMaxInit = Math.max(1, Number(conceptClusterState?.maxShared || 1));
+  conceptLevelSlider = createSlider(1, conceptMaxInit, Math.max(1, conceptClusterLevel|0), 1);
+  conceptLevelSlider.parent(containerBody);
+  conceptLevelSlider.style('width','100%');
+  conceptLevelSlider.style('margin','0 0 6px');
+  captureUI?.(conceptLevelSlider.elt);
+
+  conceptLevelInput = mkNum(Math.max(1, conceptClusterLevel|0), { min:1, max:conceptMaxInit, step:1 }, (v)=>{
+    const max = Math.max(1, Number(rebuildConceptClusterInventory()?.maxShared || 1));
+    conceptClusterLevel = clamp(v|0, 1, max);
+    conceptLevelSlider.elt.value = String(conceptClusterLevel);
+    conceptLevelLabel.html(`Concept cluster level ≥ ${conceptClusterLevel} shared concepts`);
+
+    if (viewMode === 'concept') {
+      __buildConceptGraphIfNeeded(conceptClusterLevel);
+      __applyView('concept');
+    } else {
+      redraw();
+    }
+  });
+
+  conceptLevelSlider.input(() => {
+    const max = Math.max(1, Number(rebuildConceptClusterInventory()?.maxShared || 1));
+    conceptClusterLevel = clamp(Number(conceptLevelSlider.value())|0, 1, max);
+    conceptLevelLabel.html(`Concept cluster level ≥ ${conceptClusterLevel} shared concepts`);
+    if (conceptLevelInput) conceptLevelInput.elt.value = String(conceptClusterLevel);
+
+    if (viewMode === 'concept') {
+      __buildConceptGraphIfNeeded(conceptClusterLevel);
+      __applyView('concept');
+    } else {
+      redraw();
+    }
+  });
+
 
   // --- Cluster size ---
   clusterSizeLabel = createDiv(`Show clusters ≥ ${clusterSizeThreshold|0} nodes`);
@@ -19780,6 +20147,10 @@ function attachViewMenuToLayoutIcon(btn) {
 
     addItem('Thematic manifold view', () => {
       switchToThematicManifoldMode?.();
+    });
+
+        addItem('Concept cluster view', () => {
+      switchToConceptClusterMode?.();
     });
 
     document.body.appendChild(viewMenu.elt);
