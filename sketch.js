@@ -3006,6 +3006,199 @@ function parseStarBandToREFScore(x) {
   return clampREFScore(star + 1);
 }
 
+// ─────────────────────────────────────────────────────────────
+// Cluster info helpers (thematic fingerprints/authors + REF mini summary)
+// ─────────────────────────────────────────────────────────────
+
+function getAuthorsForItemIndex(i) {
+  const item = itemsData?.[i] || {};
+  const w = item.openalex || {};
+  const arr =
+    (Array.isArray(item.authors) && item.authors.length)
+      ? item.authors
+      : (Array.isArray(w.authorships)
+          ? w.authorships.map(a => a?.author?.display_name).filter(Boolean)
+          : []);
+  return Array.from(new Set(arr.map(x => String(x || '').trim()).filter(Boolean)));
+}
+
+function getThematicFingerprintsForItemIndex(i) {
+  const item = itemsData?.[i] || {};
+  const arr = Array.isArray(item.invisibleUniTopics) ? item.invisibleUniTopics : [];
+  return Array.from(new Set(arr.map(x => String(x || '').trim()).filter(Boolean)));
+}
+
+function topCountsFromNodeIds(nodeIds, getter, limit = 10) {
+  const counts = new Map();
+  for (const i of (nodeIds || [])) {
+    const arr = getter(i);
+    for (const raw of (arr || [])) {
+      const key = String(raw || '').trim();
+      if (!key) continue;
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+  }
+  return Array.from(counts.entries())
+    .map(([name, count]) => ({ name, count }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
+    .slice(0, Math.max(1, limit | 0));
+}
+
+function refBandToClusterGpaValue(band, starVal = null) {
+  const b = String(band || '').trim();
+
+  const MAP = {
+    '4+': 4.3, '4': 4.0, '4-': 3.7,
+    '3+': 3.3, '3': 3.0, '3-': 2.7,
+    '2+': 2.3, '2': 2.0, '2-': 1.7,
+    '1+': 1.3, '1': 1.0, '1-': 0.7,
+    '0': 0.0
+  };
+
+  if (MAP[b] != null) return MAP[b];
+
+  const m = b.match(/([0-4])\s*\*/);
+  if (m) {
+    const s = Number(m[1]);
+    if (Number.isFinite(s)) return s;
+  }
+
+  const star = Number(starVal);
+  if (Number.isFinite(star)) return Math.max(0, Math.min(4, star));
+
+  return null;
+}
+
+function collectClusterRefSummary(nodeIds) {
+  const order = ['4+','4','4-','3+','3','3-','2+','2','2-','1+','1','1-','0'];
+  const dist = Object.fromEntries(order.map(k => [k, 0]));
+
+  let n = 0;
+  let sum = 0;
+
+  for (const i of (nodeIds || [])) {
+    const item = itemsData?.[i];
+    if (!item) continue;
+
+    const band = String(item.ref_score_band || '').trim();
+    const star = Number(item.ref_star);
+    const gpaVal = refBandToClusterGpaValue(band, star);
+
+    if (gpaVal == null) continue;
+
+    n += 1;
+    sum += gpaVal;
+
+    if (band && dist[band] != null) {
+      dist[band] += 1;
+    } else if (Number.isFinite(star)) {
+      const starKey = String(Math.max(0, Math.min(4, star)));
+      if (dist[starKey] == null) dist[starKey] = 0;
+      dist[starKey] += 1;
+    }
+  }
+
+  return {
+    n,
+    gpa: n ? (sum / n) : 0,
+    dist,
+    order
+  };
+}
+
+function svgClusterRefBars(sum, width = 236, height = 86) {
+  const order = sum?.order || ['4+','4','4-','3+','3','3-','2+','2','2-','1+','1','1-','0'];
+  const dist  = sum?.dist || {};
+  const maxV  = Math.max(1, ...order.map(k => Number(dist[k] || 0)));
+  const padL = 6, padR = 6, padT = 8, padB = 20;
+  const innerW = width - padL - padR;
+  const innerH = height - padT - padB;
+  const gap = 4;
+  const bw = Math.max(6, Math.floor((innerW - gap * (order.length - 1)) / order.length));
+
+  const fillFor = (k) => {
+    if (k.startsWith('4')) return 'rgb(220,60,60)';
+    if (k.startsWith('3')) return 'rgb(245,145,45)';
+    if (k.startsWith('2')) return 'rgb(235,210,65)';
+    if (k.startsWith('1')) return 'rgb(120,180,95)';
+    return 'rgb(120,120,120)';
+  };
+
+  let x = padL;
+  const bars = order.map(k => {
+    const v = Number(dist[k] || 0);
+    const h = Math.round((v / maxV) * innerH);
+    const y = padT + innerH - h;
+    const rect = `<rect x="${x}" y="${y}" width="${bw}" height="${Math.max(1,h)}" rx="2" fill="${fillFor(k)}" opacity="0.95"></rect>`;
+    const lab  = `<text x="${x + bw/2}" y="${height - 6}" text-anchor="middle" font-size="9" fill="rgba(255,255,255,0.85)">${k}</text>`;
+    const val  = v > 0 ? `<text x="${x + bw/2}" y="${Math.max(10, y - 2)}" text-anchor="middle" font-size="9" fill="rgba(255,255,255,0.9)">${v}</text>` : '';
+    x += bw + gap;
+    return rect + val + lab;
+  }).join('');
+
+  return `
+    <svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="REF distribution">
+      <rect x="0" y="0" width="${width}" height="${height}" rx="6" fill="rgba(255,255,255,0.04)" stroke="rgba(255,255,255,0.12)"></rect>
+      <line x1="${padL}" y1="${padT + innerH}" x2="${width - padR}" y2="${padT + innerH}" stroke="rgba(255,255,255,0.25)" stroke-width="1"></line>
+      ${bars}
+    </svg>
+  `;
+}
+
+function buildThematicClusterInfoHTML(d) {
+  if (!d || d.type !== 'clusters' || viewMode !== 'thematic') return '';
+
+  const nodeIds = d.nodes
+    ? (Array.isArray(d.nodes) ? d.nodes.slice() : Array.from(d.nodes))
+    : [];
+
+  if (!nodeIds.length) return '';
+
+  const topFingerprints = topCountsFromNodeIds(nodeIds, getThematicFingerprintsForItemIndex, 12);
+  const topAuthors      = topCountsFromNodeIds(nodeIds, getAuthorsForItemIndex, 12);
+  const refSum          = collectClusterRefSummary(nodeIds);
+
+  const chipList = (rows, emptyLabel) => {
+    if (!rows || !rows.length) {
+      return `<div style="opacity:.65;font-size:12px">${emptyLabel}</div>`;
+    }
+    return `
+      <div style="display:flex;flex-wrap:wrap;gap:6px;">
+        ${rows.map(r => `
+          <span style="
+            display:inline-block;
+            padding:3px 8px;
+            border-radius:999px;
+            font-size:11px;
+            line-height:1.25;
+            background:rgba(255,255,255,0.08);
+            border:1px solid rgba(255,255,255,0.12);
+            color:#fff;">${esc(r.name)} <span style="opacity:.7">(${r.count})</span></span>
+        `).join('')}
+      </div>
+    `;
+  };
+
+  const gpaTxt = refSum.n ? refSum.gpa.toFixed(2) : 'n/a';
+
+  return `
+    <div style="margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.12)">
+      <div style="font-weight:600;font-size:13px;margin:0 0 6px;">Thematic Fingerprints</div>
+      ${chipList(topFingerprints, 'No thematic fingerprints found for this cluster.')}
+
+      <div style="font-weight:600;font-size:13px;margin:12px 0 6px;">Authors Defining Links</div>
+      ${chipList(topAuthors, 'No author data found for this cluster.')}
+
+      <div style="font-weight:600;font-size:13px;margin:12px 0 4px;">REF Profile</div>
+      <div style="display:grid;grid-template-columns:auto 1fr;gap:6px 10px;font-size:12px;margin-bottom:8px">
+        <div style="opacity:.7">Scored outputs</div><div>${refSum.n}</div>
+        <div style="opacity:.7">GPA</div><div>${gpaTxt}</div>
+      </div>
+      ${refSum.n ? svgClusterRefBars(refSum, 236, 86) : `<div style="opacity:.65;font-size:12px">No REF scores available for this cluster.</div>`}
+    </div>
+  `;
+}
+
 
 function findHoverNode(wx, wy) {
   if (!nodes.length) return -1;
@@ -3688,8 +3881,7 @@ setCanvasOverview() {
 }
 
 
-
-  _renderDimensionPanel(k) {
+ _renderDimensionPanel(k) {
   const d = dimTools?.[k];
   if (!d) { this.hide(); return; }
 
@@ -3704,8 +3896,8 @@ setCanvasOverview() {
 
   const safe = s => String(s ?? '').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
 
-
   const delLabel = (String(d.type).toLowerCase() === 'ai') ? 'Delete Lens' : 'Delete Dimension';
+
   this.div.html(`
     <div style="font-weight:600;font-size:16px;margin-bottom:6px">${safe(title)}</div>
 
@@ -3725,7 +3917,7 @@ setCanvasOverview() {
         aria-label="${delLabel}" title="${delLabel}">
        ${delLabel}
      </button>
-         </div>
+    </div>
   `);
 
   const powEl = document.getElementById(powId);
@@ -3734,9 +3926,7 @@ setCanvasOverview() {
     powEl.addEventListener('input', (e) => {
       const v = Number(e.target.value || 0);
       d.power = v;
-       d.userMoved = true; 
-      // If your layout uses power to reposition, you may want to kick it here:
-      // layoutRunning = true; loop();
+      d.userMoved = true;
       if (lenses?.hideNonDim) recomputeVisibility?.();
       redraw();
     });
@@ -3749,83 +3939,90 @@ setCanvasOverview() {
       deleteDimension?.(k);
     });
   }
-// --- extra content for AI dimensions ---
-if (d.type === 'ai') {
-  const bodyId = `aiBody_${Date.now()}`;
-  const dlId   = `aiDL_${Date.now()}`;
-  const fullId = `aiOpen_${Date.now()}`;
-  const when   = d.aiCreatedAt ? new Date(d.aiCreatedAt).toLocaleString() : '';
-  const html = `
-    <div style="margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.12)">
-      <div style="font-weight:600;font-size:13px;margin:0 0 4px;">Summary${when ? ` <span style="opacity:.6;font-weight:400">• ${when}</span>` : ''}</div>
-      <div id="${bodyId}" style="white-space:pre-wrap;font-size:12px;line-height:1.5;
-           max-height:200px;overflow:auto;border:1px solid rgba(255,255,255,0.12);
-           background:rgba(255,255,255,0.03);padding:8px;border-radius:6px;"></div>
-      <div style="display:flex;gap:8px;margin-top:8px;">
-        <button id="${dlId}"   style="background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.2);color:#fff;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:12px">Download .md</button>
-        <button id="${fullId}" style="background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.2);color:#fff;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:12px">Open full view</button>
+
+  // --- extra content for CLUSTER dimensions in thematic manifold ---
+  if (d.type === 'clusters' && viewMode === 'thematic') {
+    const clusterHtml = buildThematicClusterInfoHTML(d);
+    if (clusterHtml) {
+      this.div.elt.insertAdjacentHTML('beforeend', clusterHtml);
+    }
+  }
+
+  // --- extra content for AI dimensions ---
+  if (d.type === 'ai') {
+    const bodyId = `aiBody_${Date.now()}`;
+    const dlId   = `aiDL_${Date.now()}`;
+    const fullId = `aiOpen_${Date.now()}`;
+    const when   = d.aiCreatedAt ? new Date(d.aiCreatedAt).toLocaleString() : '';
+    const html = `
+      <div style="margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.12)">
+        <div style="font-weight:600;font-size:13px;margin:0 0 4px;">Summary${when ? ` <span style="opacity:.6;font-weight:400">• ${when}</span>` : ''}</div>
+        <div id="${bodyId}" style="white-space:pre-wrap;font-size:12px;line-height:1.5;
+             max-height:200px;overflow:auto;border:1px solid rgba(255,255,255,0.12);
+             background:rgba(255,255,255,0.03);padding:8px;border-radius:6px;"></div>
+        <div style="display:flex;gap:8px;margin-top:8px;">
+          <button id="${dlId}"   style="background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.2);color:#fff;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:12px">Download .md</button>
+          <button id="${fullId}" style="background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.2);color:#fff;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:12px">Open full view</button>
+        </div>
       </div>
-    </div>
-  `;
-  // append to the existing panel DOM
-  this.div.elt.insertAdjacentHTML('beforeend', html);
+    `;
+    this.div.elt.insertAdjacentHTML('beforeend', html);
 
- const bodyEl = document.getElementById(bodyId);
-if (bodyEl) {
-  ensureReviewStyles(); // once-only CSS for clean headings/typography
-  bodyEl.innerHTML = `<div class="review-container">${formatMarkdownToHTML(String(d.aiContent||''))}</div>`;
-}
+    const bodyEl = document.getElementById(bodyId);
+    if (bodyEl) {
+      ensureReviewStyles();
+      bodyEl.innerHTML = `<div class="review-container">${formatMarkdownToHTML(String(d.aiContent||''))}</div>`;
+    }
 
-  if (bodyEl && (!d.aiContent || !d.aiContent.trim()) && REMOTE_AI_BASE && d.summaryRef) {
-  (async () => {
-    try {
-      const r = await fetch(`${REMOTE_AI_BASE}${d.summaryRef}`);
-      if (r.ok) {
-        const j = await r.json();
-        d.aiContent = String(j.body || '');
-        ensureReviewStyles();
-bodyEl.innerHTML = `<div class="review-container">${formatMarkdownToHTML(d.aiContent)}</div>`;
-      }
-    } catch {}
-  })();
-}
+    if (bodyEl && (!d.aiContent || !d.aiContent.trim()) && REMOTE_AI_BASE && d.summaryRef) {
+      (async () => {
+        try {
+          const r = await fetch(`${REMOTE_AI_BASE}${d.summaryRef}`);
+          if (r.ok) {
+            const j = await r.json();
+            d.aiContent = String(j.body || '');
+            ensureReviewStyles();
+            bodyEl.innerHTML = `<div class="review-container">${formatMarkdownToHTML(d.aiContent)}</div>`;
+          }
+        } catch {}
+      })();
+    }
 
-  const dlEl = document.getElementById(dlId);
-  if (dlEl) {
-    captureUI?.(dlEl);
-    dlEl.addEventListener('click', () => {
-      const blob = new Blob([d.aiContent || ''], { type: 'text/markdown' });
-      const url  = URL.createObjectURL(blob);
-      const a    = document.createElement('a');
-      const fname = `${(d.aiTitle || 'ai')}.md`;
-      a.href = url; a.download = fname; a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 2500);
-    });
+    const dlEl = document.getElementById(dlId);
+    if (dlEl) {
+      captureUI?.(dlEl);
+      dlEl.addEventListener('click', () => {
+        const blob = new Blob([d.aiContent || ''], { type: 'text/markdown' });
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement('a');
+        const fname = `${(d.aiTitle || 'ai')}.md`;
+        a.href = url; a.download = fname; a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 2500);
+      });
+    }
+
+    const fullEl = document.getElementById(fullId);
+    if (fullEl) {
+      captureUI?.(fullEl);
+      fullEl.addEventListener('click', async () => {
+        const heading = `${d.aiTitle || 'AI summary'}${when ? ' • ' + when : ''}`;
+        openSynthPanel?.(heading);
+
+        if ((!d.aiContent || !d.aiContent.trim()) && REMOTE_AI_BASE && d.summaryRef) {
+          try {
+            const r = await fetch(`${REMOTE_AI_BASE}${d.summaryRef}`);
+            if (r.ok) {
+              const j = await r.json();
+              d.aiContent = String(j.body || '');
+              ensureReviewStyles();
+              bodyEl.innerHTML = `<div class="review-container">${formatMarkdownToHTML(d.aiContent)}</div>`;
+            }
+          } catch {}
+        }
+        setSynthBodyText?.(d.aiContent || '', `${(d.aiTitle || 'ai')}.md`);
+      });
+    }
   }
-
-  const fullEl = document.getElementById(fullId);
-  if (fullEl) {
-    captureUI?.(fullEl);
-    fullEl.addEventListener('click', async () => {
-  const heading = `${d.aiTitle || 'AI summary'}${when ? ' • ' + when : ''}`;
-  openSynthPanel?.(heading);
-
-  if ((!d.aiContent || !d.aiContent.trim()) && REMOTE_AI_BASE && d.summaryRef) {
-    try {
-      const r = await fetch(`${REMOTE_AI_BASE}${d.summaryRef}`);
-      if (r.ok) {
-        const j = await r.json();
-        d.aiContent = String(j.body || '');
-        ensureReviewStyles();
-bodyEl.innerHTML = `<div class="review-container">${formatMarkdownToHTML(d.aiContent)}</div>`;
-      }
-    } catch { /* ignore */ }
-  }
-  setSynthBodyText?.(d.aiContent || '', `${(d.aiTitle || 'ai')}.md`);
-});
-  }
-}
-
 }
 
 setDimensionIndex(k) {
