@@ -570,21 +570,9 @@ let hoverIndex = -1;   // node under the cursor, -1 if none
 let loadingPct = 0;   // 0..1 (no animation)
 
 // --- Cluster labelling (AI) ---
-// --- Cluster labelling (AI) ---
-// Titles-only first pass for better coverage + lower token cost.
-// You can change this live in the console if needed:
-//   window.CLUSTER_LABEL_TITLES_PER_CLUSTER = 12
 let labelClustersBtn;
-
-// User-tunable: how many representative TITLES to send per cluster
-window.CLUSTER_LABEL_TITLES_PER_CLUSTER =
-  Number.isFinite(+window.CLUSTER_LABEL_TITLES_PER_CLUSTER)
-    ? Math.max(3, (+window.CLUSTER_LABEL_TITLES_PER_CLUSTER | 0))
-    : 10;
-
-// Hard cap for safety
-const LABEL_TITLES_PER_CLUSTER_MAX = 30;
-
+const LABEL_ABS_PER_CLUSTER = 100;   // how many abstracts to sample per cluster
+const LABEL_ABS_CHARS       = 700;  // per-abstract char cap (token safety)
 
 let ftFileInput = null;
 let pendingFTIndex = -1; // which node we’re extracting fulltext for (local file path)
@@ -7427,88 +7415,28 @@ function extractJson(raw) {
   return null;
 }
 
-function getClusterTitlesPerAI() {
-  return Math.max(
-    3,
-    Math.min(
-      LABEL_TITLES_PER_CLUSTER_MAX,
-      Number(window.CLUSTER_LABEL_TITLES_PER_CLUSTER || 10) | 0
-    )
-  );
-}
-
-function getTitleForIndex(i) {
-  const item = itemsData?.[i] || {};
-  const w = item.openalex || {};
-  return String(
-    w.display_name ||
-    w.title ||
-    item.title ||
-    item.label ||
-    'Untitled'
-  ).trim();
-}
-
-function representativeClusterNodesByCentroid(arr, nRep = 10) {
-  const ids = Array.isArray(arr) ? arr.filter(i => Number.isFinite(+i) && nodes?.[i]) : [];
-  if (!ids.length) return [];
-
-  let sx = 0, sy = 0;
-  for (const i of ids) {
-    sx += Number(nodes[i]?.x || 0);
-    sy += Number(nodes[i]?.y || 0);
-  }
-  const cx = sx / ids.length;
-  const cy = sy / ids.length;
-
-  return ids
-    .map(i => {
-      const dx = Number(nodes[i]?.x || 0) - cx;
-      const dy = Number(nodes[i]?.y || 0) - cy;
-      return { i, d2: dx * dx + dy * dy };
-    })
-    .sort((a, b) => a.d2 - b.d2)
-    .slice(0, Math.max(3, nRep | 0))
-    .map(o => o.i);
-}
-
-function applyClusterLabelsToCurrentViewCache() {
-  if (typeof __viewCache !== 'object' || !__viewCache) return;
-  const mode = (typeof viewMode === 'string' && viewMode) ? viewMode : 'citation';
-  if (!__viewCache[mode]) return;
-  __viewCache[mode].clusterLabels = Array.isArray(clusterLabels) ? clusterLabels.slice() : [];
-}
-
-function rebuildClusterLabelsUIAfterAI() {
-  applyClusterLabelsToCurrentViewCache();
-  buildDimensionsIndex?.();
-  updateDimSections?.();
-  initClusterFilterUI?.();
-  recomputeVisibility?.();
-  updateInfo?.();
-  redraw?.();
-}
-
 async function runLabelClustersAI() {
+
+
   // Ensure we have clusters
-  if (!clusterOf || clusterOf.length !== nodes.length) computeDomainClusters?.();
+  if (!clusterOf || clusterOf.length !== nodes.length) computeDomainClusters();
 
   // Build cluster -> node index list
-  const groups = new Map();
-  const nNow = Array.isArray(nodes) ? nodes.length : 0;
-
-  for (let i = 0; i < nNow; i++) {
-    const cid = (clusterOf && Number.isFinite(+clusterOf[i])) ? (+clusterOf[i]) : -1;
-    if (cid < 0) continue;
-    let arr = groups.get(cid);
-    if (!arr) groups.set(cid, arr = []);
-    arr.push(i);
-  }
+const groups = new Map();
+const nNow = Array.isArray(nodes) ? nodes.length : 0;
+for (let i = 0; i < nNow; i++) {
+  const cid = (clusterOf && Number.isFinite(+clusterOf[i])) ? (+clusterOf[i]) : -1;
+  if (cid < 0) continue;
+  let arr = groups.get(cid);
+  if (!arr) groups.set(cid, arr = []);
+  arr.push(i);
+}
 
   // Primary source: clusters from the live clusterOf array
   let all = [...groups.entries()];
 
-  // Fallback: derive from hydrated sidebar snapshot if needed
+  // Fallback: if groups is empty (clusterOf not ready for these nodes yet),
+  // derive from the hydrated sidebar snapshot so we don't bail early.
   if (!all.length && dimsIndex?.clusters?.size) {
     all = [...dimsIndex.clusters.values()]
       .map(rec => [rec.cid, Array.from(rec.nodes || [])])
@@ -7517,16 +7445,18 @@ async function runLabelClustersAI() {
 
   if (!all.length) {
     msg = 'No clusters found to label.';
-    updateInfo?.();
-    redraw?.();
-    return;
+    updateInfo(); redraw(); return;
   }
 
+  // ---- Apply the SAME size threshold as the UI ----
+  // (This is the same getClusterMin() used for:
+  //  - cluster pills on the canvas
+  //  - dimsIndex.clusters in the sidebar)
   const minForAI = getClusterMin();
-  const titlesPerCluster = getClusterTitlesPerAI();
 
   const targets = all.filter(([cid, arrAll]) => {
     if (!Array.isArray(clusterSizesTotal) || clusterSizesTotal[cid] == null) {
+      // fall back to the local size if total size is missing
       return (arrAll.length | 0) >= minForAI;
     }
     return (clusterSizesTotal[cid] | 0) >= minForAI;
@@ -7534,121 +7464,130 @@ async function runLabelClustersAI() {
 
   if (!targets.length) {
     msg = `No clusters meet the current minimum size (${minForAI}).`;
-    updateInfo?.();
-    redraw?.();
-    return;
+    updateInfo(); redraw(); return;
   }
 
-  showLoading?.(
-    `Labelling clusters from titles… (${titlesPerCluster} titles per cluster)`,
-    0.05
-  );
-
-  // Ensure array exists and has the right size
-  if (!Array.isArray(clusterLabels) || clusterLabels.length !== clusterCount) {
-    clusterLabels = new Array(clusterCount).fill('');
-  }
+  showLoading('Labelling clusters…', 0.05);
 
   const updated = [];
-
   for (let k = 0; k < targets.length; k++) {
     const [cid, arrAll] = targets[k];
 
-    // Prefer visible nodes when possible, else use the full cluster
-    const arrVis = arrAll.filter(i => !visibleMask.length || visibleMask[i]);
-    const source = arrVis.length ? arrVis : arrAll;
 
-    const totalSize = (Array.isArray(clusterSizesTotal) && clusterSizesTotal[cid] != null)
-      ? (clusterSizesTotal[cid] | 0)
-      : (arrAll.length | 0);
+   // Prefer visible nodes if there are any; else use all in the cluster
+   const arrVis = arrAll.filter(i => !visibleMask.length || visibleMask[i]);
+   const use = arrVis.length ? arrVis : arrAll;
 
-    if (totalSize < minForAI) continue;
 
-    // Choose representative papers near cluster centroid
-    const repIds = representativeClusterNodesByCentroid(source, titlesPerCluster);
 
-    // Fallback if positions are odd / unavailable
-    const chosenIds = repIds.length ? repIds : source.slice(0, titlesPerCluster);
+   // Respect UI threshold and a small hard floor for quality
+const minForAI = getClusterMin();
 
-    const titles = [];
-    const seen = new Set();
+// Primary size signal: use total cluster size if available (not just what's visible)
+const totalSize = (Array.isArray(clusterSizesTotal) && clusterSizesTotal[cid] != null)
+  ? (clusterSizesTotal[cid] | 0)
+  : (arrAll.length | 0);
 
-    for (const i of chosenIds) {
-      const t = getTitleForIndex(i);
-      const key = t.toLowerCase();
-      if (!t || seen.has(key)) continue;
-      seen.add(key);
-      titles.push(t);
-      if (titles.length >= titlesPerCluster) break;
-    }
+if (totalSize < minForAI) {
+  // Skip—below threshold; don't spend tokens on tiny clusters
+  continue;
+}
 
-    if (!titles.length) continue;
 
-    setLoadingProgress?.(
-      0.05 + 0.9 * (k / Math.max(1, targets.length)),
-      `Labelling cluster ${k + 1}/${targets.length} (${titles.length} titles)`
+
+
+
+
+   // Build sample of titles + abstracts
+   const sample = [];
+   for (let j = 0; j < use.length && sample.length < LABEL_ABS_PER_CLUSTER; j++) {
+     const i = use[j];
+     const item = itemsData[i] || {};
+     const w = item.openalex || {};
+     const abs = String(item.openalex_abstract || getAbstract(w) || '').trim();
+     const title = w.display_name || w.title || item.title || 'Untitled';
+     if (!abs) { sample.push({ title, abstract: title.slice(0, 180) }); continue; }
+     sample.push({ title, abstract: abs.slice(0, LABEL_ABS_CHARS) });
+   }
+   // Even a 1-paper cluster will still yield a title-only sample
+
+    setLoadingProgress(
+      0.05 + 0.9 * (k / targets.length),
+      `Labelling cluster ${k+1}/${targets.length} (${sample.length} abstracts)`
     );
+
+   try {
+     const raw = await openaiChatDirect(
+       [{ role: 'system', content: 'You are an expert at naming research clusters succinctly.' },
+        { role: 'user', content: [
+            'Given paper titles and abstracts from ONE research cluster, return a 3–4 word, specific, human-friendly label that best describes the shared topic.',
+            'Avoid punctuation; use Title Case; no quotes.',
+            'Return JSON ONLY in the form: {"label":"<3-4 word title>"}',
+            JSON.stringify(sample)
+          ].join('\n')
+        }],
+       200
+     );
+
+     const j = extractJson(raw);
+     let label = '';
+     if (j && typeof j.label === 'string') label = j.label.trim();
+     if (!label) label = (raw || '').trim().split('\n')[0].slice(0, 60);
+
+     if (label) {
+       clusterLabels[cid] = label;   // overwrite previous (default/TF-IDF/old)
+       updated.push({ cid, label });
+     }
+   } catch (err) {
+     console.warn('Label cluster error', err);
+   }
+ 
+
+    if (!sample.length) continue; // nothing to ground—skip
 
     const sys = 'You are an expert at naming research clusters succinctly.';
     const user = [
-      'You are given representative paper titles from ONE research cluster.',
-      'Using TITLES ONLY, return one short specific label that best represents the cluster as a whole.',
-      'Requirements:',
-      '- 3 to 5 words',
-      '- Title Case',
-      '- No quotation marks',
-      '- No trailing punctuation',
-      '- Avoid generic labels like Materials Research, Machine Learning, Review Article, Experimental Study',
-      '- Prefer a topic/theme label rather than a method label unless method is clearly the unifying theme',
-      'Return JSON ONLY in the form: {"label":"<cluster title>"}',
-      '',
-      JSON.stringify({ cluster_id: cid, titles }, null, 2)
+      'Given paper titles and abstracts from ONE research cluster, return a 3–4 word, specific, human-friendly label that best describes the shared topic.',
+      'Avoid punctuation; use Title Case; no quotes.',
+      'Return JSON ONLY in the form: {"label":"<3-4 word title>"}',
+      JSON.stringify(sample)
     ].join('\n');
 
     try {
       const raw = await openaiChatDirect(
-        [
-          { role: 'system', content: sys },
-          { role: 'user', content: user }
-        ],
-        { temperature: 0.2, max_tokens: 120 }
+        [{ role: 'system', content: sys }, { role: 'user', content: user }],
+        200 // tiny output budget; we just want a short JSON
       );
 
-      const parsed = extractJson(raw) || {};
+      const j = extractJson(raw);
       let label = '';
-
-      if (parsed && typeof parsed.label === 'string') {
-        label = parsed.label.trim();
-      }
-      if (!label) {
-        label = String(raw || '').trim().split('\n')[0].replace(/^["']|["']$/g, '').slice(0, 80);
-      }
+      if (j && typeof j.label === 'string') label = j.label.trim();
+      if (!label) label = (raw || '').trim().split('\n')[0].slice(0, 60);
 
       if (label) {
-        clusterLabels[cid] = label;   // overwrite existing labels in current view
+        clusterLabels[cid] = label;   // ← overwrite existing label
         updated.push({ cid, label });
       }
     } catch (err) {
+      // continue to next cluster
       console.warn('Label cluster error', err);
     }
-
-    if (typeof nextTick === 'function') await nextTick();
   }
 
-  hideLoading?.();
+  hideLoading();
 
-  if (!updated.length) {
-    msg = 'No cluster labels were generated.';
-    updateInfo?.();
-    redraw?.();
-    return;
+  if (updated.length) {
+    // Refresh Dimensions → Clusters so names match the new labels
+    buildDimensionsIndex();
+    renderDimensionsUI();
+    msg = `AI labels updated for ${updated.length} cluster(s).`;
+  } else {
+    msg = 'No cluster labels were updated.';
   }
 
-  rebuildClusterLabelsUIAfterAI();
-
-  msg = `Labelled ${updated.length} clusters using titles only (${titlesPerCluster} titles per cluster).`;
-  updateInfo?.();
-  redraw?.();
+  const finalReaderText = outEl?.innerText || finalMarkdownString || '';
+addAIFootprintFromItems('reader', _footprintItems, finalReaderText, 'Reader extract');
+  updateInfo(); redraw();
 }
 
 // =======================
