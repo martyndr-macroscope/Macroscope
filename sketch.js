@@ -1768,7 +1768,13 @@ const MAX_ABSTRACT_CHARS = 2000;  // truncate each abstract for token budget
 // --- Cluster labels ---
 let clusterLabels = [];                 // clusterId -> "three word title"
 const CLUSTER_TITLE_MIN_SIZE = 5;      // strictly > 10 items to label
-
+// --- Fields (clusters-of-clusters) -----------------------------------------
+let fieldOfCluster = [];        // clusterId -> fieldId (or -1)
+let fieldCount = 0;
+let fieldLabels = [];           // fieldId -> label string
+let fieldMembers = [];          // fieldId -> [clusterIds]
+let fieldSizesTotal = [];       // fieldId -> total publication count
+let fieldFingerprintThreshold = 0;
 
 // --- Section titles ---
 
@@ -2427,6 +2433,7 @@ if (hoverIndex >= 0) {
 }
 
   // Cluster labels (screen-space)
+if (typeof drawFieldLabels === 'function') drawFieldLabels();
 if (typeof drawClusterLabels === 'function') drawClusterLabels();
 
 
@@ -5819,6 +5826,7 @@ function createAIMenuButton() {
   addItem('Synthesise abstracts',() => runSynthesisAbstracts?.());
 
   addItem('Apply Fingerprints', () => runApplyFingerprintsOnly?.());
+  addItem('Fields identification', () => runFieldsIdentificationLens?.());
 
   addItem('Invisible University (themes)…', () => runInvisibleUniversityLens?.());
   addItem('Chronological review',() => runChronologicalReview?.());
@@ -6132,6 +6140,69 @@ if ((idxs?.length || 0) < minForLabel) { next[cid] = ''; continue; }
   }
 
   clusterLabels = next;
+}
+
+function drawFieldLabels() {
+  if (!nodes.length || !fieldLabels || !fieldLabels.length || !fieldMembers || !fieldMembers.length) return;
+
+  const alpha = Math.max(0, Math.min(1, ovClusterLabels));
+  if (alpha <= 0) return;
+
+  textFont('sans-serif');
+  textSize(15);
+  textAlign(CENTER, CENTER);
+
+  for (let fid = 0; fid < fieldCount; fid++) {
+    const label = fieldLabels[fid] || '';
+    const members = fieldMembers[fid] || [];
+    if (!label || members.length < 2) continue;
+
+    let sx = 0, sy = 0, k = 0;
+
+    for (let i = 0; i < nodes.length; i++) {
+      const cid = clusterOf[i];
+      if (cid == null || cid < 0) continue;
+      if (fieldOfCluster[cid] !== fid) continue;
+      if (visibleMask.length && !visibleMask[i]) continue;
+
+      const p = parallaxWorldPos(i);
+      const s = worldToScreen(p.x, p.y);
+      sx += s.x;
+      sy += s.y;
+      k++;
+    }
+
+    if (k === 0) continue;
+
+    sx /= k;
+    sy /= k;
+    sy -= 28; // sit above child cluster labels
+
+    const padX = 12;
+    const w = textWidth(label) + padX * 2;
+    const h = 26;
+
+    push();
+    rectMode(CENTER);
+
+    // dark backing
+    noStroke();
+    fill(0, Math.round(150 * alpha));
+    rect(sx, sy, w + 6, h + 6, 0);
+
+    // field pill with thicker outline
+    fill(20, Math.round(170 * alpha));
+    stroke(255, Math.round(245 * alpha));
+    strokeWeight(3);
+    rect(sx, sy, w, h, 0);
+
+    noStroke();
+    fill(255, Math.round(255 * alpha));
+    textAlign(CENTER, CENTER);
+    text(label, sx, sy + 1);
+
+    pop();
+  }
 }
 
 function drawClusterLabels() {
@@ -20802,6 +20873,185 @@ function normTopic(s) {
     .toLowerCase()
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function clearFieldsState() {
+  fieldOfCluster = new Array(Math.max(0, clusterCount | 0)).fill(-1);
+  fieldCount = 0;
+  fieldLabels = [];
+  fieldMembers = [];
+  fieldSizesTotal = [];
+  fieldFingerprintThreshold = 0;
+}
+
+function getRecurringClusterFingerprints(cid, minWithinCluster = 2) {
+  const counts = new Map();
+
+  for (let i = 0; i < nodes.length; i++) {
+    if (clusterOf[i] !== cid) continue;
+
+    const topics = getTopicsForNodeIndex(i)
+      .map(normTopic)
+      .filter(t => t && t.length >= 3);
+
+    // de-dup per paper so one paper doesn't overcount the same topic
+    const uniq = Array.from(new Set(topics));
+    for (const t of uniq) counts.set(t, (counts.get(t) || 0) + 1);
+  }
+
+  let kept = Array.from(counts.entries())
+    .filter(([, c]) => c >= minWithinCluster)
+    .map(([t]) => t);
+
+  // fallback for tiny clusters with no recurring topic above threshold
+  if (!kept.length) {
+    kept = Array.from(counts.keys());
+  }
+
+  return new Set(kept);
+}
+
+function buildFieldsFromClusterFingerprints(minShared = 3) {
+  const minClusterSize = getClusterMin();
+  const eligible = [];
+  const fpByCluster = new Map();
+
+  for (let cid = 0; cid < (clusterCount | 0); cid++) {
+    const size = (clusterSizesTotal && clusterSizesTotal[cid] != null) ? (clusterSizesTotal[cid] | 0) : 0;
+    if (size < minClusterSize) continue;
+
+    const fp = getRecurringClusterFingerprints(cid, 2);
+    if (!fp.size) continue;
+
+    eligible.push(cid);
+    fpByCluster.set(cid, fp);
+  }
+
+  const adjacency = new Map();
+  for (const cid of eligible) adjacency.set(cid, new Set());
+
+  const pairShared = new Map();
+
+  for (let a = 0; a < eligible.length; a++) {
+    const ca = eligible[a];
+    const sa = fpByCluster.get(ca);
+    if (!sa || !sa.size) continue;
+
+    for (let b = a + 1; b < eligible.length; b++) {
+      const cb = eligible[b];
+      const sb = fpByCluster.get(cb);
+      if (!sb || !sb.size) continue;
+
+      // count intersection
+      let shared = 0;
+      const [small, large] = sa.size <= sb.size ? [sa, sb] : [sb, sa];
+      for (const t of small) if (large.has(t)) shared++;
+
+      if (shared >= minShared) {
+        adjacency.get(ca).add(cb);
+        adjacency.get(cb).add(ca);
+        pairShared.set(`${ca}|${cb}`, shared);
+      }
+    }
+  }
+
+  const nextFieldOfCluster = new Array(Math.max(0, clusterCount | 0)).fill(-1);
+  const nextFieldMembers = [];
+  const nextFieldSizes = [];
+  const nextFieldLabels = [];
+
+  const seen = new Set();
+
+  for (const cid of eligible) {
+    if (seen.has(cid)) continue;
+
+    const nbrs = adjacency.get(cid);
+    if (!nbrs || !nbrs.size) {
+      seen.add(cid);
+      continue; // single subcluster does not become a field label
+    }
+
+    const q = [cid];
+    const comp = [];
+    seen.add(cid);
+
+    while (q.length) {
+      const cur = q.pop();
+      comp.push(cur);
+
+      for (const nb of (adjacency.get(cur) || [])) {
+        if (seen.has(nb)) continue;
+        seen.add(nb);
+        q.push(nb);
+      }
+    }
+
+    // Require at least 2 child clusters to form a field
+    if (comp.length < 2) continue;
+
+    const fid = nextFieldMembers.length;
+    nextFieldMembers.push(comp);
+
+    let totalPubs = 0;
+    for (const subCid of comp) {
+      nextFieldOfCluster[subCid] = fid;
+      totalPubs += (clusterSizesTotal && clusterSizesTotal[subCid] != null) ? (clusterSizesTotal[subCid] | 0) : 0;
+    }
+
+    nextFieldSizes[fid] = totalPubs;
+    nextFieldLabels[fid] = `F${Math.max(1, minShared|0)}.${fid + 1}`;
+  }
+
+  fieldOfCluster = nextFieldOfCluster;
+  fieldCount = nextFieldMembers.length;
+  fieldMembers = nextFieldMembers;
+  fieldSizesTotal = nextFieldSizes;
+  fieldLabels = nextFieldLabels;
+  fieldFingerprintThreshold = Math.max(1, minShared | 0);
+
+  return {
+    eligibleClusters: eligible.length,
+    fieldCount,
+    linkedPairs: pairShared.size
+  };
+}
+
+async function runFieldsIdentificationLens() {
+  if (!clusterOf || clusterOf.length !== nodes.length) {
+    computeDomainClusters?.();
+  }
+
+  if (!clusterCount) {
+    msg = 'No clusters available for field identification.';
+    updateInfo?.();
+    redraw?.();
+    return;
+  }
+
+  const ans = window.prompt(
+    'Fields identification\n\nMinimum number of shared fingerprints between clusters?',
+    String(Math.max(2, fieldFingerprintThreshold || 3))
+  );
+
+  if (ans == null) return;
+
+  const minShared = Math.max(1, Number(ans || 0) | 0);
+
+  showLoading?.(`Identifying fields (shared fingerprints ≥ ${minShared})…`, 0.2);
+
+  try {
+    clearFieldsState();
+    const stats = buildFieldsFromClusterFingerprints(minShared);
+
+    msg =
+      `Fields identified: ${stats.fieldCount} field groups from ${stats.eligibleClusters} eligible clusters ` +
+      `(shared fingerprints ≥ ${minShared}; linked pairs ${stats.linkedPairs}).`;
+
+    updateInfo?.();
+    redraw?.();
+  } finally {
+    hideLoading?.();
+  }
 }
 
 function buildThematicEdgesFromTopics({
