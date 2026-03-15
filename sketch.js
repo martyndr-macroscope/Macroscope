@@ -323,6 +323,9 @@ const EDGE_CAP_WHILE_PAN  = 8000;   // total edges per frame while panning
 const LOD_ZOOM_THRESHOLD  = 2.6;    // below this → cap edges
 
 var clusterSelectId = -1;   // persists after click until cleared
+var fieldSelectId = -1;     // persists after click until cleared
+let fieldLabelHits = [];    // screen-space hit boxes for field pills
+let fieldLabelCenters = {}; // fieldId -> { sx, sy, h }
 
 window.escapeHtml = window.escapeHtml || function (s) { return esc(s); };
 // Wrap a remote URL to go via the proxy
@@ -626,6 +629,7 @@ let ovAbstracts = 0;       // outline ring on docs that have abstracts
 let ovOpenAccess = 0;      // green halo on OA docs
 let ovClusterColors = 0;   // node tint saturation for clusters
 let ovClusterLabels = 0;   // label pill opacity for clusters
+let ovFieldLabels = 0;     // label pill opacity for fields
 let ovRefAssessment = 0;   // coloured REF asterisk overlay
 
 // Keep handles to overlay sliders so we can restore UI positions on load
@@ -633,6 +637,7 @@ let ovAbsSlider = null,
     ovOASlider = null,
     ovClustColorSlider = null,
     ovClustLabelSlider = null,
+    ovFieldLabelSlider = null,
     ovRefAssessmentSlider = null;
 let nodeSizeSlider = null;
 
@@ -1726,8 +1731,8 @@ const DIM_COLORS = {
   venues: [255, 180, 110],
   concepts: [195, 160, 255],
   institutions: [140, 255, 170],
-  clusters: [255, 230, 100] 
-
+  clusters: [255, 230, 100], 
+fields: [180, 220, 255]
 
 
 };
@@ -2061,8 +2066,19 @@ function computeHighlightMask() {
 }
 
 // ✅ Cluster label selection (persistent until changed)
+// ✅ Cluster label selection (persistent until changed)
 if (clusterSelectId >= 0 && Array.isArray(clusterOf)) {
-  for (let i = 0; i < clusterOf.length; i++) if (clusterOf[i] === clusterSelectId) mask[i] = true;
+  for (let i = 0; i < clusterOf.length; i++) {
+    if (clusterOf[i] === clusterSelectId) mask[i] = true;
+  }
+}
+
+// ✅ Field label selection (persistent until changed)
+if (fieldSelectId >= 0 && Array.isArray(clusterOf) && Array.isArray(fieldOfCluster)) {
+  for (let i = 0; i < clusterOf.length; i++) {
+    const cid = clusterOf[i];
+    if (cid != null && cid >= 0 && fieldOfCluster[cid] === fieldSelectId) mask[i] = true;
+  }
 }
 
   // AI summary hover or active (opened) footprint
@@ -3418,7 +3434,40 @@ if (clickLike) {
       return; // consume the click
     }
   }
+  // Click on field label radios
+if (ovFieldLabels > 0 && Array.isArray(fieldLabelHits) && fieldLabelHits.length) {
+  const moved = start ? dist(mouseX, mouseY, start.x, start.y) : 999;
+  const clickLike = moved < 5;
 
+  if (clickLike) {
+    const inRect = (h) =>
+      Math.abs(mouseX - h.cx) <= (h.hw || 0) &&
+      Math.abs(mouseY - h.cy) <= (h.hh || 0);
+
+    // 1) box → create/toggle Field Dimension
+    const hitBox = fieldLabelHits.find(h => h.type === 'box' && inRect(h));
+    if (hitBox) {
+      const fid = hitBox.fieldId;
+      const label = (fieldLabels[fid] && fieldLabels[fid].trim()) ? fieldLabels[fid] : `Field ${fid+1}`;
+      ensureFieldDimension(fid, label, true);
+      return;
+    }
+
+    // 2) label → select all nodes in field
+    const hitLabel = fieldLabelHits.find(h => h.type === 'label' && inRect(h));
+    if (hitLabel) {
+      const fid = hitLabel.fieldId;
+      fieldSelectId = (fieldSelectId === fid) ? -1 : fid;
+      clusterSelectId = -1;
+
+      if (selectedIndex !== -1) deselectNode();
+      if (selectedDim   !== -1) deselectDimension();
+      dimHover = -1;
+      redraw();
+      return;
+    }
+  }
+}
 
   // Click on cluster label radios (when clusters lens is on)
 if (lenses.domainClusters && ovClusterLabels > 0 && Array.isArray(clusterLabelHits) && clusterLabelHits.length) {
@@ -6145,8 +6194,14 @@ if ((idxs?.length || 0) < minForLabel) { next[cid] = ''; continue; }
 function drawFieldLabels() {
   if (!nodes.length || !fieldLabels || !fieldLabels.length || !fieldMembers || !fieldMembers.length) return;
 
-  const alpha = Math.max(0, Math.min(1, ovClusterLabels));
-  if (alpha <= 0) return;
+  const fieldAlpha = Math.max(0, Math.min(1, ovFieldLabels));
+  if (fieldAlpha <= 0) {
+    fieldLabelHits = [];
+    return;
+  }
+
+  fieldLabelHits = [];
+  fieldLabelCenters = {};
 
   textFont('sans-serif');
   textSize(15);
@@ -6176,30 +6231,76 @@ function drawFieldLabels() {
 
     sx /= k;
     sy /= k;
-    sy -= 28; // sit above child cluster labels
+    sy -= 28;
 
     const padX = 12;
-    const w = textWidth(label) + padX * 2;
+    const w = textWidth(label) + padX * 2 + 18; // room for radio
     const h = 26;
+
+    const rx = sx + w / 2 - padX - 8, ry = sy, rr = 8;
+    const sq = rr;
+
+    // Existing field dimension?
+    const key = `fields|fid:${fid}`;
+    let dimIdx = dimByKey?.get ? dimByKey.get(key) : null;
+    if ((dimIdx == null || dimIdx < 0) && Array.isArray(dimTools)) {
+      dimIdx = dimTools.findIndex(d => d && d.type === 'fields' && d.fid === fid);
+    }
+    const hasDim = Number.isInteger(dimIdx) && dimIdx >= 0 && dimTools?.[dimIdx];
+    const isSelectedDim = hasDim && (selectedDim === dimIdx);
 
     push();
     rectMode(CENTER);
 
-    // dark backing
+    // shadow/backing
     noStroke();
-    fill(0, Math.round(150 * alpha));
+    fill(0, Math.round(150 * fieldAlpha));
     rect(sx, sy, w + 6, h + 6, 0);
 
-    // field pill with thicker outline
-    fill(20, Math.round(170 * alpha));
-    stroke(255, Math.round(245 * alpha));
+    // field pill body
+    fill(20, Math.round(170 * fieldAlpha));
+    stroke(255, Math.round(245 * fieldAlpha));
     strokeWeight(3);
     rect(sx, sy, w, h, 0);
 
+    // text
     noStroke();
-    fill(255, Math.round(255 * alpha));
-    textAlign(CENTER, CENTER);
-    text(label, sx, sy + 1);
+    fill(255, Math.round(255 * fieldAlpha));
+    textAlign(LEFT, CENTER);
+    const textX = sx - w / 2 + padX;
+    text(label, textX, sy + 1);
+
+    // right-hand square for Dimension creation
+    rectMode(CENTER);
+    if (hasDim) {
+      const col = (DIM_COLORS && DIM_COLORS.fields) ? DIM_COLORS.fields : [180, 220, 255];
+      noStroke();
+      fill(col[0], col[1], col[2], Math.round(240 * fieldAlpha));
+      rect(rx, ry, sq, sq, 0);
+
+      stroke(col[0], col[1], col[2], isSelectedDim ? 255 : Math.round(230 * fieldAlpha));
+      strokeWeight(isSelectedDim ? 2 : 1.5);
+      noFill();
+      rect(rx, ry, sq + (isSelectedDim ? 2 : 0), sq + (isSelectedDim ? 2 : 0), 0);
+    } else {
+      stroke(240, 240, 255, Math.round(230 * fieldAlpha));
+      strokeWeight(1.5);
+      noFill();
+      rect(rx, ry, sq, sq, 0);
+    }
+
+    fieldLabelCenters[fid] = { sx, sy, h };
+
+    fieldLabelHits.push({
+      type: 'label',
+      fieldId: fid,
+      cx: sx, cy: sy, hw: w * 0.5, hh: h * 0.5
+    });
+    fieldLabelHits.push({
+      type: 'box',
+      fieldId: fid,
+      cx: rx, cy: ry, hw: (sq * 0.6) * 0.5, hh: (sq * 0.6) * 0.5
+    });
 
     pop();
   }
@@ -6388,6 +6489,64 @@ function ensureClusterDimension(cid, label, powerZero = true) {
     dimByKey.set(toolKey, idx);
     dimMembershipDirty = true;
   }
+  selectDimension(idx);
+  if (lenses.hideNonDim) recomputeVisibility();
+  redraw();
+}
+
+function ensureFieldDimension(fid, label, powerZero = true) {
+  const stableId = `fid:${fid}`;
+  const toolKey  = `fields|${stableId}`;
+
+  let idx = dimByKey.get(toolKey);
+  if (idx == null) {
+    // Build node set = all publications belonging to child clusters in this field
+    const ns = new Set();
+    for (let i = 0; i < nodes.length; i++) {
+      const cid = clusterOf[i];
+      if (cid == null || cid < 0) continue;
+      if (fieldOfCluster[cid] === fid) ns.add(i);
+    }
+
+    // Initial placement: just above the field pill if available
+    let wx, wy;
+    const box = fieldLabelCenters[fid];
+    if (box) {
+      const targetSX = box.sx;
+      const targetSY = box.sy - (box.h * 0.5 + 8);
+      const wpos = screenToWorld(targetSX, targetSY);
+      wx = wpos.x; wy = wpos.y;
+    } else {
+      // fallback: world centroid of all nodes in the field
+      let sx = 0, sy = 0, k = 0;
+      for (let i = 0; i < nodes.length; i++) {
+        const cid = clusterOf[i];
+        if (cid == null || cid < 0) continue;
+        if (fieldOfCluster[cid] !== fid) continue;
+        sx += nodes[i].x; sy += nodes[i].y; k++;
+      }
+      wx = k ? (sx / k) : width * 0.5;
+      wy = k ? (sy / k) : height * 0.5;
+    }
+
+    const tool = {
+      type: 'fields',
+      key: toolKey,
+      fid,
+      label: (label && label.trim()) ? label : `Field ${fid+1}`,
+      nodes: ns,
+      power: DEFAULT_DIM_POWER,
+      x: wx, y: wy,
+      selected: true,
+      userMoved: false,
+      color: (DIM_COLORS && DIM_COLORS.fields) ? DIM_COLORS.fields : [180, 220, 255]
+    };
+
+    idx = dimTools.push(tool) - 1;
+    dimByKey.set(toolKey, idx);
+    dimMembershipDirty = true;
+  }
+
   selectDimension(idx);
   if (lenses.hideNonDim) recomputeVisibility();
   redraw();
@@ -15184,6 +15343,17 @@ function buildOverlaysInto(containerBody) {
       clusterHoverId = -1;
       clusterSelectId = -1;
       clusterLabelHits = [];
+    }
+    redraw();
+  });
+
+    // Field Labels (parent pill UI + click)
+  ovFieldLabelSlider = mkSlider('Field Labels', Math.round(ovFieldLabels*100), (e) => {
+    ovFieldLabels = Number(e.target.value)/100;
+
+    if (ovFieldLabels === 0) {
+      fieldSelectId = -1;
+      fieldLabelHits = [];
     }
     redraw();
   });
