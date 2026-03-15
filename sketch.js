@@ -627,6 +627,35 @@ let persistentFieldState = {
   componentsBySig: Object.create(null)
 };
 
+// --- AI Fields from existing clusters ---------------------------------------
+// Uses current cluster labels + thematic fingerprints (with counts)
+// and asks the LLM to group clusters into meaningful higher-level domains.
+
+window.AI_FIELDS_TOP_FPS_PER_CLUSTER =
+  Number.isFinite(+window.AI_FIELDS_TOP_FPS_PER_CLUSTER)
+    ? Math.max(5, (+window.AI_FIELDS_TOP_FPS_PER_CLUSTER | 0))
+    : 12;
+
+window.AI_FIELDS_MIN_FP_COUNT =
+  Number.isFinite(+window.AI_FIELDS_MIN_FP_COUNT)
+    ? Math.max(1, (+window.AI_FIELDS_MIN_FP_COUNT | 0))
+    : 2;
+
+window.AI_FIELDS_MIN_CLUSTERS_PER_DOMAIN =
+  Number.isFinite(+window.AI_FIELDS_MIN_CLUSTERS_PER_DOMAIN)
+    ? Math.max(2, (+window.AI_FIELDS_MIN_CLUSTERS_PER_DOMAIN | 0))
+    : 2;
+
+let aiFieldsState = {
+  topFingerprintsPerCluster: window.AI_FIELDS_TOP_FPS_PER_CLUSTER,
+  minFpCount: window.AI_FIELDS_MIN_FP_COUNT,
+  minClustersPerDomain: window.AI_FIELDS_MIN_CLUSTERS_PER_DOMAIN,
+  lastInputClusters: 0,
+  lastDomainCount: 0,
+  lastRaw: '',
+  lastParsed: null
+};
+
 
 let ftFileInput = null;
 let pendingFTIndex = -1; // which node we’re extracting fulltext for (local file path)
@@ -5928,6 +5957,7 @@ function createAIMenuButton() {
   addItem('Apply Fingerprints', () => runApplyFingerprintsOnly?.());
   addItem('Fields identification', () => runFieldsIdentificationLens?.());
   addItem('Persistent Fields', () => runPersistentFieldsLens?.());
+  addItem('AI Fields from Clusters', () => runAIFieldsFromClustersLens?.());
   
   addItem('Invisible University (themes)…', () => runInvisibleUniversityLens?.());
   addItem('Chronological review',() => runChronologicalReview?.());
@@ -21733,6 +21763,266 @@ function initPersistentFieldThresholdUI() {
     `Persistent field threshold ${shown.toFixed(3)}`
   );
 }
+
+function ensureClustersForAIFields() {
+  if (!Array.isArray(clusterOf) || clusterOf.length !== nodes.length || !clusterCount) {
+    computeDomainClusters?.();
+  }
+  if (!Array.isArray(clusterLabels) || clusterLabels.length !== clusterCount) {
+    computeClusterLabels?.();
+  }
+  if (!Array.isArray(clusterOf) || clusterOf.length !== nodes.length || !clusterCount) {
+    throw new Error('No clusters available for AI field grouping.');
+  }
+}
+
+function getClusterNodeIds(cid) {
+  const out = [];
+  for (let i = 0; i < nodes.length; i++) {
+    if (clusterOf[i] === cid) out.push(i);
+  }
+  return out;
+}
+
+function buildClusterFingerprintSummaryForAI({
+  topK = window.AI_FIELDS_TOP_FPS_PER_CLUSTER || 12,
+  minCount = window.AI_FIELDS_MIN_FP_COUNT || 2
+} = {}) {
+  const minClusterSize = getClusterMin();
+  const rows = [];
+
+  for (let cid = 0; cid < (clusterCount | 0); cid++) {
+    const size = (clusterSizesTotal && clusterSizesTotal[cid] != null)
+      ? (clusterSizesTotal[cid] | 0)
+      : 0;
+
+    if (size < minClusterSize) continue;
+
+    const idxs = getClusterNodeIds(cid);
+    if (!idxs.length) continue;
+
+    const counts = new Map();
+
+    for (const i of idxs) {
+      const fps = (typeof getTopicsForNodeIndex === 'function')
+        ? getTopicsForNodeIndex(i)
+        : [];
+
+      const uniq = Array.from(new Set(
+        (fps || [])
+          .map(x => String(x || '').trim())
+          .filter(Boolean)
+      ));
+
+      for (const fp of uniq) {
+        counts.set(fp, (counts.get(fp) || 0) + 1);
+      }
+    }
+
+    let ranked = Array.from(counts.entries())
+      .filter(([, c]) => c >= minCount)
+      .sort((a, b) => {
+        if (b[1] !== a[1]) return b[1] - a[1];
+        return a[0].localeCompare(b[0]);
+      });
+
+    if (!ranked.length) {
+      ranked = Array.from(counts.entries())
+        .sort((a, b) => {
+          if (b[1] !== a[1]) return b[1] - a[1];
+          return a[0].localeCompare(b[0]);
+        });
+    }
+
+    const top = ranked.slice(0, Math.max(5, topK | 0))
+      .map(([term, count]) => ({ term, count }));
+
+    const label = String(clusterLabels?.[cid] || '').trim() || `Cluster ${cid + 1}`;
+
+    rows.push({
+      cluster_id: cid,
+      cluster_label: label,
+      size,
+      fingerprints: top
+    });
+  }
+
+  rows.sort((a, b) => {
+    if (b.size !== a.size) return b.size - a.size;
+    return a.cluster_id - b.cluster_id;
+  });
+
+  return rows;
+}
+
+function sanitizeAIDomainLabel(s, fallback = 'Unnamed Domain') {
+  const t = String(s || '').trim().replace(/\s+/g, ' ');
+  return t || fallback;
+}
+
+function clearAIFieldsOutput() {
+  fieldOfCluster = new Array(Math.max(0, clusterCount | 0)).fill(-1);
+  fieldCount = 0;
+  fieldLabels = [];
+  fieldMembers = [];
+  fieldSizesTotal = [];
+  fieldSelectId = -1;
+  fieldLabelHits = [];
+  fieldLabelCenters = {};
+}
+
+function applyAIFieldDomains(domains) {
+  clearAIFieldsOutput();
+
+  const nextFieldOfCluster = new Array(Math.max(0, clusterCount | 0)).fill(-1);
+  const nextFieldMembers = [];
+  const nextFieldLabels = [];
+  const nextFieldSizes = [];
+
+  const usedClusters = new Set();
+  const minChildren = Math.max(2, Number(window.AI_FIELDS_MIN_CLUSTERS_PER_DOMAIN || 2) | 0);
+
+  for (let d = 0; d < (domains?.length || 0); d++) {
+    const dom = domains[d] || {};
+    const label = sanitizeAIDomainLabel(dom.label || dom.domain || dom.name, `Domain ${d + 1}`);
+
+    let rawClusters = [];
+    if (Array.isArray(dom.clusters)) rawClusters = dom.clusters.slice();
+    else if (Array.isArray(dom.cluster_ids)) rawClusters = dom.cluster_ids.slice();
+
+    const memberCids = Array.from(new Set(
+      rawClusters
+        .map(v => Number(v))
+        .filter(v => Number.isFinite(v) && v >= 0 && v < (clusterCount | 0))
+    )).filter(cid => !usedClusters.has(cid));
+
+    if (memberCids.length < minChildren) continue;
+
+    const fid = nextFieldMembers.length;
+    nextFieldMembers.push(memberCids);
+    nextFieldLabels.push(label);
+
+    let totalPubs = 0;
+    for (const cid of memberCids) {
+      usedClusters.add(cid);
+      nextFieldOfCluster[cid] = fid;
+      totalPubs += (clusterSizesTotal && clusterSizesTotal[cid] != null)
+        ? (clusterSizesTotal[cid] | 0)
+        : 0;
+    }
+    nextFieldSizes[fid] = totalPubs;
+  }
+
+  fieldOfCluster = nextFieldOfCluster;
+  fieldMembers = nextFieldMembers;
+  fieldLabels = nextFieldLabels;
+  fieldSizesTotal = nextFieldSizes;
+  fieldCount = nextFieldMembers.length;
+
+  if (typeof ovFieldLabels !== 'undefined' && ovFieldLabels <= 0) {
+    ovFieldLabels = 1;
+    try { ovFieldLabelSlider?.value?.(100); } catch (_) {}
+  }
+}
+
+async function runAIFieldsFromClustersLens() {
+  if (!itemsData || !nodes || !nodes.length) {
+    alert('No graph loaded yet – load a dataset first.');
+    return;
+  }
+
+  showLoading?.('AI Fields: preparing cluster summaries…', 0.08);
+
+  try {
+    ensureClustersForAIFields();
+
+    const clusterRows = buildClusterFingerprintSummaryForAI({
+      topK: window.AI_FIELDS_TOP_FPS_PER_CLUSTER || 12,
+      minCount: window.AI_FIELDS_MIN_FP_COUNT || 2
+    });
+
+    if (!clusterRows.length) {
+      throw new Error('No eligible clusters could be summarised for AI field grouping.');
+    }
+
+    aiFieldsState.lastInputClusters = clusterRows.length;
+
+    const sys = 'You are an expert research cartographer. You group topic clusters into broader, meaningful research domains.';
+    const user = [
+      'You are given a set of EXISTING research clusters.',
+      'Each cluster includes:',
+      '- cluster_id',
+      '- cluster_label',
+      '- cluster size',
+      '- thematic fingerprints with occurrence counts',
+      '',
+      'Your task:',
+      '1. Group these clusters into broader higher-level domains.',
+      '2. Each domain should contain at least 2 clusters where possible.',
+      '3. Use the fingerprints and labels to infer meaningful broader domains.',
+      '4. Avoid generic labels like "General Research" or "Miscellaneous" unless absolutely necessary.',
+      '5. Prefer concise domain names, usually 2 to 5 words, in Title Case.',
+      '6. You do NOT need to include every cluster if some are outliers.',
+      '',
+      'Return JSON ONLY in this exact form:',
+      '{"domains":[{"label":"<domain label>","clusters":[<cluster_id>,<cluster_id>,...]}, ...]}',
+      '',
+      JSON.stringify({
+        cluster_count: clusterRows.length,
+        clusters: clusterRows
+      }, null, 2)
+    ].join('\n');
+
+    showLoading?.('AI Fields: asking model to group clusters into domains…', 0.25);
+
+    const raw = await openaiChatDirect(
+      [
+        { role: 'system', content: sys },
+        { role: 'user', content: user }
+      ],
+      { temperature: 0.2, max_tokens: 3200 }
+    );
+
+    aiFieldsState.lastRaw = raw;
+
+    const parsed = extractJson(raw) || {};
+    aiFieldsState.lastParsed = parsed;
+
+    const domains = Array.isArray(parsed?.domains) ? parsed.domains : [];
+    if (!domains.length) {
+      throw new Error('Model returned no valid domains.');
+    }
+
+    applyAIFieldDomains(domains);
+
+    aiFieldsState.lastDomainCount = fieldCount;
+
+    if (!fieldCount) {
+      throw new Error('No valid multi-cluster domains were produced.');
+    }
+
+    msg = `AI Fields: created ${fieldCount} higher-level domains from ${clusterRows.length} clusters.`;
+
+    buildDimensionsIndex?.();
+    updateDimSections?.();
+    recomputeVisibility?.();
+    updateInfo?.();
+    redraw?.();
+  } catch (err) {
+    console.warn('AI Fields from clusters failed', err);
+    msg = `AI Fields failed: ${err?.message || err}`;
+    updateInfo?.();
+    redraw?.();
+  } finally {
+    hideLoading?.();
+  }
+}
+
+window.dumpAIFieldsState = function () {
+  console.log('aiFieldsState', aiFieldsState);
+  return aiFieldsState;
+};
+
 
 async function runPersistentFieldsLens() {
   if (!itemsData || !nodes || !nodes.length) {
