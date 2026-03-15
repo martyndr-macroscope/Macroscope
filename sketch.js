@@ -577,6 +577,51 @@ let labelClustersBtn;
 const LABEL_ABS_PER_CLUSTER = 100;   // how many abstracts to sample per cluster
 const LABEL_ABS_CHARS       = 700;  // per-abstract char cap (token safety)
 
+// --- Persistent Fields lens -----------------------------------------------
+// Uses CURRENT THEMATIC base clusters (fingerprints + optional author overlap)
+// and groups those clusters into higher-level "fields" via OpenAlex concept
+// profile similarity + multi-threshold persistence.
+
+window.PERSIST_FIELDS_LEVEL_MIN = Number.isFinite(+window.PERSIST_FIELDS_LEVEL_MIN)
+  ? (+window.PERSIST_FIELDS_LEVEL_MIN | 0)
+  : 2;
+
+window.PERSIST_FIELDS_LEVEL_MAX = Number.isFinite(+window.PERSIST_FIELDS_LEVEL_MAX)
+  ? (+window.PERSIST_FIELDS_LEVEL_MAX | 0)
+  : 4;
+
+window.PERSIST_FIELDS_BINS = Number.isFinite(+window.PERSIST_FIELDS_BINS)
+  ? Math.max(8, (+window.PERSIST_FIELDS_BINS | 0))
+  : 24;
+
+window.PERSIST_FIELDS_MIN_COMPONENT_CLUSTERS = Number.isFinite(+window.PERSIST_FIELDS_MIN_COMPONENT_CLUSTERS)
+  ? Math.max(2, (+window.PERSIST_FIELDS_MIN_COMPONENT_CLUSTERS | 0))
+  : 2;
+
+window.PERSIST_FIELDS_MIN_STEPS = Number.isFinite(+window.PERSIST_FIELDS_MIN_STEPS)
+  ? Math.max(2, (+window.PERSIST_FIELDS_MIN_STEPS | 0))
+  : 3;
+
+window.PERSIST_FIELDS_MAX_GIANT_FRAC = Number.isFinite(+window.PERSIST_FIELDS_MAX_GIANT_FRAC)
+  ? Math.max(0.25, Math.min(0.95, +window.PERSIST_FIELDS_MAX_GIANT_FRAC))
+  : 0.65;
+
+let persistentFieldState = {
+  conceptLevelMin: window.PERSIST_FIELDS_LEVEL_MIN,
+  conceptLevelMax: window.PERSIST_FIELDS_LEVEL_MAX,
+  bins: window.PERSIST_FIELDS_BINS,
+  minComponentClusters: window.PERSIST_FIELDS_MIN_COMPONENT_CLUSTERS,
+  minSteps: window.PERSIST_FIELDS_MIN_STEPS,
+  bestThreshold: 0,
+  bestSnapshotIndex: -1,
+  bestSnapshotScore: 0,
+  eligibleClusters: 0,
+  pairCount: 0,
+  snapshots: [],
+  componentsBySig: Object.create(null)
+};
+
+
 let ftFileInput = null;
 let pendingFTIndex = -1; // which node we’re extracting fulltext for (local file path)
 
@@ -5876,7 +5921,8 @@ function createAIMenuButton() {
 
   addItem('Apply Fingerprints', () => runApplyFingerprintsOnly?.());
   addItem('Fields identification', () => runFieldsIdentificationLens?.());
-
+  addItem('Persistent Fields', () => runPersistentFieldsLens?.());
+  
   addItem('Invisible University (themes)…', () => runInvisibleUniversityLens?.());
   addItem('Chronological review',() => runChronologicalReview?.());
   addItem('Open question…',          () => runOpenQuestion?.());
@@ -21217,6 +21263,444 @@ async function runFieldsIdentificationLens() {
       `Fields identified: ${stats.fieldCount} field groups from ${stats.eligibleClusters} eligible clusters ` +
       `(shared fingerprints ≥ ${minShared}; linked pairs ${stats.linkedPairs}).`;
 
+    updateInfo?.();
+    redraw?.();
+  } finally {
+    hideLoading?.();
+  }
+}
+
+function ensureThematicBaseClustersForPersistentFields() {
+  // Persistent fields should always derive from the thematic/fingerprint+author
+  // base clusters, not citation clusters.
+  if (typeof __buildThematicGraphIfNeeded === 'function') {
+    __buildThematicGraphIfNeeded({ forcePrompt: false });
+  }
+
+  if (typeof __viewCache === 'object' && __viewCache?.thematic?.clusterOf?.length === nodes.length) {
+    if (viewMode !== 'thematic') {
+      try { __snapshotView?.(viewMode || 'citation'); } catch (_) {}
+      viewMode = 'thematic';
+      __applyView?.('thematic');
+    }
+  }
+
+  if (!Array.isArray(clusterOf) || clusterOf.length !== nodes.length || !clusterCount) {
+    throw new Error('No thematic base clusters available.');
+  }
+}
+
+function getOpenAlexConceptObjsForNodeIndex(i) {
+  const item = itemsData?.[i] || {};
+  const w = item.openalex || {};
+  const arr = Array.isArray(w.concepts) ? w.concepts : [];
+  return arr.filter(Boolean);
+}
+
+function normPersistentConceptName(c) {
+  const raw = String(c?.display_name || c?.name || c?.id || '').trim().toLowerCase();
+  return raw || '';
+}
+
+function getPersistentConceptLevel(c) {
+  const lv = Number(c?.level);
+  return Number.isFinite(lv) ? (lv | 0) : null;
+}
+
+function buildClusterConceptProfiles({
+  levelMin = 2,
+  levelMax = 4,
+  minClusterSize = 5
+} = {}) {
+  const eligible = [];
+  const clusterSets = new Map();     // cid -> Set(concept)
+  const clusterWeights = new Map();  // cid -> Map(concept -> weight)
+  const clusterDf = new Map();       // concept -> in how many CLUSTERS it appears
+
+  // First pass: concept presence per cluster
+  for (let cid = 0; cid < (clusterCount | 0); cid++) {
+    const size = (clusterSizesTotal && clusterSizesTotal[cid] != null) ? (clusterSizesTotal[cid] | 0) : 0;
+    if (size < minClusterSize) continue;
+
+    const counts = new Map();
+    let seenAny = false;
+
+    for (let i = 0; i < nodes.length; i++) {
+      if (clusterOf[i] !== cid) continue;
+
+      const objs = getOpenAlexConceptObjsForNodeIndex(i);
+      if (!objs.length) continue;
+
+      const uniq = new Set();
+      for (const c of objs) {
+        const name = normPersistentConceptName(c);
+        if (!name) continue;
+
+        const lv = getPersistentConceptLevel(c);
+        if (lv != null) {
+          if (lv < levelMin || lv > levelMax) continue;
+        }
+
+        uniq.add(name);
+      }
+
+      for (const name of uniq) {
+        counts.set(name, (counts.get(name) || 0) + 1);
+        seenAny = true;
+      }
+    }
+
+    if (!seenAny || !counts.size) continue;
+
+    eligible.push(cid);
+
+    const present = new Set(counts.keys());
+    clusterSets.set(cid, present);
+
+    for (const name of present) {
+      clusterDf.set(name, (clusterDf.get(name) || 0) + 1);
+    }
+
+    clusterWeights.set(cid, counts); // temporary raw counts
+  }
+
+  const N = Math.max(1, eligible.length);
+
+  // Second pass: TF-IDF-ish weighting within clusters
+  for (const cid of eligible) {
+    const raw = clusterWeights.get(cid) || new Map();
+    const size = Math.max(1, (clusterSizesTotal && clusterSizesTotal[cid] != null) ? (clusterSizesTotal[cid] | 0) : 1);
+
+    let normSq = 0;
+    const weighted = new Map();
+
+    for (const [name, cnt] of raw.entries()) {
+      const tf = cnt / size; // prevalence within cluster
+      const df = clusterDf.get(name) || 1;
+      const idf = Math.log(1 + (N / df));
+      const w = tf * idf;
+      if (w <= 0) continue;
+      weighted.set(name, w);
+      normSq += w * w;
+    }
+
+    const norm = Math.sqrt(Math.max(1e-12, normSq));
+    for (const [name, w] of weighted.entries()) {
+      weighted.set(name, w / norm);
+    }
+
+    clusterWeights.set(cid, weighted);
+  }
+
+  return { eligible, clusterSets, clusterWeights, clusterDf };
+}
+
+function cosineMapSimilarity(ma, mb) {
+  if (!ma || !mb || !ma.size || !mb.size) return 0;
+  let sim = 0;
+  const [small, large] = ma.size <= mb.size ? [ma, mb] : [mb, ma];
+  for (const [k, wa] of small.entries()) {
+    const wb = large.get(k);
+    if (wb != null) sim += wa * wb;
+  }
+  return Math.max(0, sim || 0);
+}
+
+function buildPersistentFieldSimilarityEdges(clusterWeights, eligible) {
+  const edges = [];
+  for (let a = 0; a < eligible.length; a++) {
+    const ca = eligible[a];
+    const wa = clusterWeights.get(ca);
+    if (!wa || !wa.size) continue;
+
+    for (let b = a + 1; b < eligible.length; b++) {
+      const cb = eligible[b];
+      const wb = clusterWeights.get(cb);
+      if (!wb || !wb.size) continue;
+
+      const sim = cosineMapSimilarity(wa, wb);
+      if (sim > 0) edges.push({ a: ca, b: cb, sim });
+    }
+  }
+  edges.sort((x, y) => y.sim - x.sim);
+  return edges;
+}
+
+function makePersistentThresholds(edges, bins = 24) {
+  if (!edges.length) return [];
+  const sims = edges.map(e => e.sim).filter(v => v > 0).sort((a, b) => b - a);
+  const maxSim = sims[0];
+  const minSim = sims[sims.length - 1];
+  if (!(maxSim > 0)) return [];
+
+  const out = [];
+  const B = Math.max(8, bins | 0);
+
+  // Use quantile-ish thresholds rather than every unique similarity
+  for (let k = 0; k < B; k++) {
+    const idx = Math.min(sims.length - 1, Math.floor((k / Math.max(1, B - 1)) * (sims.length - 1)));
+    out.push(sims[idx]);
+  }
+
+  // de-dup + descending
+  const uniq = Array.from(new Set(out.map(v => +v.toFixed(6)))).sort((a, b) => b - a);
+  return uniq.filter(v => v >= minSim && v <= maxSim);
+}
+
+function makeDsu(ids) {
+  const parent = new Map();
+  const rank = new Map();
+  for (const id of ids) {
+    parent.set(id, id);
+    rank.set(id, 0);
+  }
+
+  const find = (x) => {
+    let p = parent.get(x);
+    while (p !== parent.get(p)) {
+      parent.set(p, parent.get(parent.get(p)));
+      p = parent.get(p);
+    }
+    parent.set(x, p);
+    return p;
+  };
+
+  const union = (a, b) => {
+    let ra = find(a), rb = find(b);
+    if (ra === rb) return ra;
+
+    const rka = rank.get(ra) || 0;
+    const rkb = rank.get(rb) || 0;
+    if (rka < rkb) { const t = ra; ra = rb; rb = t; }
+
+    parent.set(rb, ra);
+    if (rka === rkb) rank.set(ra, rka + 1);
+    return ra;
+  };
+
+  return { parent, rank, find, union };
+}
+
+function snapshotPersistentComponents(dsu, eligible, minComponentClusters = 2) {
+  const byRoot = new Map();
+
+  for (const cid of eligible) {
+    const r = dsu.find(cid);
+    if (!byRoot.has(r)) byRoot.set(r, []);
+    byRoot.get(r).push(cid);
+  }
+
+  const groups = [];
+  for (const arr of byRoot.values()) {
+    arr.sort((a, b) => a - b);
+    if (arr.length >= minComponentClusters) groups.push(arr);
+  }
+
+  groups.sort((a, b) => {
+    if (b.length !== a.length) return b.length - a.length;
+    return a[0] - b[0];
+  });
+
+  return groups;
+}
+
+function chooseBestPersistentSnapshot(snapshots, componentsBySig, eligibleCount, minSteps = 3) {
+  let best = null;
+
+  for (let s = 0; s < snapshots.length; s++) {
+    const snap = snapshots[s];
+    let score = 0;
+    let nGood = 0;
+
+    for (const group of snap.groups) {
+      const sig = group.join('|');
+      const rec = componentsBySig[sig];
+      if (!rec) continue;
+      if ((rec.steps || 0) < minSteps) continue;
+
+      let partScore = (rec.span || 0) * Math.log(1 + group.length);
+
+      // Penalise giant parent groups
+      if (eligibleCount > 0 && group.length / eligibleCount > (window.PERSIST_FIELDS_MAX_GIANT_FRAC || 0.65)) {
+        partScore *= 0.15;
+      }
+
+      score += partScore;
+      nGood++;
+    }
+
+    if (nGood < 2) continue;
+
+    if (!best || score > best.score) {
+      best = { index: s, score, threshold: snap.threshold, groups: snap.groups };
+    }
+  }
+
+  return best;
+}
+
+function applyPersistentFieldGroups(groups, threshold, snapshotIndex) {
+  const nextFieldOfCluster = new Array(Math.max(0, clusterCount | 0)).fill(-1);
+  const nextFieldMembers = [];
+  const nextFieldSizes = [];
+  const nextFieldLabels = [];
+
+  for (let fid = 0; fid < groups.length; fid++) {
+    const comp = groups[fid];
+    if (!Array.isArray(comp) || comp.length < 2) continue;
+
+    nextFieldMembers.push(comp);
+
+    let totalPubs = 0;
+    for (const cid of comp) {
+      nextFieldOfCluster[cid] = nextFieldMembers.length - 1;
+      totalPubs += (clusterSizesTotal && clusterSizesTotal[cid] != null) ? (clusterSizesTotal[cid] | 0) : 0;
+    }
+
+    nextFieldSizes[nextFieldMembers.length - 1] = totalPubs;
+    nextFieldLabels[nextFieldMembers.length - 1] = `P${snapshotIndex + 1}.${nextFieldMembers.length}`;
+  }
+
+  fieldOfCluster = nextFieldOfCluster;
+  fieldMembers = nextFieldMembers;
+  fieldSizesTotal = nextFieldSizes;
+  fieldLabels = nextFieldLabels;
+  fieldCount = nextFieldMembers.length;
+  fieldFingerprintThreshold = 0; // not used by persistent mode
+
+  fieldSelectId = -1;
+  fieldLabelHits = [];
+  fieldLabelCenters = {};
+
+  // make visible immediately
+  if (typeof ovFieldLabels !== 'undefined' && ovFieldLabels <= 0) {
+    ovFieldLabels = 1;
+    try { ovFieldLabelSlider?.value?.(100); } catch (_) {}
+  }
+}
+
+async function runPersistentFieldsLens() {
+  if (!itemsData || !nodes || !nodes.length) {
+    alert('No graph loaded yet – load a dataset first.');
+    return;
+  }
+
+  showLoading?.('Persistent Fields: preparing thematic base clusters…', 0.05);
+
+  try {
+    ensureThematicBaseClustersForPersistentFields();
+
+    const prof = buildClusterConceptProfiles({
+      levelMin: window.PERSIST_FIELDS_LEVEL_MIN || 2,
+      levelMax: window.PERSIST_FIELDS_LEVEL_MAX || 4,
+      minClusterSize: getClusterMin()
+    });
+
+    const eligible = prof.eligible || [];
+    if (eligible.length < 4) {
+      throw new Error(`Not enough eligible thematic clusters (${eligible.length}) for persistent fields.`);
+    }
+
+    showLoading?.('Persistent Fields: computing cluster similarities…', 0.18);
+
+    const edgesPF = buildPersistentFieldSimilarityEdges(prof.clusterWeights, eligible);
+    if (!edgesPF.length) {
+      throw new Error('No positive concept similarity between base clusters.');
+    }
+
+    const thresholds = makePersistentThresholds(edgesPF, window.PERSIST_FIELDS_BINS || 24);
+    if (!thresholds.length) {
+      throw new Error('No threshold ladder could be built.');
+    }
+
+    showLoading?.('Persistent Fields: sweeping similarity thresholds…', 0.32);
+
+    const dsu = makeDsu(eligible);
+    const snapshots = [];
+    const componentsBySig = Object.create(null);
+
+    let ptr = 0;
+    for (let ti = 0; ti < thresholds.length; ti++) {
+      const thr = thresholds[ti];
+
+      while (ptr < edgesPF.length && edgesPF[ptr].sim >= thr) {
+        dsu.union(edgesPF[ptr].a, edgesPF[ptr].b);
+        ptr++;
+      }
+
+      const groups = snapshotPersistentComponents(
+        dsu,
+        eligible,
+        window.PERSIST_FIELDS_MIN_COMPONENT_CLUSTERS || 2
+      );
+
+      snapshots.push({ threshold: thr, groups });
+
+      for (const g of groups) {
+        const sig = g.join('|');
+        let rec = componentsBySig[sig];
+        if (!rec) {
+          rec = componentsBySig[sig] = {
+            sig,
+            steps: 0,
+            birth: thr,
+            death: thr,
+            span: 0,
+            size: g.length
+          };
+        }
+        rec.steps += 1;
+        rec.death = thr;
+        rec.span = Math.max(0, rec.birth - rec.death);
+      }
+
+      if (typeof nextTick === 'function') await nextTick();
+      showLoading?.(
+        `Persistent Fields: threshold ${ti + 1}/${thresholds.length}`,
+        0.32 + 0.5 * ((ti + 1) / thresholds.length)
+      );
+    }
+
+    const best = chooseBestPersistentSnapshot(
+      snapshots,
+      componentsBySig,
+      eligible.length,
+      window.PERSIST_FIELDS_MIN_STEPS || 3
+    );
+
+    if (!best || !best.groups || !best.groups.length) {
+      throw new Error('No stable persistent field partition was found.');
+    }
+
+    applyPersistentFieldGroups(best.groups, best.threshold, best.index);
+
+    persistentFieldState = {
+      conceptLevelMin: window.PERSIST_FIELDS_LEVEL_MIN || 2,
+      conceptLevelMax: window.PERSIST_FIELDS_LEVEL_MAX || 4,
+      bins: window.PERSIST_FIELDS_BINS || 24,
+      minComponentClusters: window.PERSIST_FIELDS_MIN_COMPONENT_CLUSTERS || 2,
+      minSteps: window.PERSIST_FIELDS_MIN_STEPS || 3,
+      bestThreshold: best.threshold,
+      bestSnapshotIndex: best.index,
+      bestSnapshotScore: best.score,
+      eligibleClusters: eligible.length,
+      pairCount: edgesPF.length,
+      snapshots,
+      componentsBySig
+    };
+
+    msg =
+      `Persistent Fields: ${fieldCount} field groups from ${eligible.length} base thematic clusters ` +
+      `(best concept-similarity threshold ${best.threshold.toFixed(3)}).`;
+
+    buildDimensionsIndex?.();
+    updateDimSections?.();
+    recomputeVisibility?.();
+    updateInfo?.();
+    redraw?.();
+  } catch (err) {
+    console.warn('Persistent Fields lens failed', err);
+    msg = `Persistent Fields failed: ${err?.message || err}`;
     updateInfo?.();
     redraw?.();
   } finally {
