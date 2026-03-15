@@ -468,6 +468,12 @@ let OPENAI_MODEL   = 'gpt-4o-mini';          // adjust if you prefer another mod
 
 let filtersPanel = null;
 
+// --- Persistent Fields threshold filter UI ----------------------------------
+let persistentFieldThreshold = null;     // actual similarity threshold currently applied
+let persistentFieldSlider = null;
+let persistentFieldLabel = null;
+let persistentFieldInput = null;
+
 let importBtn, hiddenFileInput, infoSpan;
 let nodes = [];  // [{idx, x, y, r}]
 let edges = [];  // [{source, target}]
@@ -15176,7 +15182,36 @@ function buildFiltersInto(containerBody) {
       redraw();
     }
   });
+  // --- Persistent field threshold ---
+  persistentFieldLabel = createDiv('Persistent field threshold');
+  persistentFieldLabel.parent(containerBody);
+  persistentFieldLabel.style('color','#eaeaea');
+  persistentFieldLabel.style('font-size','12px');
+  persistentFieldLabel.style('margin','10px 0 6px');
 
+  persistentFieldSlider = createSlider(0, 1, 0, 0.001);
+  persistentFieldSlider.parent(containerBody);
+  persistentFieldSlider.style('width','100%');
+  persistentFieldSlider.style('margin','0 0 6px');
+  captureUI?.(persistentFieldSlider.elt);
+
+  persistentFieldInput = mkNum(0, { min:0, max:1, step:0.001 }, (v)=>{
+    if (!getPersistentFieldSnapshots().length) return;
+    const ok = applyPersistentFieldsAtThreshold(Number(v || 0));
+    if (!ok) return;
+    if (persistentFieldSlider) persistentFieldSlider.value(persistentFieldThreshold);
+    if (persistentFieldInput) persistentFieldInput.elt.value = String(persistentFieldThreshold);
+  });
+
+  persistentFieldSlider.input(() => {
+    if (!getPersistentFieldSnapshots().length) return;
+    const v = Number(persistentFieldSlider.value() || 0);
+    const ok = applyPersistentFieldsAtThreshold(v);
+    if (!ok) return;
+    if (persistentFieldInput) persistentFieldInput.elt.value = String(persistentFieldThreshold);
+  });
+
+  initPersistentFieldThresholdUI?.();
 
   // --- Cluster size ---
   clusterSizeLabel = createDiv(`Show clusters ≥ ${clusterSizeThreshold|0} nodes`);
@@ -21579,6 +21614,126 @@ function applyPersistentFieldGroups(groups, threshold, snapshotIndex) {
   }
 }
 
+function getPersistentFieldSnapshots() {
+  const snaps = Array.isArray(persistentFieldState?.snapshots)
+    ? persistentFieldState.snapshots
+    : [];
+  return snaps.filter(s => s && Array.isArray(s.groups));
+}
+
+function getPersistentFieldThresholdBounds() {
+  const snaps = getPersistentFieldSnapshots();
+  if (!snaps.length) return { min: 0, max: 0, count: 0 };
+
+  let min = Infinity, max = -Infinity;
+  for (const s of snaps) {
+    const t = Number(s.threshold || 0);
+    if (!Number.isFinite(t)) continue;
+    if (t < min) min = t;
+    if (t > max) max = t;
+  }
+
+  if (!Number.isFinite(min) || !Number.isFinite(max)) {
+    return { min: 0, max: 0, count: snaps.length };
+  }
+
+  return { min, max, count: snaps.length };
+}
+
+function pickNearestPersistentSnapshotIndex(threshold) {
+  const snaps = getPersistentFieldSnapshots();
+  if (!snaps.length) return -1;
+
+  let bestIdx = 0;
+  let bestDist = Infinity;
+
+  for (let i = 0; i < snaps.length; i++) {
+    const d = Math.abs(Number(snaps[i].threshold || 0) - Number(threshold || 0));
+    if (d < bestDist) {
+      bestDist = d;
+      bestIdx = i;
+    }
+  }
+  return bestIdx;
+}
+
+function applyPersistentFieldsAtThreshold(threshold) {
+  const snaps = getPersistentFieldSnapshots();
+  if (!snaps.length) return false;
+
+  const idx = pickNearestPersistentSnapshotIndex(threshold);
+  if (idx < 0 || !snaps[idx]) return false;
+
+  const snap = snaps[idx];
+  applyPersistentFieldGroups(snap.groups, snap.threshold, idx);
+
+  persistentFieldThreshold = Number(snap.threshold || 0);
+  persistentFieldState.bestThreshold = persistentFieldThreshold;
+  persistentFieldState.bestSnapshotIndex = idx;
+
+  initPersistentFieldThresholdUI?.();
+
+  msg =
+    `Persistent Fields: showing ${fieldCount} field groups at threshold ${persistentFieldThreshold.toFixed(3)} ` +
+    `(snapshot ${idx + 1}/${snaps.length}; ${fieldMembers.length} active parent groups).`;
+
+  buildDimensionsIndex?.();
+  updateDimSections?.();
+  recomputeVisibility?.();
+  updateInfo?.();
+  redraw?.();
+  return true;
+}
+
+function initPersistentFieldThresholdUI() {
+  if (!persistentFieldSlider || !persistentFieldLabel) return;
+
+  const snaps = getPersistentFieldSnapshots();
+  const has = snaps.length > 0;
+
+  if (!has) {
+    persistentFieldLabel.html('Persistent field threshold');
+    persistentFieldSlider.attribute('disabled', true);
+    if (persistentFieldInput) persistentFieldInput.attribute('disabled', true);
+    return;
+  }
+
+  persistentFieldSlider.removeAttribute('disabled');
+  if (persistentFieldInput) persistentFieldInput.removeAttribute('disabled');
+
+  const { min, max } = getPersistentFieldThresholdBounds();
+  const current = Number.isFinite(+persistentFieldThreshold)
+    ? +persistentFieldThreshold
+    : Number(persistentFieldState?.bestThreshold || snaps[0].threshold || 0);
+
+  persistentFieldThreshold = current;
+
+  const step =
+    snaps.length > 1
+      ? Math.max(0.0001, Math.abs(max - min) / Math.max(20, snaps.length - 1))
+      : 0.001;
+
+  persistentFieldSlider.attribute('min', String(min));
+  persistentFieldSlider.attribute('max', String(max));
+  persistentFieldSlider.attribute('step', String(step));
+  persistentFieldSlider.value(current);
+
+  if (persistentFieldInput) {
+    persistentFieldInput.attribute('min', String(min));
+    persistentFieldInput.attribute('max', String(max));
+    persistentFieldInput.attribute('step', String(step));
+    persistentFieldInput.elt.value = String(current);
+  }
+
+  const idx = pickNearestPersistentSnapshotIndex(current);
+  const active = (idx >= 0 && snaps[idx]) ? snaps[idx] : null;
+  const shown = active ? Number(active.threshold || current) : current;
+
+  persistentFieldLabel.html(
+    `Persistent field threshold ${shown.toFixed(3)}`
+  );
+}
+
 async function runPersistentFieldsLens() {
   if (!itemsData || !nodes || !nodes.length) {
     alert('No graph loaded yet – load a dataset first.');
@@ -21673,6 +21828,7 @@ async function runPersistentFieldsLens() {
     }
 
     applyPersistentFieldGroups(best.groups, best.threshold, best.index);
+    persistentFieldThreshold = Number(best.threshold || 0);
 
     persistentFieldState = {
       conceptLevelMin: window.PERSIST_FIELDS_LEVEL_MIN || 2,
@@ -21695,6 +21851,7 @@ async function runPersistentFieldsLens() {
 
     buildDimensionsIndex?.();
     updateDimSections?.();
+    initPersistentFieldThresholdUI?.();
     recomputeVisibility?.();
     updateInfo?.();
     redraw?.();
