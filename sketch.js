@@ -3146,13 +3146,31 @@ function svgClusterRefBars(sum, width = 236, height = 86) {
 }
 
 function buildThematicClusterInfoHTML(d) {
-  if (!d || d.type !== 'clusters' || viewMode !== 'thematic') return '';
+  if (!d || d.type !== 'clusters') return '';
 
   const nodeIds = d.nodes
     ? (Array.isArray(d.nodes) ? d.nodes.slice() : Array.from(d.nodes))
     : [];
 
   if (!nodeIds.length) return '';
+
+    // Show thematic cluster info if:
+  // 1) this handle came from thematic mode, OR
+  // 2) the cluster's papers clearly contain thematic fingerprints.
+  const hasStoredThematicMode = String(d.clusterMode || '') === 'thematic';
+
+  let thematicFingerprintHits = 0;
+  for (const i of nodeIds) {
+    const item = itemsData?.[i] || {};
+    if (Array.isArray(item.invisibleUniTopics) && item.invisibleUniTopics.length) {
+      thematicFingerprintHits++;
+      if (thematicFingerprintHits >= 2) break;
+    }
+  }
+
+  const hasThematicData = thematicFingerprintHits > 0;
+
+  if (!hasStoredThematicMode && !hasThematicData) return '';
 
   const topFingerprints = topCountsFromNodeIds(nodeIds, getThematicFingerprintsForItemIndex, 12);
   const topAuthors      = topCountsFromNodeIds(nodeIds, getAuthorsForItemIndex, 12);
@@ -3940,8 +3958,8 @@ setCanvasOverview() {
     });
   }
 
-  // --- extra content for CLUSTER dimensions in thematic manifold ---
-  if (d.type === 'clusters' && viewMode === 'thematic') {
+  // --- extra content for CLUSTER dimensions ---
+  if (d.type === 'clusters') {
     const clusterHtml = buildThematicClusterInfoHTML(d);
     if (clusterHtml) {
       this.div.elt.insertAdjacentHTML('beforeend', clusterHtml);
@@ -5271,7 +5289,11 @@ function toggleDimensionTool(type, rec) {
   const displayLabel = rec.label || rec.key;
 
   // Use a stable key so clusters don't duplicate (cid:###)
-  const stableId = (type === 'clusters' && rec.cid != null) ? `cid:${rec.cid}` : rec.key;
+  // Use a view-specific stable key so clusters from different modes do not collide
+  const modeKey  = String(viewMode || 'citation');
+  const stableId = (type === 'clusters' && rec.cid != null)
+    ? `${modeKey}|cid:${rec.cid}`
+    : rec.key;
   const toolKey  = `${type}|${stableId}`;
   let idx = dimByKey.get(toolKey);
 
@@ -5289,8 +5311,9 @@ dimMembershipDirty = true;
       key: toolKey,
       label: displayLabel,
       cid: (type === 'clusters' ? rec.cid : undefined),
+      ...(type === 'clusters' ? { clusterMode: modeKey } : {}),
       nodes: rec.nodes,
-      power: DEFAULT_DIM_POWER,      // keep this 0 by default
+      power: DEFAULT_DIM_POWER,
       x: p.x, y: p.y,
       selected: true,
       ...(type === 'clusters' ? { userMoved: false } : {}),
@@ -6176,12 +6199,19 @@ const rx = sx + w / 2 - padX - 8, ry = sy, rr = 8;
 const sq = rr; // ≈ circle diameter
 
 // Is there an existing Dimension for this cluster?
-const key = `clusters|cid:${cid}`;
+// Is there an existing Dimension for this cluster?
+const modeKey = String(viewMode || 'citation');
+const key = `clusters|${modeKey}|cid:${cid}`;
 let dimIdx = dimByKey?.get ? dimByKey.get(key) : null;
 
 // Fallback scan in case maps aren’t hydrated yet
 if ((dimIdx == null || dimIdx < 0) && Array.isArray(dimTools)) {
-  dimIdx = dimTools.findIndex(d => d && d.type === 'clusters' && d.cid === cid);
+  dimIdx = dimTools.findIndex(d =>
+    d &&
+    d.type === 'clusters' &&
+    d.cid === cid &&
+    String(d.clusterMode || 'citation') === modeKey
+  );
 }
 const hasDim = Number.isInteger(dimIdx) && dimIdx >= 0 && dimTools?.[dimIdx];
 const isSelectedDim = hasDim && (selectedDim === dimIdx);
@@ -6232,50 +6262,60 @@ clusterLabelHits.push({
 
 
 function ensureClusterDimension(cid, label, powerZero = true) {
-  // Build a stable key from the cluster id
-  const stableId = `cid:${cid}`;
+  // Make cluster handles view-specific so thematic/citation/concept clusters
+  // do not reuse each other's handles.
+  const modeKey  = String(viewMode || 'citation');
+  const stableId = `${modeKey}|cid:${cid}`;
   const toolKey  = `clusters|${stableId}`;
 
   let idx = dimByKey.get(toolKey);
   if (idx == null) {
-    // Build node set
+    // Build node set from CURRENT clusterOf
     const ns = new Set();
-    for (let i = 0; i < nodes.length; i++) if (clusterOf[i] === cid) ns.add(i);
+    for (let i = 0; i < nodes.length; i++) {
+      if (clusterOf[i] === cid) ns.add(i);
+    }
 
     // Initial placement: cluster centroid in *world* coords
     let wx, wy;
-const box = clusterLabelCenters[cid];
-if (box) {
-  const targetSX = box.sx;
-  const targetSY = box.sy - (box.h * 0.5 + 6);
-  const wpos = screenToWorld(targetSX, targetSY);
-  wx = wpos.x; wy = wpos.y;
-} else {
-  // fallback: world centroid of nodes
-  let sx = 0, sy = 0, k = 0;
-  for (let i = 0; i < nodes.length; i++) if (clusterOf[i] === cid) { sx += nodes[i].x; sy += nodes[i].y; k++; }
-  wx = k ? (sx / k) : width * 0.5;
-  wy = k ? (sy / k) : height * 0.5;
-}
+    const box = clusterLabelCenters[cid];
+    if (box) {
+      const targetSX = box.sx;
+      const targetSY = box.sy - (box.h * 0.5 + 6);
+      const wpos = screenToWorld(targetSX, targetSY);
+      wx = wpos.x;
+      wy = wpos.y;
+    } else {
+      // fallback: world centroid of nodes
+      let sx = 0, sy = 0, k = 0;
+      for (let i = 0; i < nodes.length; i++) {
+        if (clusterOf[i] === cid) {
+          sx += nodes[i].x;
+          sy += nodes[i].y;
+          k++;
+        }
+      }
+      wx = k ? (sx / k) : width * 0.5;
+      wy = k ? (sy / k) : height * 0.5;
+    }
 
-const tool = {
-  type: 'clusters',
-  key: toolKey,
-  cid,
-  label: (label && label.trim()) ? label : `Cluster ${cid+1}`,
-  nodes: ns,
-  power: DEFAULT_DIM_POWER,   // should be 0
-  x: wx, y: wy,
-  selected: true,
-  userMoved: false,
-  color: DIM_COLORS.clusters || [255,230,100]
-};
+    const tool = {
+      type: 'clusters',
+      key: toolKey,
+      cid,
+      clusterMode: modeKey,   // remember which clustering/view created this handle
+      label: (label && label.trim()) ? label : `Cluster ${cid + 1}`,
+      nodes: ns,
+      power: DEFAULT_DIM_POWER,
+      x: wx, y: wy,
+      selected: true,
+      userMoved: false,
+      color: DIM_COLORS.clusters || [255,230,100]
+    };
 
     idx = dimTools.push(tool) - 1;
     dimByKey.set(toolKey, idx);
-dimMembershipDirty = true;
-
-
+    dimMembershipDirty = true;
   }
   selectDimension(idx);
   if (lenses.hideNonDim) recomputeVisibility();
