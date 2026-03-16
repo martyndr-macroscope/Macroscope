@@ -631,10 +631,20 @@ let persistentFieldState = {
 // Uses current cluster labels + thematic fingerprints (with counts)
 // and asks the LLM to group clusters into meaningful higher-level domains.
 
-window.AI_FIELDS_TOP_FPS_PER_CLUSTER =
-  Number.isFinite(+window.AI_FIELDS_TOP_FPS_PER_CLUSTER)
-    ? Math.max(5, (+window.AI_FIELDS_TOP_FPS_PER_CLUSTER | 0))
-    : 12;
+window.AI_FIELDS_MAX_CLUSTERS_PER_DOMAIN =
+  Number.isFinite(+window.AI_FIELDS_MAX_CLUSTERS_PER_DOMAIN)
+    ? Math.max(3, (+window.AI_FIELDS_MAX_CLUSTERS_PER_DOMAIN | 0))
+    : 5;
+
+window.AI_FIELDS_TARGET_CLUSTERS_PER_DOMAIN =
+  Number.isFinite(+window.AI_FIELDS_TARGET_CLUSTERS_PER_DOMAIN)
+    ? Math.max(3, (+window.AI_FIELDS_TARGET_CLUSTERS_PER_DOMAIN | 0))
+    : 4;
+
+window.AI_FIELDS_REQUIRE_FULL_COVERAGE =
+  (typeof window.AI_FIELDS_REQUIRE_FULL_COVERAGE === 'boolean')
+    ? window.AI_FIELDS_REQUIRE_FULL_COVERAGE
+    : true;
 
 window.AI_FIELDS_MIN_FP_COUNT =
   Number.isFinite(+window.AI_FIELDS_MIN_FP_COUNT)
@@ -649,6 +659,8 @@ window.AI_FIELDS_MIN_CLUSTERS_PER_DOMAIN =
 let aiFieldsState = {
   topFingerprintsPerCluster: window.AI_FIELDS_TOP_FPS_PER_CLUSTER,
   minFpCount: window.AI_FIELDS_MIN_FP_COUNT,
+  targetClustersPerDomain: window.AI_FIELDS_TARGET_CLUSTERS_PER_DOMAIN,
+  requireFullCoverage: !!window.AI_FIELDS_REQUIRE_FULL_COVERAGE,
   minClustersPerDomain: window.AI_FIELDS_MIN_CLUSTERS_PER_DOMAIN,
   lastInputClusters: 0,
   lastDomainCount: 0,
@@ -21881,36 +21893,96 @@ function applyAIFieldDomains(domains) {
 
   const usedClusters = new Set();
   const minChildren = Math.max(2, Number(window.AI_FIELDS_MIN_CLUSTERS_PER_DOMAIN || 2) | 0);
+  const maxChildren = Math.max(minChildren, Number(window.AI_FIELDS_MAX_CLUSTERS_PER_DOMAIN || 5) | 0);
+  const requireFullCoverage = !!window.AI_FIELDS_REQUIRE_FULL_COVERAGE;
+
+  // eligible clusters = same pool sent to model
+  const eligible = buildClusterFingerprintSummaryForAI({
+    topK: window.AI_FIELDS_TOP_FPS_PER_CLUSTER || 12,
+    minCount: window.AI_FIELDS_MIN_FP_COUNT || 2
+  }).map(r => r.cluster_id);
+
+  const eligibleSet = new Set(eligible);
+
+  // helper: split oversized returned domains into chunks of maxChildren
+  function chunkArray(arr, size) {
+    const out = [];
+    for (let i = 0; i < arr.length; i += size) {
+      out.push(arr.slice(i, i + size));
+    }
+    return out;
+  }
 
   for (let d = 0; d < (domains?.length || 0); d++) {
     const dom = domains[d] || {};
-    const label = sanitizeAIDomainLabel(dom.label || dom.domain || dom.name, `Domain ${d + 1}`);
+    const baseLabel = sanitizeAIDomainLabel(dom.label || dom.domain || dom.name, `Domain ${d + 1}`);
 
     let rawClusters = [];
     if (Array.isArray(dom.clusters)) rawClusters = dom.clusters.slice();
     else if (Array.isArray(dom.cluster_ids)) rawClusters = dom.cluster_ids.slice();
 
-    const memberCids = Array.from(new Set(
+    let memberCids = Array.from(new Set(
       rawClusters
         .map(v => Number(v))
         .filter(v => Number.isFinite(v) && v >= 0 && v < (clusterCount | 0))
-    )).filter(cid => !usedClusters.has(cid));
+    ))
+    .filter(cid => eligibleSet.has(cid))
+    .filter(cid => !usedClusters.has(cid));
 
     if (memberCids.length < minChildren) continue;
 
-    const fid = nextFieldMembers.length;
-    nextFieldMembers.push(memberCids);
-    nextFieldLabels.push(label);
+    // If the model gives us a large bucket, split it into finer-grained child domains
+    const chunks = (memberCids.length > maxChildren)
+      ? chunkArray(memberCids, maxChildren)
+      : [memberCids];
 
-    let totalPubs = 0;
-    for (const cid of memberCids) {
-      usedClusters.add(cid);
-      nextFieldOfCluster[cid] = fid;
-      totalPubs += (clusterSizesTotal && clusterSizesTotal[cid] != null)
-        ? (clusterSizesTotal[cid] | 0)
-        : 0;
+    for (let c = 0; c < chunks.length; c++) {
+      const chunk = chunks[c];
+      if (chunk.length < minChildren) continue;
+
+      const fid = nextFieldMembers.length;
+      nextFieldMembers.push(chunk);
+
+      const label = (chunks.length > 1)
+        ? `${baseLabel} ${c + 1}`
+        : baseLabel;
+
+      nextFieldLabels.push(label);
+
+      let totalPubs = 0;
+      for (const cid of chunk) {
+        usedClusters.add(cid);
+        nextFieldOfCluster[cid] = fid;
+        totalPubs += (clusterSizesTotal && clusterSizesTotal[cid] != null)
+          ? (clusterSizesTotal[cid] | 0)
+          : 0;
+      }
+      nextFieldSizes[fid] = totalPubs;
     }
-    nextFieldSizes[fid] = totalPubs;
+  }
+
+  // Full-coverage fallback: any eligible clusters left out get packed into small carry domains
+  const leftovers = eligible.filter(cid => !usedClusters.has(cid));
+  if (requireFullCoverage && leftovers.length) {
+    const chunks = chunkArray(leftovers, Math.max(minChildren, Math.min(maxChildren, 4)));
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      if (!chunk.length) continue;
+
+      const fid = nextFieldMembers.length;
+      nextFieldMembers.push(chunk);
+      nextFieldLabels.push(`Residual Domain ${i + 1}`);
+
+      let totalPubs = 0;
+      for (const cid of chunk) {
+        usedClusters.add(cid);
+        nextFieldOfCluster[cid] = fid;
+        totalPubs += (clusterSizesTotal && clusterSizesTotal[cid] != null)
+          ? (clusterSizesTotal[cid] | 0)
+          : 0;
+      }
+      nextFieldSizes[fid] = totalPubs;
+    }
   }
 
   fieldOfCluster = nextFieldOfCluster;
@@ -21958,14 +22030,16 @@ async function runAIFieldsFromClustersLens() {
       '',
       'Your task:',
       '1. Group these clusters into broader higher-level domains.',
-      '2. Each domain should contain at least 2 clusters where possible.',
-      '3. Use the fingerprints and labels to infer meaningful broader domains.',
-      '4. Avoid generic labels like "General Research" or "Miscellaneous" unless absolutely necessary.',
-      '5. Prefer concise domain names, usually 2 to 5 words, in Title Case.',
-      '6. You do NOT need to include every cluster if some are outliers.',
+      '2. You must assign EVERY cluster to exactly one domain. Full coverage is required.',
+      '3. Aim for fine-grained domains, typically around 3 to 5 clusters per domain where the data allows.',
+      '4. Avoid very large catch-all domains unless they are clearly unavoidable.',
+      '5. Use the fingerprints and labels to infer meaningful broader domains.',
+      '6. Avoid generic labels like "General Research" or "Miscellaneous" unless absolutely necessary.',
+      '7. Prefer concise domain names, usually 2 to 5 words, in Title Case.',
+      '8. Each cluster_id must appear once and only once across all returned domains.',
       '',
       'Return JSON ONLY in this exact form:',
-      '{"domains":[{"label":"<domain label>","clusters":[<cluster_id>,<cluster_id>,...]}, ...]}',
+      '{"domains":[{"label":"<domain label>","clusters":[<cluster_id>,<cluster_id>,...]}]}',
       '',
       JSON.stringify({
         cluster_count: clusterRows.length,
@@ -21997,11 +22071,20 @@ async function runAIFieldsFromClustersLens() {
 
     aiFieldsState.lastDomainCount = fieldCount;
 
+        const eligibleIds = buildClusterFingerprintSummaryForAI({
+      topK: window.AI_FIELDS_TOP_FPS_PER_CLUSTER || 12,
+      minCount: window.AI_FIELDS_MIN_FP_COUNT || 2
+    }).map(r => r.cluster_id);
+
+    const uncovered = eligibleIds.filter(cid => fieldOfCluster[cid] == null || fieldOfCluster[cid] < 0);
+
     if (!fieldCount) {
       throw new Error('No valid multi-cluster domains were produced.');
     }
 
-    msg = `AI Fields: created ${fieldCount} higher-level domains from ${clusterRows.length} clusters.`;
+    msg =
+      `AI Fields: created ${fieldCount} higher-level domains from ${clusterRows.length} clusters ` +
+      `(uncovered: ${uncovered.length}).`;
 
     buildDimensionsIndex?.();
     updateDimSections?.();
