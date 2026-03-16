@@ -1691,7 +1691,16 @@ async function demoOpenDataset(slug) {
 
 
 // ---------- Dimensions data & UI ----------
-let dimsIndex = { authors: new Map(), venues: new Map(), concepts: new Map(), institutions: new Map(), clusters: new Map()};
+let dimsIndex = {
+  authors: new Map(),
+  venues: new Map(),
+  concepts: new Map(),
+  institutions: new Map(),
+  clusters: new Map(),
+  fields: new Map()
+};
+
+
 let dimSections = {};   // UI <details> per section
 let dimTools = [];      // active handles
 let dimByKey = new Map(); // "type|name" -> index in dimTools
@@ -4077,6 +4086,9 @@ setCanvasOverview() {
   const safe = s => String(s ?? '').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
 
   const delLabel = (String(d.type).toLowerCase() === 'ai') ? 'Delete Lens' : 'Delete Dimension';
+  const extraSummary = (d.type === 'fields' && d.summaryHtml)
+    ? `<div style="margin:10px 0 12px 0">${d.summaryHtml}</div>`
+    : '';
 
   this.div.html(`
     <div style="font-weight:600;font-size:16px;margin-bottom:6px">${safe(title)}</div>
@@ -4085,6 +4097,8 @@ setCanvasOverview() {
       <div style="opacity:.7">Type</div><div>${safe(d.type || 'dimension')}</div>
       <div style="opacity:.7">Matches</div><div>${matchCount}</div>
     </div>
+
+    ${extraSummary}
 
     <div style="font-weight:600;font-size:13px;margin:6px 0 4px;">Power</div>
     <input id="${powId}" type="range" min="0" max="100" step="1" value="${power}"
@@ -5033,6 +5047,7 @@ function buildDimensionsIndex() {
   dimsIndex.venues.clear();
   dimsIndex.concepts.clear();
   dimsIndex.institutions.clear();
+  dimsIndex.fields.clear();
   // NOTE: dimsIndex.clusters is rebuilt separately at the end.
 
   const push = (map, key, idx) => {
@@ -5098,6 +5113,37 @@ if (venue) push(dimsIndex.venues, venue, i);
 if (rec.count >= min) dimsIndex.clusters.set(rec.label, rec);
     }
   }
+  // ---- Fields / Domains (from computed fieldOfCluster + fieldLabels) ----
+  dimsIndex.fields.clear();
+  if (Array.isArray(fieldOfCluster) && fieldOfCluster.length && fieldCount > 0) {
+    const byFid = new Map(); // fid -> { fid, key, label, count, nodes:Set }
+
+    for (let i = 0; i < itemsData.length; i++) {
+      const cid = clusterOf?.[i];
+      if (cid == null || cid < 0) continue;
+
+      const fid = fieldOfCluster?.[cid];
+      if (fid == null || fid < 0) continue;
+
+      const label = (fieldLabels?.[fid] && String(fieldLabels[fid]).trim())
+        ? String(fieldLabels[fid]).trim()
+        : `Field ${fid + 1}`;
+
+      let rec = byFid.get(fid);
+      if (!rec) {
+        rec = { fid, key: label, label, count: 0, nodes: new Set() };
+        byFid.set(fid, rec);
+      }
+      if (!rec.nodes.has(i)) { rec.nodes.add(i); rec.count++; }
+    }
+
+    for (const rec of byFid.values()) {
+      if (rec.count > 0) dimsIndex.fields.set(rec.label, rec);
+    }
+  }
+
+
+
 }
 
 
@@ -5279,6 +5325,7 @@ function updateDimSections() {
     ['Concepts',     'concepts',     dimsIndex.concepts],
     ['Institutions', 'institutions', dimsIndex.institutions],
     ['Clusters',     'clusters',     dimsIndex.clusters],
+    ['Domains',      'fields',       dimsIndex.fields],
   ];
 
   // Tokenize the query (AND match)
@@ -5453,9 +5500,10 @@ function toggleDimensionTool(type, rec) {
   // Use a stable key so clusters don't duplicate (cid:###)
   // Use a view-specific stable key so clusters from different modes do not collide
   const modeKey  = String(viewMode || 'citation');
-  const stableId = (type === 'clusters' && rec.cid != null)
-    ? `${modeKey}|cid:${rec.cid}`
-    : rec.key;
+  const stableId =
+    (type === 'clusters' && rec.cid != null) ? `cid:${rec.cid}` :
+    (type === 'fields'   && rec.fid != null) ? `fid:${rec.fid}` :
+    rec.key;
   const toolKey  = `${type}|${stableId}`;
   let idx = dimByKey.get(toolKey);
 
@@ -5473,7 +5521,7 @@ dimMembershipDirty = true;
       key: toolKey,
       label: displayLabel,
       cid: (type === 'clusters' ? rec.cid : undefined),
-      ...(type === 'clusters' ? { clusterMode: modeKey } : {}),
+      fid: (type === 'fields'   ? rec.fid : undefined),
       nodes: rec.nodes,
       power: DEFAULT_DIM_POWER,
       x: p.x, y: p.y,
@@ -5482,6 +5530,15 @@ dimMembershipDirty = true;
       color: DIM_COLORS[type] || [220,220,220],
       focusOn: false
     };
+
+        if (type === 'fields' && rec.fid != null) {
+      const payload = buildDomainSummaryPayload(rec.fid);
+      tool.domainFingerprints = payload.fingerprints;
+      tool.domainRefSummary = payload.refSummary;
+      tool.domainChildClusters = payload.childClusters;
+      tool.summaryHtml = payload.summaryHtml;
+      tool.summaryText = payload.summaryText;
+    }
 
     idx = dimTools.push(tool) - 1;
     dimByKey.set(toolKey, idx);
@@ -5984,6 +6041,8 @@ function createAIMenuButton() {
   addItem('Fields identification', () => runFieldsIdentificationLens?.());
   addItem('Persistent Fields', () => runPersistentFieldsLens?.());
   addItem('Topological Clustering', () => runTopologicalClusteringLens?.());
+  addItem('Label Domains', () => runLabelDomainsAI?.());
+
   addItem('AI Fields from Clusters', () => runAIFieldsFromClustersLens?.());
   
   addItem('Invisible University (themes)…', () => runInvisibleUniversityLens?.());
@@ -6602,20 +6661,173 @@ function ensureClusterDimension(cid, label, powerZero = true) {
   if (lenses.hideNonDim) recomputeVisibility();
   redraw();
 }
+function getDomainNodeIds(fid) {
+  const out = [];
+  for (let i = 0; i < nodes.length; i++) {
+    const cid = clusterOf?.[i];
+    if (cid == null || cid < 0) continue;
+    if (fieldOfCluster?.[cid] === fid) out.push(i);
+  }
+  return out;
+}
+
+function getDomainClusterIds(fid) {
+  const arr = Array.isArray(fieldMembers?.[fid]) ? fieldMembers[fid].slice() : [];
+  return arr.filter(cid => Number.isFinite(+cid) && cid >= 0);
+}
+
+function getDomainFingerprintSummary(fid, topK = 12) {
+  const counts = new Map();
+  const idxs = getDomainNodeIds(fid);
+
+  for (const i of idxs) {
+    const fps = (typeof getTopicsForNodeIndex === 'function')
+      ? getTopicsForNodeIndex(i)
+      : ((Array.isArray(itemsData?.[i]?.invisibleUniTopics)) ? itemsData[i].invisibleUniTopics : []);
+
+    const uniq = Array.from(new Set(
+      (fps || []).map(s => String(s || '').trim()).filter(Boolean)
+    ));
+
+    for (const fp of uniq) {
+      counts.set(fp, (counts.get(fp) || 0) + 1);
+    }
+  }
+
+  return Array.from(counts.entries())
+    .sort((a, b) => {
+      if (b[1] !== a[1]) return b[1] - a[1];
+      return a[0].localeCompare(b[0]);
+    })
+    .slice(0, Math.max(3, topK | 0))
+    .map(([term, count]) => ({ term, count }));
+}
+
+function getDomainRefSummary(fid) {
+  const idxs = getDomainNodeIds(fid);
+  let nRef = 0;
+  let sumStar = 0;
+  let sumPct = 0;
+  let nPct = 0;
+  const byStar = new Map([[1,0],[2,0],[3,0],[4,0]]);
+
+  for (const i of idxs) {
+    const star = (typeof getNodeRefOverlayValue === 'function')
+      ? getNodeRefOverlayValue(i)
+      : null;
+
+    if (Number.isFinite(star)) {
+      const s = Math.max(1, Math.min(4, Math.round(star)));
+      byStar.set(s, (byStar.get(s) || 0) + 1);
+      sumStar += s;
+      nRef++;
+    }
+
+    const pct = Number(itemsData?.[i]?.ref_percent);
+    if (Number.isFinite(pct)) {
+      sumPct += pct;
+      nPct++;
+    }
+  }
+
+  return {
+    assessedCount: nRef,
+    avgStar: nRef ? (sumStar / nRef) : null,
+    avgPercent: nPct ? (sumPct / nPct) : null,
+    byStar: {
+      1: byStar.get(1) || 0,
+      2: byStar.get(2) || 0,
+      3: byStar.get(3) || 0,
+      4: byStar.get(4) || 0
+    }
+  };
+}
+
+function buildDomainSummaryPayload(fid) {
+  const clusterIds = getDomainClusterIds(fid);
+  const fp = getDomainFingerprintSummary(fid, 12);
+  const ref = getDomainRefSummary(fid);
+
+  const childLabels = clusterIds.map(cid => {
+    const label = String(fieldLabels?.[fid] || '').trim();
+    const cl = String(clusterLabels?.[cid] || '').trim() || `Cluster ${cid + 1}`;
+    return { cid, label: cl, size: Number(clusterSizesTotal?.[cid] || 0) };
+  });
+
+  const fpText = fp.length
+    ? fp.map(x => `${x.term} (${x.count})`).join(', ')
+    : '—';
+
+  const refText = (ref.assessedCount > 0)
+    ? `Assessed: ${ref.assessedCount} · Avg REF: ${(ref.avgStar || 0).toFixed(2)}*` +
+      (Number.isFinite(ref.avgPercent) ? ` · Avg %: ${(ref.avgPercent).toFixed(1)}` : '') +
+      ` · Distribution: 4* ${ref.byStar[4]}, 3* ${ref.byStar[3]}, 2* ${ref.byStar[2]}, 1* ${ref.byStar[1]}`
+    : 'No REF assessments available';
+
+  const html = `
+    <div style="font-weight:600;font-size:13px;margin:10px 0 4px;">Top Fingerprints</div>
+    <div style="font-size:12px;line-height:1.45;opacity:.95">${esc(fpText)}</div>
+
+    <div style="font-weight:600;font-size:13px;margin:10px 0 4px;">REF Summary</div>
+    <div style="font-size:12px;line-height:1.45;opacity:.95">${esc(refText)}</div>
+
+    <div style="font-weight:600;font-size:13px;margin:10px 0 4px;">Child Clusters</div>
+    <div style="font-size:12px;line-height:1.45;opacity:.95">
+      ${childLabels.length
+        ? childLabels.map(x => `${esc(x.label)} (${x.size})`).join('<br/>')
+        : '<span style="opacity:.7">—</span>'}
+    </div>
+  `;
+
+  const text =
+    `Top Fingerprints\n` +
+    `${fpText}\n\n` +
+    `REF Summary\n` +
+    `${refText}\n\n` +
+    `Child Clusters\n` +
+    `${childLabels.map(x => `${x.label} (${x.size})`).join('\n')}`;
+
+  return {
+    fingerprints: fp,
+    refSummary: ref,
+    childClusters: childLabels,
+    summaryHtml: html,
+    summaryText: text
+  };
+}
+
+function syncFieldDimensionsFromCurrentFields() {
+  if (!Array.isArray(dimTools) || !dimTools.length) return;
+
+  for (let k = 0; k < dimTools.length; k++) {
+    const d = dimTools[k];
+    if (!d || d.type !== 'fields') continue;
+
+    const fid = Number(d.fid);
+    if (!Number.isFinite(fid) || fid < 0) continue;
+
+    d.label = String(fieldLabels?.[fid] || d.label || `Field ${fid + 1}`);
+    d.nodes = new Set(getDomainNodeIds(fid));
+
+    const payload = buildDomainSummaryPayload(fid);
+    d.domainFingerprints = payload.fingerprints;
+    d.domainRefSummary = payload.refSummary;
+    d.domainChildClusters = payload.childClusters;
+    d.summaryHtml = payload.summaryHtml;
+    d.summaryText = payload.summaryText;
+  }
+}
 
 function ensureFieldDimension(fid, label, powerZero = true) {
   const stableId = `fid:${fid}`;
   const toolKey  = `fields|${stableId}`;
 
   let idx = dimByKey.get(toolKey);
+  const payload = buildDomainSummaryPayload(fid);
+
   if (idx == null) {
     // Build node set = all publications belonging to child clusters in this field
-    const ns = new Set();
-    for (let i = 0; i < nodes.length; i++) {
-      const cid = clusterOf[i];
-      if (cid == null || cid < 0) continue;
-      if (fieldOfCluster[cid] === fid) ns.add(i);
-    }
+    const ns = new Set(getDomainNodeIds(fid));
 
     // Initial placement: just above the field pill if available
     let wx, wy;
@@ -6648,12 +6860,30 @@ function ensureFieldDimension(fid, label, powerZero = true) {
       x: wx, y: wy,
       selected: true,
       userMoved: false,
-      color: (DIM_COLORS && DIM_COLORS.fields) ? DIM_COLORS.fields : [180, 220, 255]
+      color: (DIM_COLORS && DIM_COLORS.fields) ? DIM_COLORS.fields : [180, 220, 255],
+
+      domainFingerprints: payload.fingerprints,
+      domainRefSummary: payload.refSummary,
+      domainChildClusters: payload.childClusters,
+      summaryHtml: payload.summaryHtml,
+      summaryText: payload.summaryText
     };
 
     idx = dimTools.push(tool) - 1;
     dimByKey.set(toolKey, idx);
     dimMembershipDirty = true;
+  } else {
+    const d = dimTools[idx];
+    if (d) {
+      d.label = (label && label.trim()) ? label : (fieldLabels?.[fid] || d.label || `Field ${fid+1}`);
+      d.nodes = new Set(getDomainNodeIds(fid));
+      d.domainFingerprints = payload.fingerprints;
+      d.domainRefSummary = payload.refSummary;
+      d.domainChildClusters = payload.childClusters;
+      d.summaryHtml = payload.summaryHtml;
+      d.summaryText = payload.summaryText;
+      dimMembershipDirty = true;
+    }
   }
 
   selectDimension(idx);
@@ -15866,6 +16096,33 @@ if (rec.count >= min) dimsIndex.clusters.set(rec.label, rec);
     }
   }
 })();
+// Always rebuild the "Domains" section using fieldOfCluster + fieldLabels
+(() => {
+  dimsIndex.fields.clear();
+  if (Array.isArray(fieldOfCluster) && fieldOfCluster.length && fieldCount > 0) {
+    const byFid = new Map();
+    for (let i = 0; i < itemsData.length; i++) {
+      const cid = clusterOf?.[i];
+      if (cid == null || cid < 0) continue;
+
+      const fid = fieldOfCluster?.[cid];
+      if (fid == null || fid < 0) continue;
+
+      const label = (fieldLabels?.[fid] && String(fieldLabels[fid]).trim())
+        ? String(fieldLabels[fid]).trim()
+        : `Field ${fid + 1}`;
+
+      let rec = byFid.get(fid);
+      if (!rec) { rec = { fid, key: label, label, count: 0, nodes: new Set() }; byFid.set(fid, rec); }
+      if (!rec.nodes.has(i)) { rec.nodes.add(i); rec.count++; }
+    }
+
+    for (const rec of byFid.values()) {
+      if (rec.count > 0) dimsIndex.fields.set(rec.label, rec);
+    }
+  }
+})();
+
 
 // Re-render the sidebar
 renderDimensionsUI?.();
@@ -21508,6 +21765,128 @@ function buildTopologicalClusterGraph(thresholdPct = 20, model = 'weak', minCros
   return topologicalClusterStats;
 }
 
+function getDomainRowsForAILabelling() {
+  const rows = [];
+
+  for (let fid = 0; fid < (fieldCount | 0); fid++) {
+    const members = Array.isArray(fieldMembers?.[fid]) ? fieldMembers[fid] : [];
+    if (members.length < 2) continue;
+
+    const fp = getDomainFingerprintSummary(fid, 12);
+    const ref = getDomainRefSummary(fid);
+
+    rows.push({
+      fid,
+      current_label: String(fieldLabels?.[fid] || `Field ${fid + 1}`),
+      cluster_ids: members.slice(),
+      cluster_labels: members.map(cid => String(clusterLabels?.[cid] || `Cluster ${cid + 1}`)),
+      fingerprints: fp,
+      ref_summary: {
+        assessed_count: ref.assessedCount,
+        avg_star: ref.avgStar,
+        avg_percent: ref.avgPercent
+      }
+    });
+  }
+
+  return rows;
+}
+
+async function runLabelDomainsAI() {
+  if (!Array.isArray(fieldMembers) || !fieldMembers.length || !fieldCount) {
+    msg = 'No domains are currently active to label.';
+    updateInfo?.();
+    redraw?.();
+    return;
+  }
+
+  const rows = getDomainRowsForAILabelling();
+  if (!rows.length) {
+    msg = 'No eligible domains found to label.';
+    updateInfo?.();
+    redraw?.();
+    return;
+  }
+
+  showLoading?.('Labelling domains…', 0.08);
+
+  const updated = [];
+
+  for (let k = 0; k < rows.length; k++) {
+    const row = rows[k];
+
+    setLoadingProgress?.(
+      0.08 + 0.84 * (k / Math.max(1, rows.length)),
+      `Labelling domain ${k + 1}/${rows.length}`
+    );
+
+    const sys = 'You are an expert at naming higher-level research domains succinctly.';
+    const user = [
+      'You are given one higher-level research domain made up of several child clusters.',
+      'Use the child cluster labels, top fingerprints, and REF summary only as grounding.',
+      'Return one concise, human-readable domain label.',
+      'Requirements:',
+      '- 2 to 5 words',
+      '- Title Case',
+      '- No quotation marks',
+      '- No trailing punctuation',
+      '- Avoid generic labels like General Research, Miscellaneous, Interdisciplinary Studies unless unavoidable',
+      'Return JSON ONLY in the form: {"label":"<domain label>"}',
+      '',
+      JSON.stringify(row, null, 2)
+    ].join('\n');
+
+    try {
+      const raw = await openaiChatDirect(
+        [
+          { role: 'system', content: sys },
+          { role: 'user', content: user }
+        ],
+        { temperature: 0.2, max_tokens: 120 }
+      );
+
+      const parsed = extractJson(raw) || {};
+      let label = '';
+
+      if (parsed && typeof parsed.label === 'string') {
+        label = parsed.label.trim();
+      }
+      if (!label) {
+        label = String(raw || '').trim().split('\n')[0].replace(/^["']|["']$/g, '').slice(0, 80);
+      }
+
+      if (label) {
+        fieldLabels[row.fid] = label;
+        updated.push({ fid: row.fid, label });
+      }
+    } catch (err) {
+      console.warn('Label domain error', err);
+    }
+
+    if (typeof nextTick === 'function') await nextTick();
+  }
+
+  hideLoading?.();
+
+  if (!updated.length) {
+    msg = 'No domain labels were updated.';
+    updateInfo?.();
+    redraw?.();
+    return;
+  }
+
+  syncFieldDimensionsFromCurrentFields();
+  buildDimensionsIndex?.();
+  updateDimSections?.();
+  recomputeVisibility?.();
+  updateInfo?.();
+  redraw?.();
+
+  msg = `AI labels updated for ${updated.length} domain(s).`;
+  updateInfo?.();
+  redraw?.();
+}
+
 async function runTopologicalClusteringLens() {
   if (!clusterOf || clusterOf.length !== nodes.length || !clusterCount) {
     computeDomainClusters?.();
@@ -21581,7 +21960,7 @@ async function runTopologicalClusteringLens() {
   try {
     clearTopologicalFieldsState();
     const stats = buildTopologicalClusterGraph(pct, model, minCross);
-
+    syncFieldDimensionsFromCurrentFields();
     if (typeof ovFieldLabels !== 'undefined' && ovFieldLabels <= 0) {
       ovFieldLabels = 1;
       try { ovFieldLabelSlider?.value?.(100); } catch (_) {}
