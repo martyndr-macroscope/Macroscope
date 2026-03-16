@@ -570,6 +570,34 @@ let layoutBtn; // (optional) UI button
 // ---- Camera / interactions ----
 let cam = { x: 0, y: 0, scale: 1 };
 let zoomLevel = 0; 
+
+// --- Semantic zoom for labels ----------------------------------------------
+// GUI zoom is log2(cam.scale), stored in zoomLevel.
+//
+// Cluster labels:
+//   <= 0.0  -> hidden
+//   0.0..0.5 -> fade in
+//   >= 0.5  -> fully visible
+//
+// Domain labels:
+//   <= 0.0  -> fully visible
+//   0.0..0.5 -> fade out
+//   >= 0.5  -> hidden
+
+function getClusterLabelZoomAlpha() {
+  const z = Number(zoomLevel || 0);
+  if (z <= 0) return 0;
+  if (z >= 0.5) return 1;
+  return (z - 0) / 0.5;
+}
+
+function getDomainLabelZoomAlpha() {
+  const z = Number(zoomLevel || 0);
+  if (z <= 0) return 1;
+  if (z >= 0.5) return 0;
+  return 1 - ((z - 0) / 0.5);
+}
+
 let isPanning = false;
 
 let panStart = null;
@@ -2515,7 +2543,7 @@ if (ovRefAssessment > 0 && alpha > 0) {
     strokeWeight(2 / cam.scale);
     fill(rr, gg, bb, refA);
 
-    text('*', p.x, p.y + (0.2 / cam.scale));
+    text('*', p.x, p.y);
     pop();
   }
 }
@@ -5684,7 +5712,14 @@ function deleteDimension(k) {
   const d = dimTools[k];
   if (!d) return;
    if (focusedDimIndex === k) focusedDimIndex = -1; 
+  // If this dimension was the active visibility lock, clear it
+  if (d.key && dimFilterLock === d.key) dimFilterLock = null;
 
+  // If this dimension was selected, clear selection state
+  if (selectedDim === k) selectedDim = -1;
+
+  // Invalidate cached node membership so visibility can rebuild correctly
+  dimMembershipDirty = true;
 // Remove from multi-focus set and reindex any focused indices after k
 if (focusedDimSet && focusedDimSet.size > 0) {
   const next = new Set();
@@ -5740,11 +5775,18 @@ if (focusedDimSet && focusedDimSet.size > 0) {
   recomputeVisibility?.();             // rebuild masks/edges based on current sliders and flags
 
   // 7) Refresh UI and redraw
+
+  recomputeVisibility?.();
+  updateDimSections?.();
+  updateInfo?.();
   renderDimensionsUI?.();
   updateDimSections?.();
   showCanvasOverviewIfNoneSelected();
   hoverIndex = -1;                     // drop any transient hover highlight
   redraw();
+
+
+
 }
 
 
@@ -6362,7 +6404,9 @@ if ((idxs?.length || 0) < minForLabel) { next[cid] = ''; continue; }
 function drawFieldLabels() {
   if (!nodes.length || !fieldLabels || !fieldLabels.length || !fieldMembers || !fieldMembers.length) return;
 
-  const fieldAlpha = Math.max(0, Math.min(1, ovFieldLabels));
+  const sliderAlpha = Math.max(0, Math.min(1, ovFieldLabels));
+const zoomAlpha   = getDomainLabelZoomAlpha();
+const fieldAlpha  = Math.max(0, Math.min(1, sliderAlpha * zoomAlpha));
   if (fieldAlpha <= 0) {
     fieldLabelHits = [];
     return;
@@ -6478,7 +6522,9 @@ function drawClusterLabels() {
   if (!nodes.length || !clusterLabels || !clusterLabels.length) return;
 
   // Opacity from the Cluster Labels slider
-  const clusterAlpha = Math.max(0, Math.min(1, ovClusterLabels));
+  const sliderAlpha  = Math.max(0, Math.min(1, ovClusterLabels));
+const zoomAlpha    = getClusterLabelZoomAlpha();
+const clusterAlpha = Math.max(0, Math.min(1, sliderAlpha * zoomAlpha));
 
   // When labels are off, clear hits so hover/click are disabled
   if (clusterAlpha <= 0) {
@@ -15428,78 +15474,6 @@ function buildFiltersInto(containerBody) {
     applyDegreeFilter(degThreshold);
   });
 
-  // --- Concept cluster level ---
-  conceptLevelLabel = createDiv(`Concept cluster level ≥ ${conceptClusterLevel|0} shared concepts`);
-  conceptLevelLabel.parent(containerBody);
-  conceptLevelLabel.style('color','#eaeaea');
-  conceptLevelLabel.style('font-size','12px');
-  conceptLevelLabel.style('margin','10px 0 6px');
-
-  const conceptMaxInit = Math.max(1, Number(conceptClusterState?.maxShared || 1));
-  conceptLevelSlider = createSlider(1, conceptMaxInit, Math.max(1, conceptClusterLevel|0), 1);
-  conceptLevelSlider.parent(containerBody);
-  conceptLevelSlider.style('width','100%');
-  conceptLevelSlider.style('margin','0 0 6px');
-  captureUI?.(conceptLevelSlider.elt);
-
-  conceptLevelInput = mkNum(Math.max(1, conceptClusterLevel|0), { min:1, max:conceptMaxInit, step:1 }, (v)=>{
-    const max = Math.max(1, Number(rebuildConceptClusterInventory()?.maxShared || 1));
-    conceptClusterLevel = clamp(v|0, 1, max);
-    conceptLevelSlider.elt.value = String(conceptClusterLevel);
-    conceptLevelLabel.html(`Concept cluster level ≥ ${conceptClusterLevel} shared concepts`);
-
-    if (viewMode === 'concept') {
-      __buildConceptGraphIfNeeded(conceptClusterLevel);
-      __applyView('concept');
-    } else {
-      redraw();
-    }
-  });
-
-  conceptLevelSlider.input(() => {
-    const max = Math.max(1, Number(rebuildConceptClusterInventory()?.maxShared || 1));
-    conceptClusterLevel = clamp(Number(conceptLevelSlider.value())|0, 1, max);
-    conceptLevelLabel.html(`Concept cluster level ≥ ${conceptClusterLevel} shared concepts`);
-    if (conceptLevelInput) conceptLevelInput.elt.value = String(conceptClusterLevel);
-
-    if (viewMode === 'concept') {
-      __buildConceptGraphIfNeeded(conceptClusterLevel);
-      __applyView('concept');
-    } else {
-      redraw();
-    }
-  });
-  // --- Persistent field threshold ---
-  persistentFieldLabel = createDiv('Persistent field threshold');
-  persistentFieldLabel.parent(containerBody);
-  persistentFieldLabel.style('color','#eaeaea');
-  persistentFieldLabel.style('font-size','12px');
-  persistentFieldLabel.style('margin','10px 0 6px');
-
-  persistentFieldSlider = createSlider(0, 1, 0, 0.001);
-  persistentFieldSlider.parent(containerBody);
-  persistentFieldSlider.style('width','100%');
-  persistentFieldSlider.style('margin','0 0 6px');
-  captureUI?.(persistentFieldSlider.elt);
-
-  persistentFieldInput = mkNum(0, { min:0, max:1, step:0.001 }, (v)=>{
-    if (!getPersistentFieldSnapshots().length) return;
-    const ok = applyPersistentFieldsAtThreshold(Number(v || 0));
-    if (!ok) return;
-    if (persistentFieldSlider) persistentFieldSlider.value(persistentFieldThreshold);
-    if (persistentFieldInput) persistentFieldInput.elt.value = String(persistentFieldThreshold);
-  });
-
-  persistentFieldSlider.input(() => {
-    if (!getPersistentFieldSnapshots().length) return;
-    const v = Number(persistentFieldSlider.value() || 0);
-    const ok = applyPersistentFieldsAtThreshold(v);
-    if (!ok) return;
-    if (persistentFieldInput) persistentFieldInput.elt.value = String(persistentFieldThreshold);
-  });
-
-  initPersistentFieldThresholdUI?.();
-
   // --- Cluster size ---
   clusterSizeLabel = createDiv(`Show clusters ≥ ${clusterSizeThreshold|0} nodes`);
   clusterSizeLabel.parent(containerBody);
@@ -15716,7 +15690,7 @@ function buildOverlaysInto(containerBody) {
   });
 
     // Field Labels (parent pill UI + click)
-  ovFieldLabelSlider = mkSlider('Field Labels', Math.round(ovFieldLabels*100), (e) => {
+  ovFieldLabelSlider = mkSlider('Domain Labels', Math.round(ovFieldLabels*100), (e) => {
     ovFieldLabels = Number(e.target.value)/100;
 
     if (ovFieldLabels === 0) {
