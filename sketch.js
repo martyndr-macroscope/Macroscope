@@ -1873,6 +1873,14 @@ let fieldMembers = [];          // fieldId -> [clusterIds]
 let fieldSizesTotal = [];       // fieldId -> total publication count
 let fieldFingerprintThreshold = 0;
 
+// --- Topological clustering -------------------------------------------------
+let topologicalClusterThresholdPct = 20;   // user threshold in percent
+let topologicalClusterStats = {
+  eligibleClusters: 0,
+  linkedPairs: 0,
+  fieldCount: 0
+};
+
 // --- Section titles ---
 
 
@@ -5969,6 +5977,7 @@ function createAIMenuButton() {
   addItem('Apply Fingerprints', () => runApplyFingerprintsOnly?.());
   addItem('Fields identification', () => runFieldsIdentificationLens?.());
   addItem('Persistent Fields', () => runPersistentFieldsLens?.());
+  addItem('Topological Clustering', () => runTopologicalClusteringLens?.());
   addItem('AI Fields from Clusters', () => runAIFieldsFromClustersLens?.());
   
   addItem('Invisible University (themes)…', () => runInvisibleUniversityLens?.());
@@ -21307,6 +21316,208 @@ function buildFieldsFromClusterFingerprints(minShared = 3) {
     fieldCount,
     linkedPairs: pairShared.size
   };
+}
+
+function clearTopologicalFieldsState() {
+  fieldOfCluster = new Array(Math.max(0, clusterCount | 0)).fill(-1);
+  fieldCount = 0;
+  fieldLabels = [];
+  fieldMembers = [];
+  fieldSizesTotal = [];
+  fieldSelectId = -1;
+  fieldLabelHits = [];
+  fieldLabelCenters = {};
+}
+
+function getActiveEdgePairs() {
+  const out = [];
+  if (!Array.isArray(edges)) return out;
+
+  for (const e of edges) {
+    const a = Number(e?.source);
+    const b = Number(e?.target);
+    if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
+    if (a < 0 || b < 0 || a >= nodes.length || b >= nodes.length) continue;
+    out.push([a, b]);
+  }
+  return out;
+}
+
+function buildTopologicalClusterGraph(thresholdPct = 20) {
+  const minClusterSize = getClusterMin();
+  const pct = Math.max(0, Number(thresholdPct || 0)) / 100;
+
+  const internalLinks = new Array(Math.max(0, clusterCount | 0)).fill(0);
+  const crossLinks = new Map(); // "a|b" -> count
+
+  const pairs = getActiveEdgePairs();
+
+  for (const [i, j] of pairs) {
+    const ca = clusterOf?.[i];
+    const cb = clusterOf?.[j];
+    if (ca == null || cb == null || ca < 0 || cb < 0) continue;
+
+    if (ca === cb) {
+      internalLinks[ca] = (internalLinks[ca] || 0) + 1;
+    } else {
+      const a = Math.min(ca, cb);
+      const b = Math.max(ca, cb);
+      const key = `${a}|${b}`;
+      crossLinks.set(key, (crossLinks.get(key) || 0) + 1);
+    }
+  }
+
+  const eligible = [];
+  for (let cid = 0; cid < (clusterCount | 0); cid++) {
+    const size = (clusterSizesTotal && clusterSizesTotal[cid] != null)
+      ? (clusterSizesTotal[cid] | 0)
+      : 0;
+    if (size < minClusterSize) continue;
+    if ((internalLinks[cid] || 0) <= 0) continue; // skip structurally empty clusters
+    eligible.push(cid);
+  }
+
+  const eligibleSet = new Set(eligible);
+  const adjacency = new Map();
+  for (const cid of eligible) adjacency.set(cid, new Set());
+
+  let linkedPairs = 0;
+
+  for (const [key, cross] of crossLinks.entries()) {
+    const [aStr, bStr] = key.split('|');
+    const a = Number(aStr), b = Number(bStr);
+    if (!eligibleSet.has(a) || !eligibleSet.has(b)) continue;
+
+    const ia = internalLinks[a] || 0;
+    const ib = internalLinks[b] || 0;
+    if (ia <= 0 || ib <= 0) continue;
+
+    // Main topological strength metric:
+    // proportion of the weaker cluster's internal connectivity
+    const strength = cross / Math.max(1, Math.min(ia, ib));
+
+    if (strength >= pct) {
+      adjacency.get(a).add(b);
+      adjacency.get(b).add(a);
+      linkedPairs++;
+    }
+  }
+
+  const nextFieldOfCluster = new Array(Math.max(0, clusterCount | 0)).fill(-1);
+  const nextFieldMembers = [];
+  const nextFieldSizes = [];
+  const nextFieldLabels = [];
+
+  const seen = new Set();
+
+  for (const cid of eligible) {
+    if (seen.has(cid)) continue;
+
+    const nbrs = adjacency.get(cid);
+    if (!nbrs || !nbrs.size) {
+      seen.add(cid);
+      continue;
+    }
+
+    const q = [cid];
+    const comp = [];
+    seen.add(cid);
+
+    while (q.length) {
+      const cur = q.pop();
+      comp.push(cur);
+
+      for (const nb of (adjacency.get(cur) || [])) {
+        if (seen.has(nb)) continue;
+        seen.add(nb);
+        q.push(nb);
+      }
+    }
+
+    if (comp.length < 2) continue;
+
+    comp.sort((a, b) => a - b);
+
+    const fid = nextFieldMembers.length;
+    nextFieldMembers.push(comp);
+
+    let totalPubs = 0;
+    for (const subCid of comp) {
+      nextFieldOfCluster[subCid] = fid;
+      totalPubs += (clusterSizesTotal && clusterSizesTotal[subCid] != null)
+        ? (clusterSizesTotal[subCid] | 0)
+        : 0;
+    }
+
+    nextFieldSizes[fid] = totalPubs;
+    nextFieldLabels[fid] = `T${Math.round(thresholdPct)}.${fid + 1}`;
+  }
+
+  fieldOfCluster = nextFieldOfCluster;
+  fieldCount = nextFieldMembers.length;
+  fieldMembers = nextFieldMembers;
+  fieldSizesTotal = nextFieldSizes;
+  fieldLabels = nextFieldLabels;
+
+  topologicalClusterStats = {
+    eligibleClusters: eligible.length,
+    linkedPairs,
+    fieldCount
+  };
+
+  return topologicalClusterStats;
+}
+
+async function runTopologicalClusteringLens() {
+  if (!clusterOf || clusterOf.length !== nodes.length || !clusterCount) {
+    computeDomainClusters?.();
+  }
+
+  if (!Array.isArray(clusterOf) || clusterOf.length !== nodes.length || !clusterCount) {
+    msg = 'Topological Clustering failed: no base clusters available.';
+    updateInfo?.();
+    redraw?.();
+    return;
+  }
+
+  const ans = window.prompt(
+    'Topological Clustering\n\nMinimum cross-link strength as % of the weaker cluster’s internal links?',
+    String(Math.max(1, Number(topologicalClusterThresholdPct || 20)))
+  );
+
+  if (ans == null) return;
+
+  const pct = Math.max(1, Number(ans || 0));
+  topologicalClusterThresholdPct = pct;
+
+  showLoading?.(`Topological Clustering (≥ ${pct}% of weaker cluster internal links)…`, 0.2);
+
+  try {
+    clearTopologicalFieldsState();
+    const stats = buildTopologicalClusterGraph(pct);
+
+    if (typeof ovFieldLabels !== 'undefined' && ovFieldLabels <= 0) {
+      ovFieldLabels = 1;
+      try { ovFieldLabelSlider?.value?.(100); } catch (_) {}
+    }
+
+    msg =
+      `Topological Clustering: ${stats.fieldCount} groups from ${stats.eligibleClusters} eligible clusters ` +
+      `(threshold ${pct}%; linked pairs ${stats.linkedPairs}).`;
+
+    buildDimensionsIndex?.();
+    updateDimSections?.();
+    recomputeVisibility?.();
+    updateInfo?.();
+    redraw?.();
+  } catch (err) {
+    console.warn('Topological Clustering failed', err);
+    msg = `Topological Clustering failed: ${err?.message || err}`;
+    updateInfo?.();
+    redraw?.();
+  } finally {
+    hideLoading?.();
+  }
 }
 
 async function runFieldsIdentificationLens() {
