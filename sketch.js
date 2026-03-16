@@ -1875,10 +1875,16 @@ let fieldFingerprintThreshold = 0;
 
 // --- Topological clustering -------------------------------------------------
 let topologicalClusterThresholdPct = 20;   // user threshold in percent
+let topologicalClusterModel = 'weak';      // 'weak' | 'geom' | 'blend'
+let topologicalClusterMinCrossLinks = 0;   // absolute floor to suppress tiny noisy ties
+
 let topologicalClusterStats = {
   eligibleClusters: 0,
   linkedPairs: 0,
-  fieldCount: 0
+  fieldCount: 0,
+  model: 'weak',
+  thresholdPct: 20,
+  minCrossLinks: 0
 };
 
 // --- Section titles ---
@@ -21318,6 +21324,37 @@ function buildFieldsFromClusterFingerprints(minShared = 3) {
   };
 }
 
+function topologicalModelLabel(model) {
+  switch (String(model || '').toLowerCase()) {
+    case 'geom':  return 'Geometric Mean';
+    case 'blend': return 'Blended';
+    case 'weak':
+    default:      return 'Weaker Cluster';
+  }
+}
+
+function topologicalPairScore(cross, internalA, internalB, model = 'weak') {
+  const ia = Math.max(0, Number(internalA || 0));
+  const ib = Math.max(0, Number(internalB || 0));
+  const x  = Math.max(0, Number(cross || 0));
+  if (x <= 0 || ia <= 0 || ib <= 0) return 0;
+
+  const weak = x / Math.max(1, Math.min(ia, ib));
+  const geom = x / Math.max(1, Math.sqrt(ia * ib));
+
+  switch (String(model || '').toLowerCase()) {
+    case 'geom':
+      return geom;
+    case 'blend':
+      // balanced compromise: respects weaker-cluster attachment
+      // but also rewards strong links between denser clusters
+      return Math.sqrt(Math.max(0, weak) * Math.max(0, geom));
+    case 'weak':
+    default:
+      return weak;
+  }
+}
+
 function clearTopologicalFieldsState() {
   fieldOfCluster = new Array(Math.max(0, clusterCount | 0)).fill(-1);
   fieldCount = 0;
@@ -21343,9 +21380,10 @@ function getActiveEdgePairs() {
   return out;
 }
 
-function buildTopologicalClusterGraph(thresholdPct = 20) {
+function buildTopologicalClusterGraph(thresholdPct = 20, model = 'weak', minCrossLinks = 0) {
   const minClusterSize = getClusterMin();
   const pct = Math.max(0, Number(thresholdPct || 0)) / 100;
+  const absFloor = Math.max(0, Number(minCrossLinks || 0) | 0);
 
   const internalLinks = new Array(Math.max(0, clusterCount | 0)).fill(0);
   const crossLinks = new Map(); // "a|b" -> count
@@ -21373,7 +21411,7 @@ function buildTopologicalClusterGraph(thresholdPct = 20) {
       ? (clusterSizesTotal[cid] | 0)
       : 0;
     if (size < minClusterSize) continue;
-    if ((internalLinks[cid] || 0) <= 0) continue; // skip structurally empty clusters
+    if ((internalLinks[cid] || 0) <= 0) continue;
     eligible.push(cid);
   }
 
@@ -21391,10 +21429,9 @@ function buildTopologicalClusterGraph(thresholdPct = 20) {
     const ia = internalLinks[a] || 0;
     const ib = internalLinks[b] || 0;
     if (ia <= 0 || ib <= 0) continue;
+    if (cross < absFloor) continue;
 
-    // Main topological strength metric:
-    // proportion of the weaker cluster's internal connectivity
-    const strength = cross / Math.max(1, Math.min(ia, ib));
+    const strength = topologicalPairScore(cross, ia, ib, model);
 
     if (strength >= pct) {
       adjacency.get(a).add(b);
@@ -21462,7 +21499,10 @@ function buildTopologicalClusterGraph(thresholdPct = 20) {
   topologicalClusterStats = {
     eligibleClusters: eligible.length,
     linkedPairs,
-    fieldCount
+    fieldCount,
+    model: String(model || 'weak'),
+    thresholdPct: Number(thresholdPct || 0),
+    minCrossLinks: absFloor
   };
 
   return topologicalClusterStats;
@@ -21480,21 +21520,67 @@ async function runTopologicalClusteringLens() {
     return;
   }
 
-  const ans = window.prompt(
-    'Topological Clustering\n\nMinimum cross-link strength as % of the weaker cluster’s internal links?',
+  const modelPrompt =
+    `Topological Clustering\n\n` +
+    `Choose scoring model:\n` +
+    `1 = Weaker Cluster\n` +
+    `    cross-links / min(internalA, internalB)\n\n` +
+    `2 = Geometric Mean\n` +
+    `    cross-links / sqrt(internalA * internalB)\n\n` +
+    `3 = Blended\n` +
+    `    sqrt(weak * geom)\n\n` +
+    `Enter 1, 2, or 3:`;
+
+  const ansModel = window.prompt(
+    modelPrompt,
+    (topologicalClusterModel === 'geom')
+      ? '2'
+      : (topologicalClusterModel === 'blend' ? '3' : '1')
+  );
+  if (ansModel == null) return;
+
+  let model = 'weak';
+  const pick = String(ansModel || '').trim().toLowerCase();
+  if (pick === '2' || pick === 'geom' || pick === 'geometric' || pick === 'geometric mean') model = 'geom';
+  else if (pick === '3' || pick === 'blend' || pick === 'blended') model = 'blend';
+  else model = 'weak';
+
+  const ansPct = window.prompt(
+    `Topological Clustering — ${topologicalModelLabel(model)}\n\n` +
+    `Minimum score threshold as a percentage?\n\n` +
+    `Suggested starting points:\n` +
+    `Weak: 20\n` +
+    `Geom: 10–20\n` +
+    `Blend: 15–25`,
     String(Math.max(1, Number(topologicalClusterThresholdPct || 20)))
   );
+  if (ansPct == null) return;
 
-  if (ans == null) return;
+  const pct = Math.max(1, Number(ansPct || 0));
 
-  const pct = Math.max(1, Number(ans || 0));
+  const ansFloor = window.prompt(
+    `Topological Clustering — ${topologicalModelLabel(model)}\n\n` +
+    `Minimum absolute cross-links between two clusters?\n` +
+    `Use 0 to disable.\n\n` +
+    `Suggested: 3 to 10 depending on dataset density.`,
+    String(Math.max(0, Number(topologicalClusterMinCrossLinks || 0) | 0))
+  );
+  if (ansFloor == null) return;
+
+  const minCross = Math.max(0, Number(ansFloor || 0) | 0);
+
+  topologicalClusterModel = model;
   topologicalClusterThresholdPct = pct;
+  topologicalClusterMinCrossLinks = minCross;
 
-  showLoading?.(`Topological Clustering (≥ ${pct}% of weaker cluster internal links)…`, 0.2);
+  showLoading?.(
+    `Topological Clustering — ${topologicalModelLabel(model)} (≥ ${pct}%, min cross-links ${minCross})…`,
+    0.2
+  );
 
   try {
     clearTopologicalFieldsState();
-    const stats = buildTopologicalClusterGraph(pct);
+    const stats = buildTopologicalClusterGraph(pct, model, minCross);
 
     if (typeof ovFieldLabels !== 'undefined' && ovFieldLabels <= 0) {
       ovFieldLabels = 1;
@@ -21503,7 +21589,8 @@ async function runTopologicalClusteringLens() {
 
     msg =
       `Topological Clustering: ${stats.fieldCount} groups from ${stats.eligibleClusters} eligible clusters ` +
-      `(threshold ${pct}%; linked pairs ${stats.linkedPairs}).`;
+      `(${topologicalModelLabel(stats.model)}; threshold ${stats.thresholdPct}%; ` +
+      `min cross-links ${stats.minCrossLinks}; linked pairs ${stats.linkedPairs}).`;
 
     buildDimensionsIndex?.();
     updateDimSections?.();
