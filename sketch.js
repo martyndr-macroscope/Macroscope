@@ -483,55 +483,6 @@ async function fetchFulltextResponse(fullUrl, timeoutMs = 25000) {
 
 
 
-
-
-
-async function fetchFulltextResponse(fullUrl, timeoutMs = 25000) {
-  const attempts = [];
-
-  if (FETCH_PROXY && __proxyAvailable) attempts.push(viaProxy(fullUrl));
-  attempts.push(fullUrl);
-
-  let lastErr = null;
-
-  for (const u of attempts) {
-    try {
-      const r = await fetchWithTimeout(
-        u,
-        {
-          redirect: 'follow',
-          mode: 'cors',
-          headers: {
-            accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,application/pdf,*/*;q=0.8'
-          }
-        },
-        timeoutMs
-      );
-
-      if (r.ok) return r;
-
-      if ((r.status === 401 || r.status === 403) && u !== fullUrl) {
-        console.warn('Fulltext proxy blocked (', r.status, ') → falling back to direct.');
-        __proxyAvailable = false;
-        continue;
-      }
-
-      lastErr = new Error(`HTTP ${r.status}`);
-    } catch (e) {
-      lastErr = e;
-      if (u !== fullUrl) {
-        __proxyAvailable = false;
-        continue;
-      }
-    }
-  }
-
-  throw lastErr || new Error('Fulltext request failed.');
-}
-
-
-
-
 probeProxyOnce();
 
 // --- Project meta (shown on right, under the top-right icons) ---
@@ -1631,7 +1582,12 @@ async function extractFullTextForIndex(i, ftContainerId = null, opts = {}) {
     const url = cand[idx];
 
     try {
-      const resp = await fetchFulltextResponse(url, 25000);
+let resp;
+try {
+  resp = await fetchFulltextResponse(url, 25000);
+} catch (err) {
+  throw new Error(`Fetch failed for ${url}: ${err?.message || err}`);
+}
 
       const finalUrl = resp.url || url;
       const ctype = (resp.headers.get('content-type') || '').toLowerCase();
