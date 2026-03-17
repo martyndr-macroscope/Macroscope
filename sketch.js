@@ -408,7 +408,48 @@ async function fetchOAJson(fullUrl, timeoutMs = 25000) {
   }
   throw lastErr || new Error('OpenAlex request failed.');
 }
+async function fetchFulltextResponse(fullUrl, timeoutMs = 25000) {
+  const attempts = [];
 
+  if (FETCH_PROXY && __proxyAvailable) attempts.push(viaProxy(fullUrl));
+  attempts.push(fullUrl);
+
+  let lastErr = null;
+
+  for (const u of attempts) {
+    try {
+      const r = await fetchWithTimeout(
+        u,
+        {
+          redirect: 'follow',
+          mode: 'cors',
+          headers: {
+            accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,application/pdf,*/*;q=0.8'
+          }
+        },
+        timeoutMs
+      );
+
+      if (r.ok) return r;
+
+      if ((r.status === 401 || r.status === 403) && u !== fullUrl) {
+        console.warn('Fulltext proxy blocked (', r.status, ') → falling back to direct.');
+        __proxyAvailable = false;
+        continue;
+      }
+
+      lastErr = new Error(`HTTP ${r.status}`);
+    } catch (e) {
+      lastErr = e;
+      if (u !== fullUrl) {
+        __proxyAvailable = false;
+        continue;
+      }
+    }
+  }
+
+  throw lastErr || new Error('Fulltext request failed.');
+}
 
 
 
@@ -1122,123 +1163,238 @@ function pickOaFulltextUrl(w) {
   return cand[0] || '';
 }
 
+function _normTxt(s) {
+  return String(s || '').toLowerCase();
+}
+
+function _uniq(arr) {
+  return [...new Set((arr || []).filter(Boolean))];
+}
+
+function _tokeniseLoose(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length >= 4);
+}
+
+function _countRegex(text, rx) {
+  const m = String(text || '').match(rx);
+  return m ? m.length : 0;
+}
+
 function extractTextFromHtml(html) {
   try {
     const doc = new DOMParser().parseFromString(html, 'text/html');
-    const root = doc.querySelector('article, main, .article, .Article, .content, .Content, [role="main"]') || doc.body;
-    root.querySelectorAll('script,style,noscript,header,footer,nav,aside,form').forEach(n => n.remove());
-    return (root.innerText || root.textContent || '').replace(/\s+/g,' ').trim();
-  } catch { return ''; }
-}
-// ---- Full-text quality gate (avoid caching portal / cookie / account pages) ----
 
-function _normTxt(s) { return String(s || '').toLowerCase(); }
+    // Remove obvious junk first
+    doc.querySelectorAll([
+      'script','style','noscript','svg','canvas',
+      'header','footer','nav','aside','form',
+      '.cookie','.cookies','.cookie-banner','.cookie-consent',
+      '.popup','.modal','.drawer','.share','.social',
+      '.advert','.ads','.banner','.related','.recommendations',
+      '#cookie-banner','#cookies','#sidebar','#related-articles'
+    ].join(',')).forEach(n => n.remove());
+
+    // Strong candidates first
+    const candidates = _uniq([
+      doc.querySelector('article'),
+      doc.querySelector('main article'),
+      doc.querySelector('main'),
+      doc.querySelector('[role="main"]'),
+      doc.querySelector('.article'),
+      doc.querySelector('.Article'),
+      doc.querySelector('.article-content'),
+      doc.querySelector('.article__content'),
+      doc.querySelector('.fulltext'),
+      doc.querySelector('.full-text'),
+      doc.querySelector('.fulltext-view'),
+      doc.querySelector('.FullText'),
+      doc.querySelector('.content'),
+      doc.querySelector('.Content'),
+      doc.querySelector('#main-content'),
+      doc.body
+    ]);
+
+    // Choose the candidate with the most text
+    let bestNode = doc.body;
+    let bestLen = 0;
+    for (const node of candidates) {
+      const txt = (node?.innerText || node?.textContent || '').replace(/\s+/g, ' ').trim();
+      if (txt.length > bestLen) {
+        bestLen = txt.length;
+        bestNode = node;
+      }
+    }
+
+    let text = (bestNode?.innerText || bestNode?.textContent || '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    // Fallback to high-value meta tags if visible text is weak
+    if (text.length < 1500) {
+      const metaParts = [
+        doc.querySelector('meta[name="citation_title"]')?.content,
+        doc.querySelector('meta[name="dc.Title"]')?.content,
+        doc.querySelector('meta[name="description"]')?.content,
+        doc.querySelector('meta[name="dc.Description"]')?.content,
+        doc.querySelector('meta[property="og:description"]')?.content
+      ].filter(Boolean);
+      if (metaParts.length) {
+        text = (text + ' ' + metaParts.join(' ')).replace(/\s+/g, ' ').trim();
+      }
+    }
+
+    return text;
+  } catch {
+    return '';
+  }
+}
 
 function looksLikePortalOrNavJunk(text, sourceUrl = '') {
   const t = _normTxt(text);
   const u = _normTxt(sourceUrl);
 
-  // Common publisher / portal / account / cookie boilerplate
   const badPhrases = [
     'sign in', 'log in', 'create account', 'forgot password',
-    'purchase', 'buy this article', 'rent this article',
-    'cookie', 'cookies', 'privacy policy', 'terms of use', 'sitemap',
-    'all rights reserved', 'nondiscrimination policy',
-    'contact us', 'help accessibility', 'update address', 'order history',
-    'payment options', 'subscribe', 'institutional access'
+    'buy this article', 'purchase this article', 'rent this article',
+    'access through your institution', 'institutional access',
+    'subscribe to this journal', 'subscribe',
+    'cookie', 'cookies', 'privacy policy', 'terms of use',
+    'copyright clearance center', 'all rights reserved',
+    'contact us', 'about this site', 'advertisement',
+    'recommended articles', 'related articles',
+    'download citation', 'view issue toc', 'table of contents'
   ];
 
-  // Strong domain cues (NOT exhaustive; just high-signal)
   const badDomains = [
     'ieeexplore.ieee.org',
     'link.springer.com',
     'sciencedirect.com',
-    'www.sciencedirect.com',
     'onlinelibrary.wiley.com',
     'tandfonline.com',
-    'jstor.org'
+    'jstor.org',
+    'sagepub.com',
+    'nature.com'
   ];
 
   let hits = 0;
   for (const p of badPhrases) if (t.includes(p)) hits++;
+
   const domainHit = badDomains.some(d => u.includes(d));
 
-  // If it’s *very* short, it’s almost never a paper
-  if ((text || '').length < 1200) return true;
+  // Really short pages are almost never usable full text
+  if ((text || '').length < 1800) return true;
 
-  // Heuristic: portal pages are *dense* in boilerplate phrases
-  if (hits >= 3) return true;
+  // Lots of boilerplate = almost certainly not full text
+  if (hits >= 4) return true;
 
-  // Domain + at least one boilerplate phrase is a strong indicator
-  if (domainHit && hits >= 1) return true;
+  // For known publisher domains, be stricter
+  if (domainHit && hits >= 2 && (text || '').length < 6000) return true;
 
   return false;
 }
 
-function scorePaperLikeStructure(text, work) {
-  const t = _normTxt(text);
+function scoreDocumentLikeStructure(text, work) {
+  const raw = String(text || '');
+  const t = _normTxt(raw);
 
-  // Minimal paper structure cues
   const cues = [
     'abstract',
     'introduction',
-    'methods', 'methodology',
+    'background',
+    'methods', 'materials and methods', 'methodology',
     'results',
     'discussion',
     'conclusion',
-    'references', 'bibliography'
+    'references', 'bibliography',
+    'acknowledgements'
   ];
 
   let cueHits = 0;
   for (const c of cues) if (t.includes(c)) cueHits++;
 
-  // Title overlap (weak but helpful)
   const title = String(work?.title || work?.display_name || '').trim();
-  let titleHit = false;
-  if (title && title.length >= 8) {
-    const toks = title.toLowerCase().split(/\s+/).filter(w => w.length >= 5).slice(0, 6);
-    titleHit = toks.length ? toks.some(tok => t.includes(tok)) : false;
-  }
+  const titleTokens = _tokeniseLoose(title).slice(0, 8);
+  let titleHits = 0;
+  for (const tok of titleTokens) if (t.includes(tok)) titleHits++;
 
-  // DOI pattern inside text
-  const doiHit = /\b10\.\d{4,9}\/[^\s"<>]+\b/i.test(text || '');
+  const doiHit = /\b10\.\d{4,9}\/[^\s"<>]+\b/i.test(raw);
+  const yearHits = _countRegex(raw, /\b(19|20)\d{2}\b/g);
+  const refStyleHits =
+    _countRegex(raw, /\(\d{4}\)/g) +
+    _countRegex(raw, /\[\d+\]/g);
 
-  // Very rough score
+  const L = raw.length;
+
   let score = 0;
+
+  if (L >= 3000)  score += 1;
+  if (L >= 6000)  score += 2;
+  if (L >= 12000) score += 2;
+  if (L >= 25000) score += 1; // helps for books / long chapters
+
   if (cueHits >= 2) score += 2;
   if (cueHits >= 4) score += 2;
-  if (titleHit) score += 1;
+
+  if (titleHits >= 1) score += 1;
+  if (titleHits >= 3) score += 1;
+
   if (doiHit) score += 1;
+  if (yearHits >= 8) score += 1;
+  if (refStyleHits >= 10) score += 1;
 
-  // Length contributes, but avoid rewarding portal pages (handled elsewhere)
-  const L = (text || '').length;
-  if (L >= 4000) score += 1;
-  if (L >= 12000) score += 1;
-
-  return score; // 0..8-ish
+  return {
+    score,
+    len: L,
+    cueHits,
+    titleHits,
+    doiHit,
+    yearHits,
+    refStyleHits
+  };
 }
 
 function validateExtractedFulltext({ text, sourceUrl, isPdf, work }) {
-  if (!text || String(text).trim().length < 1200) {
-    return { ok: false, reason: 'Too little text extracted.' };
+  const raw = String(text || '').trim();
+  const metrics = scoreDocumentLikeStructure(raw, work);
+
+  // Hard floors
+  if (!raw) return { ok: false, reason: 'No text extracted.' };
+
+  // Be much stricter for HTML than before
+  const minLen = isPdf ? 1800 : 3500;
+  if (raw.length < minLen) {
+    return { ok: false, reason: `Too little text extracted (${raw.length} chars; need at least ${minLen}).` };
   }
 
-  // Portal/junk detection (only really meaningful for HTML, but keep it for safety)
-  if (!isPdf && looksLikePortalOrNavJunk(text, sourceUrl)) {
-    return { ok: false, reason: 'Looks like publisher portal / navigation text, not the paper.' };
+  if (!isPdf && looksLikePortalOrNavJunk(raw, sourceUrl)) {
+    return { ok: false, reason: 'Looks like landing-page / portal text, not full document.' };
   }
 
-  // Paper-like structure score
-  const s = scorePaperLikeStructure(text, work);
-
-  // Stricter threshold for HTML; slightly looser for PDF (PDFs can be weirdly structured)
-  const need = isPdf ? 2 : 4;
-
-  if (s < need) {
-    return { ok: false, reason: `Text does not look paper-like enough (score ${s}/${need}).` };
+  // Main gate
+  const neededScore = isPdf ? 4 : 6;
+  if (metrics.score < neededScore) {
+    return {
+      ok: false,
+      reason: `Text does not look document-like enough (score ${metrics.score}/${neededScore}, len=${metrics.len}).`,
+      metrics
+    };
   }
 
-  return { ok: true, score: s };
+  // Extra HTML guard:
+  // if HTML is modest length and has almost no scholarly structure, reject it
+  if (!isPdf && metrics.len < 8000 && metrics.cueHits < 2 && metrics.refStyleHits < 6) {
+    return {
+      ok: false,
+      reason: 'HTML page is too short and lacks enough scholarly structure to trust as full text.',
+      metrics
+    };
+  }
+
+  return { ok: true, score: metrics.score, metrics };
 }
 
 
@@ -1276,31 +1432,33 @@ async function extractFullTextForIndex(i, ftContainerId = null, opts = {}) {
 
   const item = itemsData?.[i] || {};
   const w    = item.openalex || {};
-  let doi  = cleanDOI(String(w.doi || ''));
+  let doi    = cleanDOI(String(w.doi || ''));
   let doiUrl = doi ? `https://doi.org/${doi}` : '';
 
-
-
-  // inside extractFullTextForIndex, just after you compute doi/doiUrl:
-
-
-if (!doi) {
-  const found = await discoverDoiForIndex(i);
-  if (found) {
-    doi = cleanDOI(found);
-    doiUrl = `https://doi.org/${doi}`;
+  if (!doi) {
+    try {
+      const found = await discoverDoiForIndex(i);
+      if (found) {
+        doi = cleanDOI(found);
+        doiUrl = `https://doi.org/${doi}`;
+      }
+    } catch {}
   }
-}
 
-// rebuild candidates now that DOI might exist
-let cand = fulltextCandidatesFromWork(w, doiUrl);
+  let cand = fulltextCandidatesFromWork(w, doiUrl);
 
-
-  // 2) Ask Unpaywall for stronger OA links (optional, if email set)
   if (doi && UNPAYWALL_EMAIL) {
-    const up = await fetchUnpaywall(doi);
-    cand = mergeUnpaywallCandidates(up, cand);
+    try {
+      const up = await fetchUnpaywall(doi);
+      cand = mergeUnpaywallCandidates(up, cand);
+    } catch {}
   }
+
+  // Give DOI a proper chance — it often resolves to usable HTML full text
+  if (doiUrl) cand.unshift(doiUrl);
+
+  // De-dup and keep order
+  cand = [...new Set((cand || []).filter(Boolean))];
 
   const setFtPanel = (html) => {
     if (!ftContainerId) return;
@@ -1309,8 +1467,14 @@ let cand = fulltextCandidatesFromWork(w, doiUrl);
   };
 
   if (!cand.length) {
-    setFtPanel(`<div style="opacity:.85">No OA links found. Try ${doiUrl ? `<a href="${doiUrl}" target="_blank" style="color:#8ecbff">DOI</a>` : 'DOI'} or use local PDF.</div>`);
-    if (!silent) { msg = 'No open-access fulltext URL found.'; updateInfo(); redraw(); }
+    setFtPanel(
+      `<div style="opacity:.85">No candidate full-text links found. ${doiUrl ? `<a href="${doiUrl}" target="_blank" style="color:#8ecbff">Open DOI</a>` : ''} or use local PDF.</div>`
+    );
+    if (!silent) {
+      msg = 'No full-text candidate URL found.';
+      updateInfo();
+      redraw();
+    }
     return false;
   }
 
@@ -1322,85 +1486,148 @@ let cand = fulltextCandidatesFromWork(w, doiUrl);
   const MAX_PDF_BYTES = 25 * 1024 * 1024;
   let lastErr = null;
 
-  for (let idx = 0; idx < Math.min(cand.length, 8); idx++) {
+  // Try a few more candidates than before
+  for (let idx = 0; idx < Math.min(cand.length, 12); idx++) {
     const url = cand[idx];
     try {
-      // *** THE IMPORTANT CHANGE: always go via the proxy ***
-      const resp = await fetchWithTimeout(viaProxy(url), { redirect: 'follow' }, 20000);
-      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const resp = await fetchFulltextResponse(url, 25000);
 
+      // Important: use final resolved URL for validation
+      const finalUrl = resp.url || url;
       const ctype = (resp.headers.get('content-type') || '').toLowerCase();
-      const looksPdf = ctype.includes('pdf') || /\.pdf(\?|$)/i.test(url);
+      const looksPdf =
+        ctype.includes('application/pdf') ||
+        /\.pdf(\?|$)/i.test(finalUrl) ||
+        /\.pdf(\?|$)/i.test(url);
 
-let extracted = '';
+      let extracted = '';
+      let validation = null;
 
-if (looksPdf) {
-  const blob = await resp.blob();
-  if (blob.size > MAX_PDF_BYTES) throw new Error('PDF too large (>25MB).');
-  const buf  = await blob.arrayBuffer();
+      if (looksPdf) {
+        const blob = await resp.blob();
+        if (blob.size > MAX_PDF_BYTES) throw new Error('PDF too large (>25MB).');
 
-  extracted = await extractTextFromPdfBuffer(buf);
-  if (!extracted || extracted.length < 1200) throw new Error('No/too little text extracted (scanned PDF?).');
+        const buf = await blob.arrayBuffer();
+        extracted = await withTimeout(
+          extractTextFromPdfBuffer(buf),
+          90000,
+          'PDF text extraction'
+        );
 
-  const v = validateExtractedFulltext({ text: extracted, sourceUrl: url, isPdf: true, work: w });
-  if (!v.ok) throw new Error(v.reason);
+        validation = validateExtractedFulltext({
+          text: extracted,
+          sourceUrl: finalUrl,
+          isPdf: true,
+          work: w
+        });
 
-} else {
-  const html = await resp.text();
-  extracted = extractTextFromHtml(html);
-  if (!extracted || extracted.length < 1200) throw new Error('No/too little readable text on HTML page.');
+        if (!validation.ok) throw new Error(validation.reason);
+      } else {
+        const html = await resp.text();
+        extracted = extractTextFromHtml(html);
 
-  const v = validateExtractedFulltext({ text: extracted, sourceUrl: url, isPdf: false, work: w });
-  if (!v.ok) throw new Error(v.reason);
-}
+        validation = validateExtractedFulltext({
+          text: extracted,
+          sourceUrl: finalUrl,
+          isPdf: false,
+          work: w
+        });
 
-// If we get here, it passed validation → now we cache it
-item.fulltext = extracted;
+        if (!validation.ok) throw new Error(validation.reason);
 
+        // Optional rescue:
+        // some HTML pages expose PDF links in meta/citation tags
+        if ((!extracted || extracted.length < 5000) && /pdf/i.test(html)) {
+          const doc = new DOMParser().parseFromString(html, 'text/html');
+          const rescuePdf = [
+            doc.querySelector('meta[name="citation_pdf_url"]')?.content,
+            doc.querySelector('a[href$=".pdf"]')?.href,
+            doc.querySelector('a[href*=".pdf?"]')?.href
+          ].filter(Boolean)[0];
 
-      // success → cache + UI
-      item.fulltext_source       = url;
+          if (rescuePdf && rescuePdf !== url) {
+            try {
+              const pdfResp = await fetchFulltextResponse(rescuePdf, 25000);
+              const pdfBlob = await pdfResp.blob();
+              if (pdfBlob.size <= MAX_PDF_BYTES) {
+                const pdfBuf = await pdfBlob.arrayBuffer();
+                const pdfText = await withTimeout(
+                  extractTextFromPdfBuffer(pdfBuf),
+                  90000,
+                  'Rescue PDF extraction'
+                );
+                const pdfValidation = validateExtractedFulltext({
+                  text: pdfText,
+                  sourceUrl: pdfResp.url || rescuePdf,
+                  isPdf: true,
+                  work: w
+                });
+                if (pdfValidation.ok) {
+                  extracted = pdfText;
+                  validation = pdfValidation;
+                }
+              }
+            } catch {}
+          }
+        }
+      }
+
+      item.fulltext = extracted;
+      item.fulltext_source = finalUrl;
+      item.fulltext_source_kind = looksPdf ? 'pdf' : 'html';
+      item.fulltext_chars = extracted.length;
+      item.fulltext_validation = validation?.metrics || null;
       item.fulltext_extracted_at = new Date().toISOString();
+
       if (nodes[i]) nodes[i].hasFullText = true;
 
       if (!silent) {
-        msg = 'Full text extracted and cached.';
-        setFtPanel(`<div style="opacity:.95">Cached ✓</div>`);
+        msg = `Full text extracted and cached (${extracted.length.toLocaleString()} chars).`;
+        setFtPanel(`<div style="opacity:.95">Cached ✓ (${extracted.length.toLocaleString()} chars)</div>`);
         if (infoPanel && infoPanel.index === i) infoPanel.setItemIndex(i);
-        hideLoading(); updateInfo(); redraw();
+        hideLoading();
+        updateInfo();
+        redraw();
       }
-      return true;
 
+      return true;
     } catch (err) {
-      if (err?.name === 'AbortError') {
-    lastErr = new Error('Network timeout (host slow or blocked).');
-  } else {
-    lastErr = err;
-  }
-      // keep trying
-    }
+      lastErr = err?.name === 'AbortError'
+        ? new Error('Network timeout (host slow or blocked).')
+        : err;
+
 const it = itemsData?.[i] || (itemsData[i] = {});
 it.fulltext_last_fail = {
   url,
-  message: String(lastErr?.message || err?.message || err || 'unknown'),
+  message: String(lastErr?.message || 'unknown'),
   at: new Date().toISOString()
-};
+      };
+    }
   }
 
   if (!silent) {
-    const doiLink = doiUrl ? `<a href="${doiUrl}" target="_blank" style="color:#8ecbff">open DOI</a>` : 'open source';
+    const doiLink = doiUrl
+      ? `<a href="${doiUrl}" target="_blank" style="color:#8ecbff">open DOI</a>`
+      : 'open source';
+
     setFtPanel(`
       <div style="opacity:.95">
         Extraction failed (${lastErr?.message || 'blocked'}).
         You can ${doiLink} and <a href="#" id="ftLocalPick" style="color:#8ecbff">use local PDF…</a>
       </div>
     `);
+
     document.getElementById('ftLocalPick')?.addEventListener('click', (ev) => {
-      ev.preventDefault(); promptLocalPdfForIndex(i);
+      ev.preventDefault();
+      promptLocalPdfForIndex(i);
     });
+
     msg = `Full text extraction failed: ${lastErr?.message || 'blocked'}`;
-    hideLoading(); updateInfo(); redraw();
+    hideLoading();
+    updateInfo();
+    redraw();
   }
+
   return false;
 }
 
@@ -9961,13 +10188,23 @@ function handleFtFileSelected(p5file) {
     try {
       const buf = reader.result;
       const text = await extractTextFromPdfBuffer(buf);
-      if (!text || text.length < 80) throw new Error('No text found (scanned PDF?)');
-      const item = itemsData[i] || (itemsData[i] = {});
-      item.fulltext = String(text);
-      item.fulltext_source = '(local file)';
-      item.fulltext_extracted_at = new Date().toISOString();
-      if (nodes[i]) nodes[i].hasFullText = true;
-      msg = 'Full text extracted from local PDF.';
+const validation = validateExtractedFulltext({
+  text,
+  sourceUrl: '(local file)',
+  isPdf: true,
+  work: itemsData?.[i]?.openalex || {}
+});
+if (!validation.ok) throw new Error(validation.reason);
+
+const item = itemsData[i] || (itemsData[i] = {});
+item.fulltext = String(text);
+item.fulltext_source = '(local file)';
+item.fulltext_source_kind = 'pdf';
+item.fulltext_chars = text.length;
+item.fulltext_validation = validation?.metrics || null;
+item.fulltext_extracted_at = new Date().toISOString();
+if (nodes[i]) nodes[i].hasFullText = true;
+msg = `Full text extracted from local PDF (${text.length.toLocaleString()} chars).`;
       if (infoPanel && infoPanel.index === i) infoPanel.setItemIndex(i);
     } catch (err) {
       console.warn(err);
