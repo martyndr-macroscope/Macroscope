@@ -6411,7 +6411,7 @@ function createAIMenuButton() {
   addItem('Chronological review',() => runChronologicalReview?.());
   addItem('Open question…',          () => runOpenQuestion?.());
   addItem('REF assessment (full text)', () => runREFLens?.());
-
+  addItem('REF assessment 2 (gated)',     () => runREFLens2?.());
 
   aiMenuBtn.mousePressed(toggleAIMenu);
 
@@ -9382,6 +9382,998 @@ const headers = [
     console.warn('Footprint (REF assessment) failed:', e);
   }
 }
+
+// =======================
+// REF AI LENS 2 (gated)
+// =======================
+
+window.__refLens2Last = window.__refLens2Last || null;
+
+// Optional tuneables
+window.REF2_CONF_FACTORS = window.REF2_CONF_FACTORS || {
+  very_low: 0.55,
+  low: 0.72,
+  medium: 0.88,
+  high: 1.00
+};
+
+window.REF2_WEIGHTS = window.REF2_WEIGHTS || {
+  originality: 1.0,
+  significance: 1.0,
+  rigour: 1.0
+};
+
+function ref2Clamp01(x){ x = Number(x); return Number.isFinite(x) ? Math.max(0, Math.min(1, x)) : 0; }
+function ref2ClampPct(x){ x = Number(x); return Number.isFinite(x) ? Math.max(0, Math.min(100, x)) : 0; }
+function ref2ClampInt(x, lo, hi){ x = Math.round(Number(x)); return Number.isFinite(x) ? Math.max(lo, Math.min(hi, x)) : lo; }
+
+function ref2Esc(s) {
+  return String(s ?? '')
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;');
+}
+
+function ref2Norm(s) {
+  return String(s || '').toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function ref2Count(text, rx) {
+  const m = String(text || '').match(rx);
+  return m ? m.length : 0;
+}
+
+function ref2Take(str, n) {
+  str = String(str || '');
+  return str.length <= n ? str : (str.slice(0, n) + '…');
+}
+
+function ref2SafeJson(raw, fallback = null) {
+  try {
+    const j = extractJson(raw);
+    return j && typeof j === 'object' ? j : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function ref2ConfidenceFactor(label) {
+  const key = String(label || '').toLowerCase().trim();
+  return Number(window.REF2_CONF_FACTORS?.[key] ?? 0.72);
+}
+
+function ref2ResolveUoaFromItem(it) {
+  if (!it || typeof it !== 'object') {
+    return { hasRefUoa: false, uoa_number: null, uoa_name: '' };
+  }
+
+  let num =
+    it.ref_uoa_number ??
+    it.uoa_number ??
+    it.uoa ??
+    it.ref_uoa ??
+    null;
+
+  let name =
+    it.ref_uoa_name ??
+    it.uoa_name ??
+    '';
+
+  // derive from ref_records if present
+  if ((!num || !name) && Array.isArray(it.ref_records) && it.ref_records.length) {
+    const counts = new Map();
+    for (const r of it.ref_records) {
+      const n = r?.ref_uoa_number;
+      const nm = r?.ref_uoa_name;
+      if (!n && !nm) continue;
+      const key = `${String(n ?? '').trim()}|${String(nm ?? '').trim()}`;
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    let bestKey = null, bestCt = 0;
+    for (const [k, ct] of counts.entries()) {
+      if (ct > bestCt) { bestCt = ct; bestKey = k; }
+    }
+    if (bestKey) {
+      const [bn, bnm] = bestKey.split('|');
+      if (!num && bn) num = bn;
+      if (!name && bnm) name = bnm;
+    }
+  }
+
+  const numInt = Math.round(Number(num));
+  const okNum = Number.isFinite(numInt) && numInt >= 1 && numInt <= 34;
+
+  return {
+    hasRefUoa: okNum,
+    uoa_number: okNum ? numInt : null,
+    uoa_name: name ? String(name).trim() : ''
+  };
+}
+
+function ref2DetectOutputType(doc, item) {
+  const raw = String(doc?.text || '');
+  const t = raw.toLowerCase();
+
+  const typeCrossref =
+    String(item?.openalex?.type_crossref || item?.type_crossref || '').toLowerCase();
+  const workType =
+    String(item?.openalex?.type || item?.type || '').toLowerCase();
+  const genre =
+    String(item?.genre || '').toLowerCase();
+
+  const looksBook =
+    typeCrossref.includes('book') ||
+    typeCrossref.includes('chapter') ||
+    workType.includes('book') ||
+    workType.includes('monograph') ||
+    genre.includes('book');
+
+  const looksReview =
+    typeCrossref.includes('review') ||
+    /\bliterature review\b|\bsystematic review\b|\bmeta-analysis\b/.test(t);
+
+  const looksMethods =
+    /\bmethod\b|\bmethodology\b|\bprotocol\b|\bpipeline\b|\bframework\b/.test(t) &&
+    /\bmaterials and methods\b|\bmethods\b|\bexperimental setup\b/.test(t);
+
+  const looksTheoretical =
+    /\bwe argue\b|\bthis paper argues\b|\bconceptual\b|\btheoretical\b|\bphilosophical\b|\bhistoriograph/.test(t) &&
+    !/\bresults\b|\bexperiment\b|\bdataset\b/.test(t);
+
+  const looksPractice =
+    /\bdesign research\b|\bpractice-based\b|\bpractice based\b|\bstudio\b|\bprototype\b|\binstallation\b/.test(t);
+
+  if (looksBook && /chapter/.test(typeCrossref)) return 'book_chapter';
+  if (looksBook) return 'book_or_monograph';
+  if (looksReview) return 'review_or_synthesis';
+  if (looksPractice) return 'practice_based_or_design_research';
+  if (looksMethods) return 'methods_paper';
+  if (looksTheoretical) return 'theoretical_or_conceptual_paper';
+  return 'research_paper';
+}
+
+function ref2OutputTypeGuidance(outputType) {
+  switch (outputType) {
+    case 'book_or_monograph':
+      return [
+        'Output-type emphasis: monograph/book.',
+        'Assess sustained conceptual coherence, depth and integration of sources, historiographic/theoretical command, chapter-to-chapter consistency, and whether originality is sustained rather than merely announced.',
+        'Do not over-reward ambition or breadth alone.'
+      ].join(' ');
+    case 'book_chapter':
+      return [
+        'Output-type emphasis: scholarly book chapter.',
+        'Assess the chapter as a discrete research contribution, not the prestige of the book.',
+        'Focus on originality, argumentative precision, evidential handling, and whether the chapter makes a distinct contribution beyond background synthesis.'
+      ].join(' ');
+    case 'review_or_synthesis':
+      return [
+        'Output-type emphasis: review/synthesis.',
+        'Assess originality through synthesis, reframing, integrative insight, or agenda-setting, not only new data.',
+        'Assess rigour through coverage, structure, discrimination, and transparency of synthesis.'
+      ].join(' ');
+    case 'methods_paper':
+      return [
+        'Output-type emphasis: methods paper.',
+        'Assess originality in method design, rigour in validation and transparency, and significance through transferability or enabling effect.'
+      ].join(' ');
+    case 'theoretical_or_conceptual_paper':
+      return [
+        'Output-type emphasis: theoretical/conceptual work.',
+        'Assess originality through conceptual advance, significance through explanatory reach, and rigour through argumentative precision, use of sources, and handling of objections/limitations.'
+      ].join(' ');
+    case 'practice_based_or_design_research':
+      return [
+        'Output-type emphasis: practice-based/design research.',
+        'Assess originality in the design/method contribution, significance in transferability or field relevance, and rigour in documentation, reflection, and evidential grounding.'
+      ].join(' ');
+    default:
+      return [
+        'Output-type emphasis: research paper.',
+        'Assess originality, significance, and rigour using normal scholarly expectations for a substantial research article.'
+      ].join(' ');
+  }
+}
+
+function ref2UoaGuidance(uoaNum, uoaName) {
+  const n = Number(uoaNum);
+  const nm = String(uoaName || '');
+
+  // Light-touch, broad guidance only. The thresholds stay external.
+  if (n === 13 || /architecture|built environment|planning/i.test(nm)) {
+    return 'UoA nuance: for architecture, built environment and planning, recognise design research, methods innovation, spatial theory, and practice-linked scholarship; do not default to lab-science markers of rigour.';
+  }
+  if (n === 12 || /engineering/i.test(nm)) {
+    return 'UoA nuance: for engineering, prioritise technical substantiation, validation, reproducibility, and whether the contribution changes methods, systems, or applications.';
+  }
+  if (n === 11 || /computer/i.test(nm)) {
+    return 'UoA nuance: for computing/informatics, recognise algorithmic, systems, HCI, and data-method contributions; assess rigour relative to the paradigm actually used, not a single experimental template.';
+  }
+  if (n === 7 || /earth|environment/i.test(nm)) {
+    return 'UoA nuance: for earth/environmental sciences, attend to evidential adequacy, robustness of inference, and whether the work shifts understanding of environmental processes, methods, or interventions.';
+  }
+  if (n === 19 || /business|management/i.test(nm)) {
+    return 'UoA nuance: for business/management, recognise conceptual, empirical, and applied contributions; significance may include influence on organisations, methods, or policy debates.';
+  }
+  if (n === 20 || /law/i.test(nm)) {
+    return 'UoA nuance: for law, recognise doctrinal, theoretical, socio-legal, and interdisciplinary legal scholarship; rigour may lie in argument, interpretation, and authority handling, not only empirical design.';
+  }
+  if (n === 27 || /english|language|literature/i.test(nm)) {
+    return 'UoA nuance: for literature/language, assess conceptual precision, originality of interpretation, handling of sources, and the extent to which the work changes specialist understanding.';
+  }
+  if (n === 31 || /theology|religious studies/i.test(nm)) {
+    return 'UoA nuance: for theology/religious studies, assess originality and rigour in interpretation, conceptual structure, command of literature, and argumentative subtlety.';
+  }
+  if (n === 32 || /history/i.test(nm)) {
+    return 'UoA nuance: for history, assess archival/source command, historiographic positioning, evidential care, and whether the work materially revises historical understanding.';
+  }
+  if (n === 33 || /philosophy/i.test(nm)) {
+    return 'UoA nuance: for philosophy, assess originality through argument and conceptual advance, and rigour through logical precision, engagement with literature, and handling of objections.';
+  }
+
+  return 'UoA nuance: apply the REF-style criteria in a field-sensitive way. Do not import inappropriate standards from another discipline.';
+}
+
+function ref2IsLikelyAcademicResearch(doc, item) {
+  const raw = String(doc?.text || '');
+  const t = raw.toLowerCase();
+  const title = String(item?.openalex?.display_name || item?.label || doc?.title || '').toLowerCase();
+  const venue = String(
+    item?.openalex?.primary_location?.source?.display_name ||
+    item?.openalex?.host_venue?.display_name ||
+    item?.venue || ''
+  ).toLowerCase();
+
+  let score = 0;
+  const reasons = [];
+
+  if (raw.length >= 3000) score += 1;
+  if (raw.length >= 7000) score += 1;
+  if (raw.length >= 15000) score += 1;
+
+  if (/\babstract\b/.test(t)) score += 1;
+  if (/\bintroduction\b/.test(t)) score += 1;
+  if (/\bconclusion\b/.test(t)) score += 1;
+  if (/\breferences\b|\bbibliography\b/.test(t)) score += 2;
+  if (/\bmethod(s|ology)?\b|\bmaterials and methods\b|\bresults\b|\bdiscussion\b/.test(t)) score += 2;
+
+  if (/\bdoi\b|10\.\d{4,9}\//i.test(raw)) score += 1;
+  if (ref2Count(raw, /\(\d{4}[a-z]?\)/g) >= 8 || ref2Count(raw, /\[\d+\]/g) >= 8) score += 1;
+
+  if (/news|magazine|newspaper|press release|blog/i.test(venue)) {
+    score -= 3;
+    reasons.push('venue looks journalistic or non-scholarly');
+  }
+
+  if (/\bopinion\b|\bcommentary\b|\beditorial\b|\bletter to the editor\b|\binterview\b/.test(title)) {
+    score -= 2;
+    reasons.push('title looks non-research');
+  }
+
+  if (/\bsubscribe\b|\bbuy this article\b|\baccess through your institution\b/.test(t)) {
+    score -= 3;
+    reasons.push('text looks like website boilerplate');
+  }
+
+  const ok = score >= 4;
+  if (!ok && !reasons.length) reasons.push(`academic contribution score too low (${score})`);
+
+  return { ok, score, reasons };
+}
+
+function ref2DocumentCompletenessGate(doc, item) {
+  const raw = String(doc?.text || '');
+  const w = item?.openalex || item || {};
+  const sourceUrl = String(item?.fulltext_source || doc?.source || '');
+  const looksPdf = String(item?.fulltext_source_kind || '').toLowerCase() === 'pdf';
+
+  // Reuse existing validation helpers if present
+  try {
+    if (typeof validateExtractedFulltext === 'function') {
+      const v = validateExtractedFulltext({
+        text: raw,
+        sourceUrl,
+        isPdf: looksPdf,
+        work: w
+      });
+      if (!v?.ok) {
+        return { ok: false, reason: v?.reason || 'failed full-text validation' };
+      }
+    }
+  } catch {}
+
+  // Additional stricter gate for REF2
+  const docLike = (typeof scoreDocumentLikeStructure === 'function')
+    ? scoreDocumentLikeStructure(raw, w)
+    : { score: 0, len: raw.length, cueHits: 0, refStyleHits: 0 };
+
+  const tooShortForBook =
+    raw.length < 12000 &&
+    /book|monograph|chapter/i.test(String(w?.type_crossref || w?.type || ''));
+
+  const abstractOnly =
+    raw.length < 5000 &&
+    /\babstract\b/.test(raw.toLowerCase()) &&
+    !/\bintroduction\b|\bmethods\b|\bresults\b|\bdiscussion\b|\breferences\b/.test(raw.toLowerCase());
+
+  if (tooShortForBook) {
+    return { ok: false, reason: 'book/chapter text looks too short or truncated for REF review' };
+  }
+  if (abstractOnly) {
+    return { ok: false, reason: 'text looks like an abstract or short stub, not a full research output' };
+  }
+  if ((docLike.score || 0) < 4) {
+    return { ok: false, reason: `document-like structure too weak (${docLike.score})` };
+  }
+
+  return { ok: true, metrics: docLike };
+}
+
+function ref2SampleText(rawText, outputType) {
+  const raw = String(rawText || '');
+  const total = raw.length;
+
+  const isBook = /book|chapter/.test(String(outputType || ''));
+  const hardCap = isBook ? 26000 : 18000;
+  const chunkSize = isBook ? 5500 : 4500;
+  const chunkMax = isBook ? 5 : 4;
+
+  if (total <= hardCap) return raw;
+
+  const starts = [];
+  starts.push(0);
+  starts.push(Math.max(0, Math.floor(total * 0.25) - Math.floor(chunkSize / 2)));
+  starts.push(Math.max(0, Math.floor(total * 0.50) - Math.floor(chunkSize / 2)));
+  starts.push(Math.max(0, Math.floor(total * 0.75) - Math.floor(chunkSize / 2)));
+  starts.push(Math.max(0, total - chunkSize));
+
+  const uniq = Array.from(
+    new Set(starts.map(x => Math.max(0, Math.min(total - chunkSize, x))))
+  ).sort((a,b)=>a-b).slice(0, chunkMax);
+
+  return uniq.map((s, idx) =>
+    `--- SAMPLE ${idx + 1} / ${uniq.length} ---\n` + raw.slice(s, s + chunkSize)
+  ).join('\n\n');
+}
+
+function ref2BuildPrompt(doc, item, resolvedUoa, outputType) {
+  const title = item?.openalex?.display_name || item?.label || doc?.title || '';
+  const year  = item?.openalex?.publication_year || item?.year || '';
+  const venue =
+    item?.openalex?.primary_location?.source?.display_name ||
+    item?.openalex?.host_venue?.display_name ||
+    item?.venue || '';
+  const doi = item?.openalex?.doi || item?.doi || '';
+  const authors = Array.isArray(item?.openalex?.authorships)
+    ? item.openalex.authorships
+        .map(a => a?.author?.display_name)
+        .filter(Boolean)
+        .slice(0, 8)
+        .join('; ')
+    : (item?.authors || '');
+
+  const uoaLine = resolvedUoa?.hasRefUoa
+    ? `UoA: ${resolvedUoa.uoa_number} - ${resolvedUoa.uoa_name || ''}`
+    : `UoA: unknown`;
+
+  const outputGuidance = ref2OutputTypeGuidance(outputType);
+  const uoaGuidance = ref2UoaGuidance(resolvedUoa?.uoa_number, resolvedUoa?.uoa_name);
+
+  const sampled = ref2SampleText(doc?.text || '', outputType);
+
+  const sys = `
+You are assisting with a structured REF-style review of ONE research output.
+
+Your task is not to praise the output and not to award a final REF score directly.
+You must first gate the item, then produce a structured evidence-based assessment.
+
+GENERAL RULES
+- Use only the supplied metadata and text.
+- Ignore venue prestige, author reputation, and topic fashion unless explicit evidence is present in the supplied text.
+- Be conservative: if evidence is ambiguous, choose the lower supported level.
+- Many competent outputs should land in the middle range.
+- Top levels require explicit support, not polished language or broad ambition.
+- Journalistic, editorial, promotional, news, or non-research texts must be marked ungraded.
+- Abstract-only, truncated, or website-fragment texts must be marked ungraded.
+
+${outputGuidance}
+${uoaGuidance}
+`.trim();
+
+  const user = `
+Assess the following output.
+
+METADATA
+Title: ${title}
+Authors: ${authors}
+Year: ${year}
+Venue: ${venue}
+DOI: ${doi}
+${uoaLine}
+Detected output type: ${outputType}
+
+STEP 0 — GATES
+A. Is this text sufficiently complete to assess as a full research output?
+B. Is this an academic research contribution rather than journalism/editorial/website boilerplate?
+
+If either gate fails, return ungraded with a concise reason.
+
+STEP 1 — EVIDENCE PROFILE
+Return:
+- contribution_claim
+- contribution_type
+- evidence_originality
+- evidence_significance
+- evidence_rigour
+- uncertainties
+
+STEP 2 — CUMULATIVE LADDERS
+For EACH criterion, test levels 0 to 5 cumulatively. A higher level cannot be awarded if any lower level is unsupported.
+
+ORIGINALITY
+0 no identifiable original contribution
+1 incremental adaptation / extension / recombination
+2 clear local novelty in framing / method / material / synthesis
+3 distinct contribution changing understanding/approach in a specialist area
+4 major advance likely to influence thinking/practice beyond the immediate niche
+5 field-defining or paradigm-shifting contribution
+
+SIGNIFICANCE
+0 no clear research significance evident
+1 useful within a narrow specialist conversation
+2 likely to matter within a specific research area or application context
+3 implications beyond the immediate case or niche
+4 likely to influence wider agendas / methods / practices / debates
+5 transformative significance across multiple areas or broad scale
+
+RIGOUR
+0 claims insufficiently supported
+1 basic scholarly competence but limited demonstration/transparency
+2 adequate and credible use of evidence/methods consistent with field norms
+3 strong, well-substantiated execution with clear handling of evidence/method/limitations
+4 very high rigour with unusual care, robustness, and reflexive control
+5 exemplary rigour by standards of the field and output type
+
+For EACH criterion return:
+- support_flags: six booleans for levels 0..5
+- highest_supported_level
+- confidence: very_low | low | medium | high
+- justification
+- blocker_for_next_level
+
+STEP 3 — PROVISIONAL RANGE
+Return:
+- likely_range_min (0-100)
+- likely_range_max (0-100)
+- floor_score (0-100)
+- ceiling_score (0-100)
+- overall_confidence
+
+STEP 4 — PROVISIONAL CALIBRATED BAND
+Return only a provisional band range, not a final definitive star judgement:
+- provisional_band_range: one of "ungraded", "1*", "1*-2*", "2*", "2*-3*", "3*", "3*-4*", "4*"
+
+STEP 5 — JSON ONLY
+Return JSON only using exactly this structure:
+
+{
+  "gate": {
+    "is_complete_research_text": true,
+    "is_academic_research_contribution": true,
+    "gradeable": true,
+    "reason_if_ungraded": ""
+  },
+  "output_type_confirmed": "",
+  "evidence_profile": {
+    "contribution_claim": "",
+    "contribution_type": "",
+    "evidence_originality": "",
+    "evidence_significance": "",
+    "evidence_rigour": "",
+    "uncertainties": ""
+  },
+  "criteria": {
+    "originality": {
+      "support_flags": [true,false,false,false,false,false],
+      "highest_supported_level": 0,
+      "confidence": "medium",
+      "justification": "",
+      "blocker_for_next_level": ""
+    },
+    "significance": {
+      "support_flags": [true,false,false,false,false,false],
+      "highest_supported_level": 0,
+      "confidence": "medium",
+      "justification": "",
+      "blocker_for_next_level": ""
+    },
+    "rigour": {
+      "support_flags": [true,false,false,false,false,false],
+      "highest_supported_level": 0,
+      "confidence": "medium",
+      "justification": "",
+      "blocker_for_next_level": ""
+    }
+  },
+  "range": {
+    "likely_range_min": 0,
+    "likely_range_max": 0,
+    "floor_score": 0,
+    "ceiling_score": 0,
+    "overall_confidence": "medium"
+  },
+  "provisional_band_range": "2*-3*",
+  "notes": ""
+}
+
+TEXT
+${sampled}
+`.trim();
+
+  return {
+    messages: [
+      { role: 'system', content: sys },
+      { role: 'user', content: user }
+    ],
+    sampledText: sampled
+  };
+}
+
+function ref2NormaliseCriterion(c) {
+  const conf = String(c?.confidence || 'low').toLowerCase();
+  const flagsRaw = Array.isArray(c?.support_flags) ? c.support_flags.slice(0, 6) : [];
+  while (flagsRaw.length < 6) flagsRaw.push(false);
+  const flags = flagsRaw.map(Boolean);
+
+  // enforce cumulative interpretation
+  let highest = 0;
+  for (let i = 0; i < flags.length; i++) {
+    if (flags[i]) highest = i;
+    else break;
+  }
+
+  if (Number.isFinite(Number(c?.highest_supported_level))) {
+    highest = Math.min(highest, ref2ClampInt(c.highest_supported_level, 0, 5));
+  }
+
+  return {
+    support_flags: flags,
+    highest_supported_level: highest,
+    confidence: ['very_low','low','medium','high'].includes(conf) ? conf : 'low',
+    justification: String(c?.justification || '').trim(),
+    blocker_for_next_level: String(c?.blocker_for_next_level || '').trim()
+  };
+}
+
+function ref2LevelToScore(level, supportFlags, confLabel) {
+  const lvl = ref2ClampInt(level, 0, 5);
+  const flags = Array.isArray(supportFlags) ? supportFlags : [];
+  const supportedCount = flags.filter(Boolean).length;
+
+  // More nuanced than a flat 20-point ladder
+  // base by highest supported level, small bonus for internally well-supported climb
+  const baseMap = [8, 24, 42, 61, 80, 95];
+  const base = baseMap[lvl] ?? 8;
+  const supportBonus = Math.max(0, Math.min(4, supportedCount - 1)) * 1.5;
+  const confFactor = ref2ConfidenceFactor(confLabel);
+
+  return ref2ClampPct((base + supportBonus) * confFactor);
+}
+
+function ref2AggregateResult(norm) {
+  const o = norm.criteria.originality;
+  const s = norm.criteria.significance;
+  const r = norm.criteria.rigour;
+
+  const o100 = ref2LevelToScore(o.highest_supported_level, o.support_flags, o.confidence);
+  const s100 = ref2LevelToScore(s.highest_supported_level, s.support_flags, s.confidence);
+  const r100 = ref2LevelToScore(r.highest_supported_level, r.support_flags, r.confidence);
+
+  const w = window.REF2_WEIGHTS || { originality:1, significance:1, rigour:1 };
+  const denom = Math.max(1e-9, Number(w.originality || 1) + Number(w.significance || 1) + Number(w.rigour || 1));
+  const pct = ref2ClampPct(
+    (o100 * Number(w.originality || 1) +
+     s100 * Number(w.significance || 1) +
+     r100 * Number(w.rigour || 1)) / denom
+  );
+
+  return {
+    originality_100: o100,
+    significance_100: s100,
+    rigour_100: r100,
+    ref2_percent: pct
+  };
+}
+
+function ref2BandFromRangeLabel(lbl) {
+  const s = String(lbl || '').trim();
+  if (!s) return 'ungraded';
+  return s;
+}
+
+function ref2MarkdownSummary(rows) {
+  const total = rows.length;
+  const graded = rows.filter(r => r.ref2_gradeable);
+  const ungraded = rows.filter(r => !r.ref2_gradeable);
+
+  const avg = graded.length
+    ? (graded.reduce((a, r) => a + Number(r.ref2_percent || 0), 0) / graded.length)
+    : 0;
+
+  const bands = {};
+  for (const r of rows) {
+    const b = r.ref2_provisional_band_range || 'ungraded';
+    bands[b] = (bands[b] || 0) + 1;
+  }
+
+  let md = '';
+  md += `# REF Assessment 2\n\n`;
+  md += `- Outputs processed: ${total}\n`;
+  md += `- Gradeable: ${graded.length}\n`;
+  md += `- Ungraded: ${ungraded.length}\n`;
+  md += `- Mean provisional REF2 percent (gradeable only): ${avg.toFixed(1)}\n\n`;
+
+  md += `## Provisional band distribution\n`;
+  Object.keys(bands).sort().forEach(k => {
+    md += `- ${k}: ${bands[k]}\n`;
+  });
+
+  if (ungraded.length) {
+    md += `\n## Ungraded items\n`;
+    ungraded.slice(0, 25).forEach(r => {
+      md += `- ${r.title || '(untitled)'} — ${r.ref2_ungraded_reason || 'ungraded'}\n`;
+    });
+    if (ungraded.length > 25) {
+      md += `- … plus ${ungraded.length - 25} more\n`;
+    }
+  }
+
+  return md;
+}
+
+async function runREFLens2() {
+  const docsRaw = (typeof collectVisibleFulltextCorpus === 'function')
+    ? collectVisibleFulltextCorpus()
+    : [];
+
+  if (!docsRaw.length) {
+    openSynthPanel('No cached full texts visible.');
+    return;
+  }
+
+  const docs = docsRaw.map(d => {
+    const i = d?.idx;
+    const p = (Number.isFinite(i) && (typeof parallaxWorldPos === 'function'))
+      ? parallaxWorldPos(i)
+      : (nodes?.[i] || {});
+    return {
+      ...d,
+      x: Number.isFinite(p?.x) ? p.x : 0,
+      y: Number.isFinite(p?.y) ? p.y : 0
+    };
+  });
+
+  openSynthPanel(`REF assessment 2 on ${docs.length} full texts…`);
+  setSynthProgressHtml(`<div>Starting REF assessment 2 for ${docs.length} outputs…</div>`);
+
+  const results = [];
+  const CALL_DELAY_MS = 220;
+  const MAX_TOKENS = 1400;
+
+  for (let i = 0; i < docs.length; i++) {
+    const d = docs[i];
+    const idx = Number(d?.idx);
+    const item = itemsData?.[idx] || {};
+    const oa = item?.openalex || {};
+
+    setSynthProgressHtml(`<div>REF assessment 2: ${i + 1}/${docs.length}…</div>`);
+
+    const title =
+      oa?.display_name ||
+      item?.label ||
+      d?.title ||
+      '(untitled)';
+
+    const authors = Array.isArray(oa?.authorships)
+      ? oa.authorships.map(a => a?.author?.display_name).filter(Boolean).slice(0, 8).join('; ')
+      : '';
+
+    const venue =
+      oa?.primary_location?.source?.display_name ||
+      oa?.host_venue?.display_name ||
+      item?.venue || '';
+
+    const baseRow = {
+      idx,
+      title,
+      authors,
+      year: oa?.publication_year || item?.year || '',
+      venue,
+      doi: oa?.doi || item?.doi || ''
+    };
+
+    // Gate 1: completeness / full research text
+    const completeness = ref2DocumentCompletenessGate(d, item);
+    if (!completeness.ok) {
+      const row = {
+        ...baseRow,
+        ref2_gradeable: false,
+        ref2_ungraded_reason: completeness.reason,
+        ref2_output_type: '',
+        ref2_originality_level: '',
+        ref2_significance_level: '',
+        ref2_rigour_level: '',
+        ref2_originality_100: '',
+        ref2_significance_100: '',
+        ref2_rigour_100: '',
+        ref2_percent: '',
+        ref2_range_min: '',
+        ref2_range_max: '',
+        ref2_floor_score: '',
+        ref2_ceiling_score: '',
+        ref2_overall_confidence: 'very_low',
+        ref2_provisional_band_range: 'ungraded',
+        ref2_notes: 'Gate failed: incomplete/truncated/non-full text'
+      };
+      results.push(row);
+      item.ref2_gradeable = false;
+      item.ref2_ungraded_reason = row.ref2_ungraded_reason;
+      item.ref2_provisional_band_range = 'ungraded';
+      continue;
+    }
+
+    // Gate 2: academic research contribution
+    const academic = ref2IsLikelyAcademicResearch(d, item);
+    if (!academic.ok) {
+      const row = {
+        ...baseRow,
+        ref2_gradeable: false,
+        ref2_ungraded_reason: academic.reasons.join('; ') || 'not clearly an academic research contribution',
+        ref2_output_type: '',
+        ref2_originality_level: '',
+        ref2_significance_level: '',
+        ref2_rigour_level: '',
+        ref2_originality_100: '',
+        ref2_significance_100: '',
+        ref2_rigour_100: '',
+        ref2_percent: '',
+        ref2_range_min: '',
+        ref2_range_max: '',
+        ref2_floor_score: '',
+        ref2_ceiling_score: '',
+        ref2_overall_confidence: 'very_low',
+        ref2_provisional_band_range: 'ungraded',
+        ref2_notes: 'Gate failed: not clearly research'
+      };
+      results.push(row);
+      item.ref2_gradeable = false;
+      item.ref2_ungraded_reason = row.ref2_ungraded_reason;
+      item.ref2_provisional_band_range = 'ungraded';
+      continue;
+    }
+
+    const resolvedUoa = ref2ResolveUoaFromItem(item);
+    const outputType = ref2DetectOutputType(d, item);
+    const prompt = ref2BuildPrompt(d, item, resolvedUoa, outputType);
+
+    let parsed = null;
+    let raw = '';
+
+    try {
+      raw = await openaiChatDirect(prompt.messages, MAX_TOKENS);
+      parsed = ref2SafeJson(raw, null);
+    } catch (e) {
+      parsed = null;
+    }
+
+    if (!parsed || typeof parsed !== 'object') {
+      const row = {
+        ...baseRow,
+        uoa_number: resolvedUoa.uoa_number,
+        uoa_name: resolvedUoa.uoa_name,
+        uoa_source: resolvedUoa.hasRefUoa ? 'stored' : 'unknown',
+        ref2_gradeable: false,
+        ref2_ungraded_reason: 'model returned invalid JSON',
+        ref2_output_type: outputType,
+        ref2_originality_level: '',
+        ref2_significance_level: '',
+        ref2_rigour_level: '',
+        ref2_originality_100: '',
+        ref2_significance_100: '',
+        ref2_rigour_100: '',
+        ref2_percent: '',
+        ref2_range_min: '',
+        ref2_range_max: '',
+        ref2_floor_score: '',
+        ref2_ceiling_score: '',
+        ref2_overall_confidence: 'very_low',
+        ref2_provisional_band_range: 'ungraded',
+        ref2_notes: ref2Take(raw, 400)
+      };
+      results.push(row);
+      item.ref2_gradeable = false;
+      item.ref2_ungraded_reason = row.ref2_ungraded_reason;
+      item.ref2_provisional_band_range = 'ungraded';
+      continue;
+    }
+
+    const gate = parsed.gate || {};
+    const gradeable = !!gate.gradeable &&
+      !!gate.is_complete_research_text &&
+      !!gate.is_academic_research_contribution;
+
+    if (!gradeable) {
+      const row = {
+        ...baseRow,
+        uoa_number: resolvedUoa.uoa_number,
+        uoa_name: resolvedUoa.uoa_name,
+        uoa_source: resolvedUoa.hasRefUoa ? 'stored' : 'unknown',
+        ref2_gradeable: false,
+        ref2_ungraded_reason: String(gate.reason_if_ungraded || 'model judged item ungradeable'),
+        ref2_output_type: String(parsed.output_type_confirmed || outputType),
+        ref2_originality_level: '',
+        ref2_significance_level: '',
+        ref2_rigour_level: '',
+        ref2_originality_100: '',
+        ref2_significance_100: '',
+        ref2_rigour_100: '',
+        ref2_percent: '',
+        ref2_range_min: '',
+        ref2_range_max: '',
+        ref2_floor_score: '',
+        ref2_ceiling_score: '',
+        ref2_overall_confidence: 'very_low',
+        ref2_provisional_band_range: 'ungraded',
+        ref2_notes: String(parsed.notes || '')
+      };
+      results.push(row);
+
+      item.ref2_gradeable = false;
+      item.ref2_ungraded_reason = row.ref2_ungraded_reason;
+      item.ref2_provisional_band_range = 'ungraded';
+
+      if (CALL_DELAY_MS > 0) await new Promise(r => setTimeout(r, CALL_DELAY_MS));
+      continue;
+    }
+
+    const critIn = parsed.criteria || {};
+    const norm = {
+      criteria: {
+        originality: ref2NormaliseCriterion(critIn.originality || {}),
+        significance: ref2NormaliseCriterion(critIn.significance || {}),
+        rigour: ref2NormaliseCriterion(critIn.rigour || {})
+      }
+    };
+
+    const agg = ref2AggregateResult(norm);
+
+    const range = parsed.range || {};
+    const row = {
+      ...baseRow,
+      uoa_number: resolvedUoa.uoa_number,
+      uoa_name: resolvedUoa.uoa_name,
+      uoa_source: resolvedUoa.hasRefUoa ? 'stored' : 'unknown',
+
+      ref2_gradeable: true,
+      ref2_ungraded_reason: '',
+      ref2_output_type: String(parsed.output_type_confirmed || outputType),
+
+      ref2_originality_level: norm.criteria.originality.highest_supported_level,
+      ref2_significance_level: norm.criteria.significance.highest_supported_level,
+      ref2_rigour_level: norm.criteria.rigour.highest_supported_level,
+
+      ref2_originality_confidence: norm.criteria.originality.confidence,
+      ref2_significance_confidence: norm.criteria.significance.confidence,
+      ref2_rigour_confidence: norm.criteria.rigour.confidence,
+
+      ref2_originality_100: agg.originality_100,
+      ref2_significance_100: agg.significance_100,
+      ref2_rigour_100: agg.rigour_100,
+      ref2_percent: agg.ref2_percent,
+
+      ref2_range_min: ref2ClampPct(range.likely_range_min),
+      ref2_range_max: ref2ClampPct(range.likely_range_max),
+      ref2_floor_score: ref2ClampPct(range.floor_score),
+      ref2_ceiling_score: ref2ClampPct(range.ceiling_score),
+      ref2_overall_confidence: String(range.overall_confidence || 'medium').toLowerCase(),
+
+      ref2_provisional_band_range: ref2BandFromRangeLabel(parsed.provisional_band_range),
+
+      ref2_contribution_claim: String(parsed?.evidence_profile?.contribution_claim || ''),
+      ref2_contribution_type: String(parsed?.evidence_profile?.contribution_type || ''),
+      ref2_evidence_originality: String(parsed?.evidence_profile?.evidence_originality || ''),
+      ref2_evidence_significance: String(parsed?.evidence_profile?.evidence_significance || ''),
+      ref2_evidence_rigour: String(parsed?.evidence_profile?.evidence_rigour || ''),
+      ref2_uncertainties: String(parsed?.evidence_profile?.uncertainties || ''),
+      ref2_notes: String(parsed?.notes || '')
+    };
+
+    results.push(row);
+
+    // Store back onto item without overwriting existing REF lens fields
+    item.ref2_gradeable = row.ref2_gradeable;
+    item.ref2_ungraded_reason = row.ref2_ungraded_reason;
+    item.ref2_output_type = row.ref2_output_type;
+    item.ref2_originality_level = row.ref2_originality_level;
+    item.ref2_significance_level = row.ref2_significance_level;
+    item.ref2_rigour_level = row.ref2_rigour_level;
+    item.ref2_originality_confidence = row.ref2_originality_confidence;
+    item.ref2_significance_confidence = row.ref2_significance_confidence;
+    item.ref2_rigour_confidence = row.ref2_rigour_confidence;
+    item.ref2_originality_100 = row.ref2_originality_100;
+    item.ref2_significance_100 = row.ref2_significance_100;
+    item.ref2_rigour_100 = row.ref2_rigour_100;
+    item.ref2_percent = row.ref2_percent;
+    item.ref2_range_min = row.ref2_range_min;
+    item.ref2_range_max = row.ref2_range_max;
+    item.ref2_floor_score = row.ref2_floor_score;
+    item.ref2_ceiling_score = row.ref2_ceiling_score;
+    item.ref2_overall_confidence = row.ref2_overall_confidence;
+    item.ref2_provisional_band_range = row.ref2_provisional_band_range;
+    item.ref2_contribution_claim = row.ref2_contribution_claim;
+    item.ref2_contribution_type = row.ref2_contribution_type;
+    item.ref2_evidence_originality = row.ref2_evidence_originality;
+    item.ref2_evidence_significance = row.ref2_evidence_significance;
+    item.ref2_evidence_rigour = row.ref2_evidence_rigour;
+    item.ref2_uncertainties = row.ref2_uncertainties;
+    item.ref2_notes = row.ref2_notes;
+
+    if (CALL_DELAY_MS > 0) {
+      await new Promise(r => setTimeout(r, CALL_DELAY_MS));
+    }
+  }
+
+  window.__refLens2Last = {
+    when: Date.now(),
+    count: results.length,
+    weights: { ...(window.REF2_WEIGHTS || {}) },
+    results
+  };
+
+  let md = '';
+  try {
+    md = ref2MarkdownSummary(results);
+    setSynthBodyText(md, 'ref_assessment_2.md');
+
+    const headers = [
+      'idx','title','authors','year','venue','doi',
+      'uoa_number','uoa_name','uoa_source',
+      'ref2_gradeable','ref2_ungraded_reason',
+      'ref2_output_type',
+      'ref2_originality_level','ref2_significance_level','ref2_rigour_level',
+      'ref2_originality_confidence','ref2_significance_confidence','ref2_rigour_confidence',
+      'ref2_originality_100','ref2_significance_100','ref2_rigour_100',
+      'ref2_percent',
+      'ref2_range_min','ref2_range_max',
+      'ref2_floor_score','ref2_ceiling_score',
+      'ref2_overall_confidence',
+      'ref2_provisional_band_range',
+      'ref2_contribution_claim','ref2_contribution_type',
+      'ref2_evidence_originality','ref2_evidence_significance','ref2_evidence_rigour',
+      'ref2_uncertainties','ref2_notes'
+    ];
+
+    const csv = toCSV(results, headers);
+    downloadTextFile('ref_assessment_2.csv', csv, 'text/csv');
+  } catch (e) {
+    console.warn('REF2 summary/export failed:', e);
+    md = `REF Assessment 2 completed for ${results.length} outputs, but summary/export failed: ${e.message || e}`;
+    setSynthBodyText(md, 'ref_assessment_2.txt');
+  }
+
+  setSynthProgressHtml(`<div>Done. REF assessment 2 processed ${results.length} outputs.</div>`);
+
+  try {
+    const title = `REF Assessment 2 (${results.length} outputs)`;
+    // use type 'ref' so it reuses your existing Lens_REF icon path
+    addAIFootprintFromItems('ref', docs, md, title);
+    if (typeof updateInfo === 'function') updateInfo();
+    if (typeof redraw === 'function') redraw();
+  } catch (e) {
+    console.warn('Footprint (REF assessment 2) failed:', e);
+  }
+}
+
 
 // ---- [ADD] REF summary stats helpers (GPA, distribution, Publication Power) ----
 function refOverallScoreFromRow(r) {
