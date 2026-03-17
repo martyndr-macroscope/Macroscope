@@ -329,24 +329,43 @@ let fieldLabelCenters = {}; // fieldId -> { sx, sy, h }
 
 window.escapeHtml = window.escapeHtml || function (s) { return esc(s); };
 // Wrap a remote URL to go via the proxy
-let __proxyAvailable = true;
+let __proxyStatus = {
+  checked: false,
+  ok: true,
+  lastCheckedAt: 0
+};
+
 function viaProxy(url) {
-  if (!FETCH_PROXY || !__proxyAvailable) return url;
+  if (!FETCH_PROXY) return url;
   return `${FETCH_PROXY}/fetch?url=${encodeURIComponent(url)}`;
 }
 
-// Add immediately after (new code):
+// Soft probe only: never permanently poison the session because of one failed test.
 async function probeProxyOnce() {
-  if (!FETCH_PROXY || !__proxyAvailable) return;
-  try {
-    const testUrl = `${FETCH_PROXY}/fetch?url=${encodeURIComponent('https://example.com/')}`;
-    // HEAD is enough and fast
-    const r = await fetch(testUrl, { method: 'HEAD' });
-    if (!r.ok) throw new Error(String(r.status));
-  } catch {
-    console.warn('Fetch proxy unavailable — falling back to direct requests.');
-    __proxyAvailable = false;
+  if (!FETCH_PROXY) return false;
+
+  const now = Date.now();
+  if (__proxyStatus.checked && (now - __proxyStatus.lastCheckedAt) < 5 * 60 * 1000) {
+    return __proxyStatus.ok;
   }
+
+  __proxyStatus.checked = true;
+  __proxyStatus.lastCheckedAt = now;
+
+  try {
+    // Use GET, not HEAD — many proxies / targets behave differently on HEAD.
+    const testUrl = viaProxy('https://example.com/');
+    const r = await fetchWithTimeout(testUrl, { method: 'GET', redirect: 'follow' }, 10000);
+    __proxyStatus.ok = !!r.ok;
+  } catch {
+    __proxyStatus.ok = false;
+  }
+
+  if (!__proxyStatus.ok) {
+    console.warn('Proxy probe failed; will still try proxy opportunistically per request.');
+  }
+
+  return __proxyStatus.ok;
 }
 function fetchWithTimeout(resource, options = {}, timeoutMs = 20000) {
   const controller = new AbortController();
@@ -375,39 +394,98 @@ async function withTimeout(promise, ms, label = 'operation') {
 // Try proxy first; if blocked (403/401) or fails, fall back to direct
 // Try proxy first; if blocked (403/401) or fails, fall back to direct
 async function fetchOAJson(fullUrl, timeoutMs = 25000) {
-  const attempts = [];
-
-  // 1) proxy (only if configured & available)
-  if (FETCH_PROXY && __proxyAvailable) attempts.push(viaProxy(fullUrl));
-
-  // 2) direct (always keep a direct fallback)
-  attempts.push(fullUrl);
-
   let lastErr = null;
+
+  // Always try proxy first if configured, but do NOT globally disable it on one failure.
+  const attempts = FETCH_PROXY
+    ? [viaProxy(fullUrl), fullUrl]
+    : [fullUrl];
+
   for (const u of attempts) {
     try {
+      const isProxyAttempt = !!FETCH_PROXY && u !== fullUrl;
+
       const r = await fetchWithTimeout(
         u,
-        { headers: { accept: 'application/json' }, mode: 'cors' },
+        {
+          headers: { accept: 'application/json' },
+          mode: isProxyAttempt ? 'cors' : 'cors',
+          redirect: 'follow'
+        },
         timeoutMs
       );
+
       if (r.ok) return await r.json();
 
-      // If proxy said "Forbidden/Unauthorized", disable it and try direct
-      if ((r.status === 401 || r.status === 403) && u !== fullUrl) {
-        console.warn('Proxy blocked (', r.status, ') → falling back to direct.');
-        __proxyAvailable = false;
-        continue;
-      }
       lastErr = new Error(`HTTP ${r.status}`);
     } catch (e) {
       lastErr = e;
-      // If proxy path threw, disable and try direct
-      if (u !== fullUrl) { __proxyAvailable = false; continue; }
     }
   }
+
   throw lastErr || new Error('OpenAlex request failed.');
 }
+
+function isLikelyCorsSafeDirect(url) {
+  const u = String(url || '').toLowerCase();
+
+  // Very conservative allowlist.
+  // Add more only when you've verified they work direct from browser.
+  return (
+    u.includes('arxiv.org') ||
+    u.includes('export.arxiv.org') ||
+    u.includes('api.openalex.org') ||
+    u.includes('api.unpaywall.org')
+  );
+}
+
+async function fetchFulltextResponse(fullUrl, timeoutMs = 25000) {
+  let lastErr = null;
+
+  // For full text, proxy-first is essential.
+  // Only try direct if proxy fails and the domain is plausibly browser-readable.
+  const attempts = [];
+  if (FETCH_PROXY) attempts.push({ url: viaProxy(fullUrl), proxied: true });
+  if (isLikelyCorsSafeDirect(fullUrl)) attempts.push({ url: fullUrl, proxied: false });
+
+  // Absolute fallback: if there is no proxy configured, direct is all we have.
+  if (!FETCH_PROXY && !attempts.length) {
+    attempts.push({ url: fullUrl, proxied: false });
+  }
+
+  for (const a of attempts) {
+    try {
+      const r = await fetchWithTimeout(
+        a.url,
+        {
+          redirect: 'follow',
+          mode: 'cors',
+          headers: {
+            accept: 'application/pdf,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+          }
+        },
+        timeoutMs
+      );
+
+      if (!r.ok) {
+        lastErr = new Error(`HTTP ${r.status}`);
+        continue;
+      }
+
+      return r;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+
+  throw lastErr || new Error('Fulltext request failed.');
+}
+
+
+
+
+
+
 async function fetchFulltextResponse(fullUrl, timeoutMs = 25000) {
   const attempts = [];
 
@@ -1357,44 +1435,110 @@ function scoreDocumentLikeStructure(text, work) {
   };
 }
 
+function countMatches(text, rx) {
+  const m = String(text || '').match(rx);
+  return m ? m.length : 0;
+}
+
+function scorePaperLikeStructure(text, work) {
+  const raw = String(text || '');
+  const t = raw.toLowerCase();
+
+  const cues = [
+    'abstract',
+    'introduction',
+    'background',
+    'methods',
+    'materials and methods',
+    'methodology',
+    'results',
+    'discussion',
+    'conclusion',
+    'references',
+    'bibliography',
+    'acknowledgements'
+  ];
+
+  let cueHits = 0;
+  for (const c of cues) if (t.includes(c)) cueHits++;
+
+  const title = String(work?.title || work?.display_name || '').toLowerCase();
+  const titleTokens = title
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length >= 5)
+    .slice(0, 8);
+
+  let titleHits = 0;
+  for (const tok of titleTokens) if (t.includes(tok)) titleHits++;
+
+  const doiHit = /\b10\.\d{4,9}\/[^\s"<>]+\b/i.test(raw);
+  const refStyleHits = countMatches(raw, /\(\d{4}[a-z]?\)/g) + countMatches(raw, /\[\d+\]/g);
+  const yearHits = countMatches(raw, /\b(19|20)\d{2}\b/g);
+
+  let score = 0;
+  const L = raw.length;
+
+  if (L >= 3000) score += 1;
+  if (L >= 6000) score += 1;
+  if (L >= 12000) score += 1;
+  if (L >= 25000) score += 1;
+
+  if (cueHits >= 2) score += 2;
+  if (cueHits >= 4) score += 1;
+
+  if (titleHits >= 1) score += 1;
+  if (titleHits >= 3) score += 1;
+
+  if (doiHit) score += 1;
+  if (refStyleHits >= 8) score += 1;
+  if (yearHits >= 8) score += 1;
+
+  return { score, cueHits, titleHits, refStyleHits, yearHits, len: L };
+}
+
 function validateExtractedFulltext({ text, sourceUrl, isPdf, work }) {
   const raw = String(text || '').trim();
-  const metrics = scoreDocumentLikeStructure(raw, work);
-
-  // Hard floors
   if (!raw) return { ok: false, reason: 'No text extracted.' };
 
-  // Be much stricter for HTML than before
-  const minLen = isPdf ? 1800 : 3500;
-  if (raw.length < minLen) {
-    return { ok: false, reason: `Too little text extracted (${raw.length} chars; need at least ${minLen}).` };
+  const L = raw.length;
+
+  // Hard floors
+  if (isPdf) {
+    if (L < 1800) {
+      return { ok: false, reason: `Too little text extracted from PDF (${L} chars).` };
+    }
+  } else {
+    if (L < 2500) {
+      return { ok: false, reason: `Too little text extracted from HTML (${L} chars).` };
+    }
   }
 
   if (!isPdf && looksLikePortalOrNavJunk(raw, sourceUrl)) {
-    return { ok: false, reason: 'Looks like landing-page / portal text, not full document.' };
+    return { ok: false, reason: 'Looks like publisher portal / navigation text, not full text.' };
   }
 
-  // Main gate
-  const neededScore = isPdf ? 4 : 6;
-  if (metrics.score < neededScore) {
+  const m = scorePaperLikeStructure(raw, work);
+  const need = isPdf ? 3 : 5;
+
+  if (m.score < need) {
     return {
       ok: false,
-      reason: `Text does not look document-like enough (score ${metrics.score}/${neededScore}, len=${metrics.len}).`,
-      metrics
+      reason: `Text does not look document-like enough (score ${m.score}/${need}, len=${m.len}).`,
+      metrics: m
     };
   }
 
-  // Extra HTML guard:
-  // if HTML is modest length and has almost no scholarly structure, reject it
-  if (!isPdf && metrics.len < 8000 && metrics.cueHits < 2 && metrics.refStyleHits < 6) {
+  // Extra guard against abstract-only HTML pages
+  if (!isPdf && L < 7000 && m.cueHits < 2 && m.refStyleHits < 5) {
     return {
       ok: false,
-      reason: 'HTML page is too short and lacks enough scholarly structure to trust as full text.',
-      metrics
+      reason: 'HTML page is too short and too weakly structured to trust as full text.',
+      metrics: m
     };
   }
 
-  return { ok: true, score: metrics.score, metrics };
+  return { ok: true, score: m.score, metrics: m };
 }
 
 
@@ -1431,8 +1575,8 @@ async function extractFullTextForIndex(i, ftContainerId = null, opts = {}) {
   const silent = !!opts.silent;
 
   const item = itemsData?.[i] || {};
-  const w    = item.openalex || {};
-  let doi    = cleanDOI(String(w.doi || ''));
+  const w = item.openalex || {};
+  let doi = cleanDOI(String(w.doi || ''));
   let doiUrl = doi ? `https://doi.org/${doi}` : '';
 
   if (!doi) {
@@ -1454,11 +1598,8 @@ async function extractFullTextForIndex(i, ftContainerId = null, opts = {}) {
     } catch {}
   }
 
-  // Give DOI a proper chance — it often resolves to usable HTML full text
-  if (doiUrl) cand.unshift(doiUrl);
-
-  // De-dup and keep order
-  cand = [...new Set((cand || []).filter(Boolean))];
+  // Prefer repository/PMC/arXiv/PDF links over DOI landing pages.
+  cand = prioritiseFulltextCandidates(cand);
 
   const setFtPanel = (html) => {
     if (!ftContainerId) return;
@@ -1486,13 +1627,12 @@ async function extractFullTextForIndex(i, ftContainerId = null, opts = {}) {
   const MAX_PDF_BYTES = 25 * 1024 * 1024;
   let lastErr = null;
 
-  // Try a few more candidates than before
   for (let idx = 0; idx < Math.min(cand.length, 12); idx++) {
     const url = cand[idx];
+
     try {
       const resp = await fetchFulltextResponse(url, 25000);
 
-      // Important: use final resolved URL for validation
       const finalUrl = resp.url || url;
       const ctype = (resp.headers.get('content-type') || '').toLowerCase();
       const looksPdf =
@@ -1535,18 +1675,18 @@ async function extractFullTextForIndex(i, ftContainerId = null, opts = {}) {
 
         if (!validation.ok) throw new Error(validation.reason);
 
-        // Optional rescue:
-        // some HTML pages expose PDF links in meta/citation tags
-        if ((!extracted || extracted.length < 5000) && /pdf/i.test(html)) {
-          const doc = new DOMParser().parseFromString(html, 'text/html');
-          const rescuePdf = [
-            doc.querySelector('meta[name="citation_pdf_url"]')?.content,
-            doc.querySelector('a[href$=".pdf"]')?.href,
-            doc.querySelector('a[href*=".pdf?"]')?.href
-          ].filter(Boolean)[0];
+        // Rescue path: if HTML page mentions a PDF, try it.
+        if (extracted.length < 8000 && /pdf/i.test(html)) {
+          try {
+            const doc = new DOMParser().parseFromString(html, 'text/html');
+            const rescuePdf = [
+              doc.querySelector('meta[name="citation_pdf_url"]')?.content,
+              doc.querySelector('meta[name="wkhealth_pdf_url"]')?.content,
+              doc.querySelector('a[href$=".pdf"]')?.href,
+              doc.querySelector('a[href*=".pdf?"]')?.href
+            ].filter(Boolean)[0];
 
-          if (rescuePdf && rescuePdf !== url) {
-            try {
+            if (rescuePdf) {
               const pdfResp = await fetchFulltextResponse(rescuePdf, 25000);
               const pdfBlob = await pdfResp.blob();
               if (pdfBlob.size <= MAX_PDF_BYTES) {
@@ -1567,8 +1707,8 @@ async function extractFullTextForIndex(i, ftContainerId = null, opts = {}) {
                   validation = pdfValidation;
                 }
               }
-            } catch {}
-          }
+            }
+          } catch {}
         }
       }
 
@@ -1578,6 +1718,7 @@ async function extractFullTextForIndex(i, ftContainerId = null, opts = {}) {
       item.fulltext_chars = extracted.length;
       item.fulltext_validation = validation?.metrics || null;
       item.fulltext_extracted_at = new Date().toISOString();
+      delete item.fulltext_last_fail;
 
       if (nodes[i]) nodes[i].hasFullText = true;
 
@@ -1592,15 +1733,11 @@ async function extractFullTextForIndex(i, ftContainerId = null, opts = {}) {
 
       return true;
     } catch (err) {
-      lastErr = err?.name === 'AbortError'
-        ? new Error('Network timeout (host slow or blocked).')
-        : err;
-
-const it = itemsData?.[i] || (itemsData[i] = {});
-it.fulltext_last_fail = {
-  url,
-  message: String(lastErr?.message || 'unknown'),
-  at: new Date().toISOString()
+      lastErr = err;
+      item.fulltext_last_fail = {
+        url,
+        message: String(err?.message || 'unknown'),
+        at: new Date().toISOString()
       };
     }
   }
@@ -10321,7 +10458,46 @@ async function autoCacheVisible({ onlyOnScreen = true } = {}) {
 }
 
 
+function prioritiseFulltextCandidates(candidates) {
+  const arr = [...new Set((candidates || []).filter(Boolean))];
 
+  function score(u) {
+    const s = String(u || '').toLowerCase();
+
+    let n = 0;
+
+    // best: direct PDFs
+    if (/\.pdf(\?|$)/i.test(s)) n += 100;
+
+    // open repositories / OA platforms
+    if (s.includes('/pmc/')) n += 70;
+    if (s.includes('ncbi.nlm.nih.gov/pmc')) n += 70;
+    if (s.includes('europepmc.org')) n += 70;
+    if (s.includes('arxiv.org')) n += 70;
+    if (s.includes('biorxiv.org')) n += 65;
+    if (s.includes('medrxiv.org')) n += 65;
+    if (s.includes('zenodo.org')) n += 60;
+    if (s.includes('osf.io')) n += 60;
+    if (s.includes('handle.net')) n += 40;
+    if (s.includes('/handle/')) n += 40;
+    if (s.includes('repository')) n += 35;
+
+    // DOI last, because it often leads to publisher landing pages
+    if (s.includes('doi.org/')) n -= 20;
+
+    // publisher landing pages are still worth trying, but later
+    if (s.includes('sciencedirect.com')) n -= 10;
+    if (s.includes('springer.com')) n -= 10;
+    if (s.includes('wiley.com')) n -= 10;
+    if (s.includes('cambridge.org')) n -= 10;
+    if (s.includes('nature.com')) n -= 10;
+    if (s.includes('oup.com')) n -= 10;
+
+    return n;
+  }
+
+  return arr.sort((a, b) => score(b) - score(a));
+}
 
 // Build a clean list of OA candidates (PDF first, then landing pages)
 // Build a clean list of full-text candidates (HTML landings first, then PDFs, then DOI)
