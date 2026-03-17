@@ -9736,6 +9736,178 @@ function ref2SampleText(rawText, outputType) {
   ).join('\n\n');
 }
 
+// =======================
+// REF AI LENS 2 (patched)
+// =======================
+
+// ---------- robust helpers ----------
+
+function ref2CoerceBool(v) {
+  if (v === true || v === false) return v;
+  if (typeof v === 'number') return v > 0;
+  const s = String(v || '').toLowerCase().trim();
+  if (['true','yes','y','1','supported','pass'].includes(s)) return true;
+  if (['false','no','n','0','unsupported','fail'].includes(s)) return false;
+  return null;
+}
+
+function ref2InferLevelFromText(c) {
+  const txt = [
+    c?.justification || '',
+    c?.blocker_for_next_level || ''
+  ].join(' ').toLowerCase();
+
+  if (!txt.trim()) return null;
+
+  // strongest first
+  if (/paradigm|field-defining|field defining|transformative significance|exemplary rigour|field-altering|field altering/.test(txt)) return 5;
+  if (/major advance|beyond the immediate niche|wider agendas|very high rigour|unusual care|robustness|likely to influence thinking|likely to influence practice/.test(txt)) return 4;
+  if (/distinct contribution|specialist area|implications beyond the immediate case|well-substantiated|well substantiated|clear handling of evidence|strong execution/.test(txt)) return 3;
+  if (/clear local novelty|specific research area|application context|adequate and credible|consistent with field norms|credible use of evidence|credible use of methods/.test(txt)) return 2;
+  if (/incremental|extension|recombination|useful within a narrow specialist conversation|basic scholarly competence/.test(txt)) return 1;
+  if (/no identifiable|no clear research significance|insufficiently supported/.test(txt)) return 0;
+
+  return null;
+}
+
+function ref2NormaliseCriterion(c) {
+  const conf = String(c?.confidence || 'low').toLowerCase().trim();
+  const confLabel = ['very_low','low','medium','high'].includes(conf) ? conf : 'low';
+
+  let flags = [];
+  if (Array.isArray(c?.support_flags)) {
+    flags = c.support_flags.slice(0, 6).map(ref2CoerceBool);
+  }
+  while (flags.length < 6) flags.push(null);
+
+  let explicitHighest = Number.isFinite(Number(c?.highest_supported_level))
+    ? ref2ClampInt(c.highest_supported_level, 0, 5)
+    : null;
+
+  let inferredFromFlags = null;
+  if (flags.some(v => v !== null)) {
+    let h = -1;
+    for (let i = 0; i < flags.length; i++) {
+      if (flags[i] === true) h = i;
+      else if (flags[i] === false) break;
+      else break;
+    }
+    if (h >= 0) inferredFromFlags = h;
+  }
+
+  const inferredFromText = ref2InferLevelFromText(c);
+
+  let highest = explicitHighest;
+  if (highest == null) highest = inferredFromFlags;
+  if (highest == null) highest = inferredFromText;
+  if (highest == null) highest = 0;
+
+  // rebuild cumulative flags from resolved highest level
+  const rebuiltFlags = Array.from({ length: 6 }, (_, i) => i <= highest);
+
+  return {
+    support_flags: rebuiltFlags,
+    highest_supported_level: highest,
+    confidence: confLabel,
+    justification: String(c?.justification || '').trim(),
+    blocker_for_next_level: String(c?.blocker_for_next_level || '').trim()
+  };
+}
+
+function ref2LevelToScore(level, supportFlags, confLabel) {
+  const lvl = ref2ClampInt(level, 0, 5);
+  const flags = Array.isArray(supportFlags) ? supportFlags : [];
+  const supportedCount = flags.filter(Boolean).length;
+
+  const baseMap = [8, 24, 42, 61, 80, 95];
+  const base = baseMap[lvl] ?? 8;
+  const supportBonus = Math.max(0, Math.min(4, supportedCount - 1)) * 1.5;
+  const confFactor = ref2ConfidenceFactor(confLabel);
+
+  return ref2ClampPct((base + supportBonus) * confFactor);
+}
+
+function ref2AggregateResult(norm, opts = {}) {
+  const o = norm.criteria.originality;
+  const s = norm.criteria.significance;
+  const r = norm.criteria.rigour;
+
+  let oLevel = o.highest_supported_level;
+  let sLevel = s.highest_supported_level;
+  let rLevel = r.highest_supported_level;
+
+  // Soft floor: if a gradeable academic output collapses to 0/0/0,
+  // assume parser failure rather than true absence of contribution.
+  if (opts.gradeable && oLevel === 0 && sLevel === 0 && rLevel === 0) {
+    oLevel = 1;
+    sLevel = 1;
+    rLevel = 1;
+  }
+
+  const o100 = ref2LevelToScore(oLevel, o.support_flags, o.confidence);
+  const s100 = ref2LevelToScore(sLevel, s.support_flags, s.confidence);
+  const r100 = ref2LevelToScore(rLevel, r.support_flags, r.confidence);
+
+  const w = window.REF2_WEIGHTS || { originality:1, significance:1, rigour:1 };
+  const denom = Math.max(
+    1e-9,
+    Number(w.originality || 1) +
+    Number(w.significance || 1) +
+    Number(w.rigour || 1)
+  );
+
+  const pct = ref2ClampPct(
+    (o100 * Number(w.originality || 1) +
+     s100 * Number(w.significance || 1) +
+     r100 * Number(w.rigour || 1)) / denom
+  );
+
+  return {
+    originality_100: o100,
+    significance_100: s100,
+    rigour_100: r100,
+    ref2_percent: pct,
+    used_levels: {
+      originality: oLevel,
+      significance: sLevel,
+      rigour: rLevel
+    }
+  };
+}
+
+function ref2BandFromPercent(pct) {
+  const p = Number(pct || 0);
+  if (p < 20) return 'ungraded';
+  if (p < 35) return '1*';
+  if (p < 50) return '1*-2*';
+  if (p < 65) return '2*';
+  if (p < 72) return '2*-3*';
+  if (p < 80) return '3*';
+  if (p < 88) return '3*-4*';
+  return '4*';
+}
+
+function ref2ClampModelRangeToAggregate(rangeMin, rangeMax, aggPct) {
+  let lo = ref2ClampPct(rangeMin);
+  let hi = ref2ClampPct(rangeMax);
+  const p = ref2ClampPct(aggPct);
+
+  if (hi < lo) [lo, hi] = [hi, lo];
+
+  // keep model range but stop it drifting wildly away from ladder result
+  lo = Math.max(lo, p - 12);
+  hi = Math.min(hi, p + 12);
+
+  if (hi < lo) {
+    lo = Math.max(0, p - 8);
+    hi = Math.min(100, p + 8);
+  }
+
+  return { lo, hi };
+}
+
+// ---------- patched prompt builder ----------
+
 function ref2BuildPrompt(doc, item, resolvedUoa, outputType) {
   const title = item?.openalex?.display_name || item?.label || doc?.title || '';
   const year  = item?.openalex?.publication_year || item?.year || '';
@@ -9775,6 +9947,13 @@ GENERAL RULES
 - Top levels require explicit support, not polished language or broad ambition.
 - Journalistic, editorial, promotional, news, or non-research texts must be marked ungraded.
 - Abstract-only, truncated, or website-fragment texts must be marked ungraded.
+
+IMPORTANT CONSISTENCY RULE
+- The criterion ladders are the primary judgement.
+- The provisional numeric range and provisional band must be consistent with the ladder results.
+- If a criterion is described as a clear, substantial, well-executed contribution, it should not remain at level 0.
+- Level 0 should be used only where there is no identifiable contribution/significance/rigour for that criterion.
+- For gradeable academic outputs, level 0 across all three criteria should be extremely rare.
 
 ${outputGuidance}
 ${uoaGuidance}
@@ -9850,6 +10029,8 @@ Return:
 - overall_confidence
 
 STEP 4 — PROVISIONAL CALIBRATED BAND
+Derive the provisional band from the ladder profile and likely range.
+Do not output a mid-band range if all three criteria remain at level 0.
 Return only a provisional band range, not a final definitive star judgement:
 - provisional_band_range: one of "ungraded", "1*", "1*-2*", "2*", "2*-3*", "3*", "3*-4*", "4*"
 
