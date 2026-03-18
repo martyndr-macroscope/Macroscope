@@ -8940,69 +8940,9 @@ function downloadTextFile(fileName, text, mime = 'text/plain') {
 // Prompt builder: REF-style scoring + UoA assignment.
 function buildREFPrompt(doc, uoaListText) {
   const sys =
-`You are assessing ONE putative research output using only the provided metadata and text.
+`You are assessing ONE research output using only the provided text and metadata.
 
-Your first task is to decide WHETHER THE PROVIDED TEXT IS ACTUALLY A RESEARCH OUTPUT SUITABLE FOR REF-STYLE ASSESSMENT.
-
-You must be skeptical. Full-text caches may contain:
-- publisher landing pages
-- abstracts only
-- website fragments
-- metadata pages
-- promotional text
-- journalism/news articles about research
-- magazine or trade press articles
-- blog posts
-- general overview/review pieces with little original scholarly contribution
-
-STEP 0 — AUTHENTICITY / SUITABILITY GATE
-
-Decide all of the following before scoring:
-
-1. text_authenticity
-Choose ONE:
-- "full_research_text" = appears to contain substantial text from an actual research article, book chapter, book, or equivalent scholarly output
-- "partial_research_text" = seems to contain only an abstract, excerpt, preview, or truncated fragment
-- "non_research_web_text" = website/landing page/metadata/promotional or navigational text
-- "journalistic_or_public_information" = article written mainly to inform a general audience about research
-- "general_review_or_overview" = broad review/survey/overview text with limited identifiable original scholarly contribution
-- "editorial_commentary" = editorial, viewpoint, commentary, opinion, foreword, introduction, or similar non-research format
-- "uncertain"
-
-2. output_genre
-Choose ONE:
-- "research_article"
-- "book_chapter"
-- "book"
-- "conference_paper"
-- "scholarly_review_article"
-- "editorial_or_commentary"
-- "journalism_or_public_report"
-- "webpage_or_metadata"
-- "other"
-- "uncertain"
-
-3. gradeable_for_ref
-Return true ONLY if:
-- the supplied text appears to be a substantial portion of a real academic research output, AND
-- it is not mainly journalism, public information, publisher-page text, editorial matter, or generic website content.
-
-IMPORTANT GATING RULES
-- If the text is clearly website text, publisher landing-page text, metadata, promotional copy, or navigation text, set gradeable_for_ref = false.
-- If the text is written primarily for the general public to report or explain research, set gradeable_for_ref = false.
-- If the text is an editorial, commentary, foreword, magazine feature, trade article, or public-facing report rather than a research contribution, set gradeable_for_ref = false.
-- If the text is only an abstract or obviously truncated fragment, set gradeable_for_ref = false.
-- If the text is a very general review/survey/overview with weak or unclear original contribution, you MAY set gradeable_for_ref = true, but score it conservatively and usually low for Originality. Do NOT reward broad summary writing as if it were original research.
-- Review papers should only score strongly where the supplied text provides clear evidence of a distinctive scholarly synthesis, conceptual advance, methodological contribution, or agenda-setting intervention.
-
-WHEN IN DOUBT
-- Prefer caution.
-- Do not assume that polished academic language means the text is a genuine research output.
-- Do not infer missing sections or evidence.
-- If evidence is insufficient, lower the score or mark ungradeable.
-
-ONLY IF gradeable_for_ref = true, score three REF criteria on a 0–100 scale:
-
+Score three REF criteria on a 0–100 scale:
 - Originality (0–100)
 - Significance (0–100)
 - Rigour (0–100)
@@ -9010,68 +8950,31 @@ ONLY IF gradeable_for_ref = true, score three REF criteria on a 0–100 scale:
 Definitions (use these strictly):
 
 ORIGINALITY = substantive novelty relative to prior published work.
-Not: merely being recent, topical, fashionable, descriptive, or broad in scope.
-Low originality signals:
-- generic summary of a field
-- narrative review without distinctive intervention
-- public explanation of others' research
-- journalistic synthesis
-- descriptive overview without clear new concept, method, argument, or evidence
-High originality signals:
-- genuinely new concept/framework/theory
-- distinctive method
-- non-obvious recombination producing new understanding
-- new evidence or argument that materially changes interpretation
-- major synthetic contribution with clear original intellectual architecture
+Not: just being recent; fashionable topic; minor variation on established method; scale alone.
+High signals: new concept/framework/theory; genuinely new method; non-obvious recombination; opens new direction; boundary-crossing that changes interpretation.
 
 SIGNIFICANCE = importance/reach: influence or credible capacity to influence knowledge/practice/policy/technology/future research.
-Not: novelty alone; not readability for a general audience.
-Low significance signals:
-- narrow descriptive piece with limited scholarly consequence
-- public-information article reporting existing work
-- generic overview with little identifiable scholarly leverage
-High significance signals:
-- clear advancement
-- likely influence on later scholarship/practice/policy
-- enables new research directions
-- becomes a reference point in a specialist or wider field
+Not: novelty alone.
+High signals: clear advancement; adopted/built upon; influences practice/standards; enables new lines of inquiry; reference point within a cluster.
 
 RIGOUR = robustness, transparency, methodological soundness, evidential adequacy.
-Not: polished prose or broad claims.
-Low rigour signals:
-- unsupported assertions
-- thin evidence
-- little methodological clarity
-- journalistic or popularising treatment instead of scholarly substantiation
-High rigour signals:
-- appropriate methods
-- enough detail for evaluation/replication where relevant
-- careful analysis
-- limitations or critical framing
-- internally coherent, well-supported argument/evidence
+Not: “exciting”.
+High signals: appropriate methods; enough detail for replication; correct analysis; limitations; internal coherence.
 
-SCORING ANCHORS
+Scoring anchors (IMPORTANT):
 - 90–100: exceptional / field-leading for that criterion
 - 75–89: very strong
 - 55–74: solid/competent but not exceptional
-- 35–54: limited (incremental, descriptive, weakly evidenced, or mainly synthetic without strong original contribution)
-- 0–34: poor/very weak, public-information/journalistic, or insufficient evidence in provided text
-
-IMPORTANT SCORING RULES
-- Return scores as integers from 0–100.
-- DO NOT round to multiples of 5 or 10.
-- Use the full range; prefer precise distinctions (e.g. 61 vs 66 vs 72).
-- Many competent outputs should land in 55–70.
-- Very general review papers should often have LOWER Originality than research articles unless they clearly introduce a distinctive synthesis, framework, or intervention.
-- Journalism/public-information texts should not be scored as research outputs. Mark them ungradeable.
-- If gradeable_for_ref = false, set all three criterion scores to 0.
+- 35–54: limited (incremental, narrow, or weakly evidenced)
+- 0–34: poor/very weak or insufficient evidence in provided text
+Return scores as integers from 0–100.
+DO NOT round to multiples of 5 or 10.
+Use the full range; prefer precise distinctions (e.g., 63 vs 67 vs 71) where justified.
+If you notice you are choosing a multiple of 5, reconsider and choose a more precise integer unless it is exactly warranted.
+Be willing to use the full range. Many competent but incremental papers should land in 55–70.
 
 Return ONLY valid JSON:
 {
-  "text_authenticity": "",
-  "output_genre": "",
-  "gradeable_for_ref": false,
-  "gate_reason": "",
   "uoa_number": 0,
   "uoa_name": "",
   "originality_100": 0,
@@ -9101,15 +9004,6 @@ ${uoaListText}`;
 
 ${coverageLine}
 
-ASSESSMENT INSTRUCTIONS
-1. First apply the authenticity / suitability gate.
-2. Decide whether this is actually a gradeable academic research output.
-3. If it is not gradeable, explain briefly in gate_reason and set all scores to 0.
-4. If it is a very general review article, survey, or overview, be conservative:
-   - score Originality low unless there is clear evidence of an original framework, synthesis, method, or argument
-   - do not confuse breadth of coverage with originality
-5. If it is journalism, public communication, website text, editorial matter, or trade reporting, mark it ungradeable.
-
 METADATA:
 Title: ${doc.title || ''}
 Authors: ${doc.authors || ''}
@@ -9121,7 +9015,10 @@ TEXT (may be partial):
 ${String(doc.text_for_ref || doc.text || '').slice(0, 16000)}
 `;
 
-  return { sys, user };
+  return [
+    { role: 'system', content: sys },
+    { role: 'user', content: user }
+  ];
 }
 
 
@@ -10202,6 +10099,7 @@ ${sampled}
     sampledText: sampled
   };
 }
+
 
 function ref2NormaliseCriterion(c) {
   const conf = String(c?.confidence || 'low').toLowerCase();
