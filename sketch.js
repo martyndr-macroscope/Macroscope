@@ -642,19 +642,18 @@ let cam = { x: 0, y: 0, scale: 1 };
 let zoomLevel = 0; 
 
 // --- Semantic zoom for labels ----------------------------------------------
-// GUI zoom is log2(cam.scale), stored in zoomLevel.
+// When true:
+//   Cluster labels fade in from zoom 0.0 -> 0.5
+//   Domain labels fade out from zoom 0.0 -> 0.5
 //
-// Cluster labels:
-//   <= 0.0  -> hidden
-//   0.0..0.5 -> fade in
-//   >= 0.5  -> fully visible
-//
-// Domain labels:
-//   <= 0.0  -> fully visible
-//   0.0..0.5 -> fade out
-//   >= 0.5  -> hidden
+// When false:
+//   Both label types ignore zoom completely and use only their overlay sliders.
+let semanticZoomEnabled = true;
+let semanticZoomRadio = null;
 
 function getClusterLabelZoomAlpha() {
+  if (!semanticZoomEnabled) return 1;
+
   const z = Number(zoomLevel || 0);
   if (z <= 0) return 0;
   if (z >= 0.5) return 1;
@@ -662,6 +661,8 @@ function getClusterLabelZoomAlpha() {
 }
 
 function getDomainLabelZoomAlpha() {
+  if (!semanticZoomEnabled) return 1;
+
   const z = Number(zoomLevel || 0);
   if (z <= 0) return 1;
   if (z >= 0.5) return 0;
@@ -11066,7 +11067,9 @@ const overlays = {
   ovOpenAccess,
   ovClusterColors,
   ovClusterLabels,
-  ovRefAssessment
+  ovFieldLabels,
+  ovRefAssessment,
+  semanticZoomEnabled
 };
 
 
@@ -11330,22 +11333,32 @@ else { recomputeVisibility(); redraw(); }
 
 // Overlays (use new slider refs we captured in buildOverlaysInto)
 if (save.overlays) {
-  if (Number.isFinite(save.overlays.ovAbstracts))       ovAbstracts       = +save.overlays.ovAbstracts;
-  if (Number.isFinite(save.overlays.ovOpenAccess))      ovOpenAccess      = +save.overlays.ovOpenAccess;
-  if (Number.isFinite(save.overlays.ovClusterColors))   ovClusterColors   = +save.overlays.ovClusterColors;
-  if (Number.isFinite(save.overlays.ovClusterLabels))   ovClusterLabels   = +save.overlays.ovClusterLabels;
-  if (Number.isFinite(save.overlays.ovRefAssessment))   ovRefAssessment   = +save.overlays.ovRefAssessment;
+  if (Number.isFinite(save.overlays.ovAbstracts))         ovAbstracts         = +save.overlays.ovAbstracts;
+  if (Number.isFinite(save.overlays.ovOpenAccess))        ovOpenAccess        = +save.overlays.ovOpenAccess;
+  if (Number.isFinite(save.overlays.ovClusterColors))     ovClusterColors     = +save.overlays.ovClusterColors;
+  if (Number.isFinite(save.overlays.ovClusterLabels))     ovClusterLabels     = +save.overlays.ovClusterLabels;
+  if (Number.isFinite(save.overlays.ovFieldLabels))       ovFieldLabels       = +save.overlays.ovFieldLabels;
+  if (Number.isFinite(save.overlays.ovRefAssessment))     ovRefAssessment     = +save.overlays.ovRefAssessment;
+
+  if (typeof save.overlays.semanticZoomEnabled === 'boolean') {
+    semanticZoomEnabled = save.overlays.semanticZoomEnabled;
+  }
 
   // Keep the 'domainClusters' lens in sync with the two overlay sliders
-  lenses.domainClusters = (ovClusterColors > 0) || (ovClusterLabels > 0);
+  lenses.domainClusters = (ovClusterColors > 0) || (ovClusterLabels > 0) || (ovFieldLabels > 0);
 
   // Push overlay values back into sliders if they're mounted
   try {
-    if (ovAbsSlider?.elt)            ovAbsSlider.elt.value            = String(Math.round(ovAbstracts*100));
-    if (ovOASlider?.elt)             ovOASlider.elt.value             = String(Math.round(ovOpenAccess*100));
-    if (ovClustColorSlider?.elt)     ovClustColorSlider.elt.value     = String(Math.round(ovClusterColors*100));
-    if (ovClustLabelSlider?.elt)     ovClustLabelSlider.elt.value     = String(Math.round(ovClusterLabels*100));
-    if (ovRefAssessmentSlider?.elt)  ovRefAssessmentSlider.elt.value  = String(Math.round(ovRefAssessment*100));
+    if (ovAbsSlider?.elt)            ovAbsSlider.elt.value            = String(Math.round(ovAbstracts * 100));
+    if (ovOASlider?.elt)             ovOASlider.elt.value             = String(Math.round(ovOpenAccess * 100));
+    if (ovClustColorSlider?.elt)     ovClustColorSlider.elt.value     = String(Math.round(ovClusterColors * 100));
+    if (ovClustLabelSlider?.elt)     ovClustLabelSlider.elt.value     = String(Math.round(ovClusterLabels * 100));
+    if (ovFieldLabelSlider?.elt)     ovFieldLabelSlider.elt.value     = String(Math.round(ovFieldLabels * 100));
+    if (ovRefAssessmentSlider?.elt)  ovRefAssessmentSlider.elt.value  = String(Math.round(ovRefAssessment * 100));
+
+    if (semanticZoomRadio) {
+      semanticZoomRadio.selected(semanticZoomEnabled ? 'on' : 'off');
+    }
   } catch {}
 
   // Ensure cluster data exists if overlays are on
@@ -17242,6 +17255,54 @@ function buildOverlaysInto(containerBody) {
     }
     redraw();
   });
+
+    // Semantic Zoom toggle (applies to Cluster Labels + Domain Labels)
+  {
+    const row = createDiv('');
+    row.parent(containerBody);
+    row.style('display', 'flex');
+    row.style('align-items', 'center');
+    row.style('justify-content', 'space-between');
+    row.style('gap', '10px');
+    row.style('margin', '2px 0 10px');
+
+    const lab = createDiv('Semantic Zoom');
+    lab.parent(row);
+    lab.style('color', '#eaeaea');
+    lab.style('font-size', '12px');
+
+    semanticZoomRadio = createRadio();
+    semanticZoomRadio.parent(row);
+    semanticZoomRadio.option('on', 'On');
+    semanticZoomRadio.option('off', 'Off');
+    semanticZoomRadio.selected(semanticZoomEnabled ? 'on' : 'off');
+    semanticZoomRadio.style('color', '#eaeaea');
+    semanticZoomRadio.style('font-size', '12px');
+
+    // tighten spacing a little
+    try {
+      semanticZoomRadio.elt.style.display = 'flex';
+      semanticZoomRadio.elt.style.gap = '10px';
+      semanticZoomRadio.elt.style.alignItems = 'center';
+    } catch {}
+
+    semanticZoomRadio.changed(() => {
+      semanticZoomEnabled = semanticZoomRadio.value() === 'on';
+
+      // clear hit targets if labels are effectively invisible after the mode switch
+      if (ovClusterLabels <= 0) {
+        clusterHoverId = -1;
+        clusterSelectId = -1;
+        clusterLabelHits = [];
+      }
+      if (ovFieldLabels <= 0) {
+        fieldSelectId = -1;
+        fieldLabelHits = [];
+      }
+
+      redraw();
+    });
+  }
 
   // REF Assessment
   ovRefAssessmentSlider = mkSlider('REF Assessment', Math.round(ovRefAssessment*100), (e) => {
