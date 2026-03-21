@@ -3686,6 +3686,42 @@ function buildThematicClusterInfoHTML(d) {
 
   const gpaTxt = refSum.n ? refSum.gpa.toFixed(2) : 'n/a';
 
+  let refHtml = '';
+
+  if (refN > 0) {
+    const maxCount = Math.max(...Object.values(refCounts), 1);
+
+    const bar = (score, color) => {
+      const v = refCounts[score] || 0;
+      const w = (v / maxCount) * 100;
+      return `
+        <div style="display:flex;align-items:center;margin-bottom:4px;">
+          <div style="width:16px;font-size:11px;opacity:.7">${score}★</div>
+          <div style="flex:1;height:8px;background:rgba(255,255,255,0.08);margin:0 6px;border-radius:4px;overflow:hidden;">
+            <div style="width:${w}%;height:100%;background:${color};"></div>
+          </div>
+          <div style="font-size:11px;opacity:.7;width:18px;text-align:right;">${v}</div>
+        </div>
+      `;
+    };
+
+    refHtml = `
+      <div style="margin-top:10px;">
+        <div style="font-weight:600;font-size:12px;margin-bottom:6px;">REF Assessment</div>
+
+        <div style="font-size:12px;margin-bottom:6px;">
+          ${refN} / ${matchedPaperCount} assessed
+          ${gpa != null ? ` · GPA: ${gpa.toFixed(2)}` : ''}
+        </div>
+
+        ${bar(4, '#ff4d4d')}
+        ${bar(3, '#ff9933')}
+        ${bar(2, '#ffd633')}
+        ${bar(1, '#66cc66')}
+      </div>
+    `;
+  }
+
   return `
     <div style="margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.12)">
       <div style="font-weight:600;font-size:13px;margin:0 0 6px;">Thematic Fingerprints</div>
@@ -4511,7 +4547,29 @@ _renderDimensionPanel(k) {
       if (paperTitle) sourcePapers.push(paperTitle);
     }
 
-    if (matchedPaperCount > 0) {
+if (matchedPaperCount > 0) {
+
+  // --- REF aggregation ---------------------------------------
+  const refCounts = { 1: 0, 2: 0, 3: 0, 4: 0 };
+  let refTotal = 0;
+  let refN = 0;
+
+  for (const ni of nodeList) {
+    const item = itemsData?.[ni];
+    if (!item) continue;
+
+    // Try multiple possible locations
+const refScore = item?.ref_star ?? null;
+
+    if (refScore != null && refScore >= 1 && refScore <= 4) {
+      const s = Math.round(refScore);
+      refCounts[s] = (refCounts[s] || 0) + 1;
+      refTotal += s;
+      refN++;
+    }
+  }
+
+  const gpa = refN > 0 ? (refTotal / refN) : null;
       const totalKnownPos = posCounts.first + posCounts.middle + posCounts.last + posCounts.unknown;
 
       const posSummary = [
@@ -4567,6 +4625,7 @@ _renderDimensionPanel(k) {
           <div style="font-size:12px;line-height:1.35;margin-bottom:10px;">
             ${affiliationHtml}
           </div>
+          ${refHtml}
 
           ${samplePapersHtml ? `
             <div style="font-weight:600;font-size:12px;margin:8px 0 6px;">Example papers</div>
@@ -4574,6 +4633,9 @@ _renderDimensionPanel(k) {
               ${samplePapersHtml}
             </div>
           ` : ''}
+
+
+          
         </div>
       `;
     } else {
@@ -4611,6 +4673,9 @@ _renderDimensionPanel(k) {
      </button>
     </div>
   `);
+
+    // --- REF chart HTML ----------------------------------------
+  
 
   const powEl = document.getElementById(powId);
   if (powEl) {
@@ -10692,7 +10757,7 @@ function rebuildRefLensFromStoredScores(confMin = 0.5) {
     const it = itemsData[idx];
     if (!it) continue;
     if (it.ref_percent == null) continue;
-
+     s
     const confidence = Number(it.ref_confidence ?? 0);
     const uoa_number = it.ref_uoa_number;
     const pct = Number(it.ref_percent ?? 0);
