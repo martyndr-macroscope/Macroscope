@@ -1859,25 +1859,22 @@ saveBtn.mousePressed(saveProject);
   }
 
   // Load
+// Load (JSON / PDF / project file)
 loadBtn = createImg('./Icons/Load.png', 'Load');
 loadBtn.parent(saveLoadBar);
 loadBtn.size(40, 40);
 loadBtn.style('display','block');
 loadBtn.style('cursor','pointer');
 loadBtn.attribute('draggable','false');
-loadBtn.attribute('title', 'Load');  
-attachTooltip(loadBtn, 'Load');       
+loadBtn.attribute('title', 'Load JSON or PDF');
+attachTooltip(loadBtn, 'Load JSON or PDF');
 if (typeof captureUI === 'function') captureUI(loadBtn.elt);
+
 loadBtn.mousePressed(() => {
   if (DEMO_MODE) {
-    showDemoDatasetMenu();  // new function (added below)
+    showDemoDatasetMenu();
   } else {
-    if (!projectFileInput) {
-      projectFileInput = createFileInput(handleProjectFileSelected, false);
-      projectFileInput.hide();
-    }
-    projectFileInput.elt.value = '';
-    projectFileInput.elt.click();
+    openFileDialog();
   }
 });
 // Bug / Feature icon (right side)
@@ -1909,9 +1906,14 @@ if (typeof captureUI === 'function') captureUI(exportViewerBtn.elt);
 
 exportViewerBtn.mousePressed(() => {
   if (DEMO_MODE) return;
-  openPublishDialog(({ name, title, text }) => {
-    exportViewerPackageZip({ fileName: name, userTitle: title, userText: text });
+openPublishDialog(({ name, title, text, reports }) => {
+  exportViewerPackageZip({
+    fileName: name,
+    userTitle: title,
+    userText: text,
+    reports: reports || { overview: true }
   });
+});
 });
 
 
@@ -2171,7 +2173,7 @@ function relayoutLeftColumn() {
 
 let lensBar;                 // container DIV for the icon row       // key -> p5.Element <img>
 
-let topBar;                 // container for "Import JSON" + "Run Layout" icons
+let topBar;                 // container for top-left control icons
 const CONTROL_ICON_SIZE = 40;
 let ctrlIcons = { load:null, layout:null };
 
@@ -6414,19 +6416,6 @@ if (typeof forceToggleBtn === 'undefined' || !forceToggleBtn) {
   _syncForceToggleLabel();
 }
 
-
-  // Import JSON icon
-  const load = createImg('./Icons/Load_JSON.png', 'Import JSON');
-  load.parent(topBar);
-  load.size(CONTROL_ICON_SIZE, CONTROL_ICON_SIZE);
-  load.style('display','block');
-  load.style('cursor','pointer');
-  load.attribute('draggable','false');
-  load.attribute('title', 'Load JSON or PDF'); 
-  load.mousePressed(openFileDialog);
-  attachTooltip(load, 'Load JSON or PDF');
-  captureUI(load.elt);
-
   // Run Layout icon
   const lay = createImg('./Icons/Force_Icon.png', 'Run layout');
   lay.parent(topBar);
@@ -6457,13 +6446,7 @@ attachViewMenuToLayoutIcon(lay);
   autoBtn.style('display','none');//hide for now
   captureUI?.(autoBtn.elt);
 
-  if (DEMO_MODE) {
-  // Disable: Load JSON/PDF
-  load.style('opacity','0.1');
-  load.style('pointer-events','none');
-  load.style('cursor','default');
-  load.attribute('title', 'Load JSON/PDF (disabled in Demo mode)');
-
+if (DEMO_MODE) {
   // Disable: Run Force Directed Graph
   lay.style('opacity','0.1');
   lay.style('pointer-events','none');
@@ -6473,7 +6456,7 @@ attachViewMenuToLayoutIcon(lay);
 
 
   // keep references for visual feedback
-  ctrlIcons.load = load;
+  ctrlIcons.load = null;
   ctrlIcons.layout = lay;
   updateLayoutIconState();
 
@@ -6567,17 +6550,16 @@ function createAIMenuButton() {
 
   addItem('Apply Fingerprints', () => runApplyFingerprintsOnly?.());
   addItem('Fields identification', () => runFieldsIdentificationLens?.());
-  addItem('Persistent Fields', () => runPersistentFieldsLens?.());
+  //addItem('Persistent Fields', () => runPersistentFieldsLens?.());
   addItem('Topological Clustering', () => runTopologicalClusteringLens?.());
   addItem('Label Domains', () => runLabelDomainsAI?.());
 
   addItem('AI Fields from Clusters', () => runAIFieldsFromClustersLens?.());
   
-  addItem('Invisible University (themes)…', () => runInvisibleUniversityLens?.());
+  //addItem('Invisible University (themes)…', () => runInvisibleUniversityLens?.());
   addItem('Chronological review',() => runChronologicalReview?.());
   addItem('Open question…',          () => runOpenQuestion?.());
   addItem('REF assessment (full text)', () => runREFLens?.());
-  addItem('REF assessment 2 (gated)',     () => runREFLens2?.());
 
   aiMenuBtn.mousePressed(toggleAIMenu);
 
@@ -9901,827 +9883,6 @@ function ref2SampleText(rawText, outputType) {
     `--- SAMPLE ${idx + 1} / ${uniq.length} ---\n` + raw.slice(s, s + chunkSize)
   ).join('\n\n');
 }
-
-// =======================
-// REF AI LENS 2 (patched)
-// =======================
-
-// ---------- robust helpers ----------
-
-function ref2CoerceBool(v) {
-  if (v === true || v === false) return v;
-  if (typeof v === 'number') return v > 0;
-  const s = String(v || '').toLowerCase().trim();
-  if (['true','yes','y','1','supported','pass'].includes(s)) return true;
-  if (['false','no','n','0','unsupported','fail'].includes(s)) return false;
-  return null;
-}
-
-function ref2InferLevelFromText(c) {
-  const txt = [
-    c?.justification || '',
-    c?.blocker_for_next_level || ''
-  ].join(' ').toLowerCase();
-
-  if (!txt.trim()) return null;
-
-  // strongest first
-  if (/paradigm|field-defining|field defining|transformative significance|exemplary rigour|field-altering|field altering/.test(txt)) return 5;
-  if (/major advance|beyond the immediate niche|wider agendas|very high rigour|unusual care|robustness|likely to influence thinking|likely to influence practice/.test(txt)) return 4;
-  if (/distinct contribution|specialist area|implications beyond the immediate case|well-substantiated|well substantiated|clear handling of evidence|strong execution/.test(txt)) return 3;
-  if (/clear local novelty|specific research area|application context|adequate and credible|consistent with field norms|credible use of evidence|credible use of methods/.test(txt)) return 2;
-  if (/incremental|extension|recombination|useful within a narrow specialist conversation|basic scholarly competence/.test(txt)) return 1;
-  if (/no identifiable|no clear research significance|insufficiently supported/.test(txt)) return 0;
-
-  return null;
-}
-
-function ref2NormaliseCriterion(c) {
-  const conf = String(c?.confidence || 'low').toLowerCase().trim();
-  const confLabel = ['very_low','low','medium','high'].includes(conf) ? conf : 'low';
-
-  let flags = [];
-  if (Array.isArray(c?.support_flags)) {
-    flags = c.support_flags.slice(0, 6).map(ref2CoerceBool);
-  }
-  while (flags.length < 6) flags.push(null);
-
-  let explicitHighest = Number.isFinite(Number(c?.highest_supported_level))
-    ? ref2ClampInt(c.highest_supported_level, 0, 5)
-    : null;
-
-  let inferredFromFlags = null;
-  if (flags.some(v => v !== null)) {
-    let h = -1;
-    for (let i = 0; i < flags.length; i++) {
-      if (flags[i] === true) h = i;
-      else if (flags[i] === false) break;
-      else break;
-    }
-    if (h >= 0) inferredFromFlags = h;
-  }
-
-  const inferredFromText = ref2InferLevelFromText(c);
-
-  let highest = explicitHighest;
-  if (highest == null) highest = inferredFromFlags;
-  if (highest == null) highest = inferredFromText;
-  if (highest == null) highest = 0;
-
-  // rebuild cumulative flags from resolved highest level
-  const rebuiltFlags = Array.from({ length: 6 }, (_, i) => i <= highest);
-
-  return {
-    support_flags: rebuiltFlags,
-    highest_supported_level: highest,
-    confidence: confLabel,
-    justification: String(c?.justification || '').trim(),
-    blocker_for_next_level: String(c?.blocker_for_next_level || '').trim()
-  };
-}
-
-function ref2LevelToScore(level, supportFlags, confLabel) {
-  const lvl = ref2ClampInt(level, 0, 5);
-  const flags = Array.isArray(supportFlags) ? supportFlags : [];
-  const supportedCount = flags.filter(Boolean).length;
-
-  const baseMap = [8, 24, 42, 61, 80, 95];
-  const base = baseMap[lvl] ?? 8;
-  const supportBonus = Math.max(0, Math.min(4, supportedCount - 1)) * 1.5;
-  const confFactor = ref2ConfidenceFactor(confLabel);
-
-  return ref2ClampPct((base + supportBonus) * confFactor);
-}
-
-function ref2AggregateResult(norm, opts = {}) {
-  const o = norm.criteria.originality;
-  const s = norm.criteria.significance;
-  const r = norm.criteria.rigour;
-
-  let oLevel = o.highest_supported_level;
-  let sLevel = s.highest_supported_level;
-  let rLevel = r.highest_supported_level;
-
-  // Soft floor: if a gradeable academic output collapses to 0/0/0,
-  // assume parser failure rather than true absence of contribution.
-  if (opts.gradeable && oLevel === 0 && sLevel === 0 && rLevel === 0) {
-    oLevel = 1;
-    sLevel = 1;
-    rLevel = 1;
-  }
-
-  const o100 = ref2LevelToScore(oLevel, o.support_flags, o.confidence);
-  const s100 = ref2LevelToScore(sLevel, s.support_flags, s.confidence);
-  const r100 = ref2LevelToScore(rLevel, r.support_flags, r.confidence);
-
-  const w = window.REF2_WEIGHTS || { originality:1, significance:1, rigour:1 };
-  const denom = Math.max(
-    1e-9,
-    Number(w.originality || 1) +
-    Number(w.significance || 1) +
-    Number(w.rigour || 1)
-  );
-
-  const pct = ref2ClampPct(
-    (o100 * Number(w.originality || 1) +
-     s100 * Number(w.significance || 1) +
-     r100 * Number(w.rigour || 1)) / denom
-  );
-
-  return {
-    originality_100: o100,
-    significance_100: s100,
-    rigour_100: r100,
-    ref2_percent: pct,
-    used_levels: {
-      originality: oLevel,
-      significance: sLevel,
-      rigour: rLevel
-    }
-  };
-}
-
-function ref2BandFromPercent(pct) {
-  const p = Number(pct || 0);
-  if (p < 20) return 'ungraded';
-  if (p < 35) return '1*';
-  if (p < 50) return '1*-2*';
-  if (p < 65) return '2*';
-  if (p < 72) return '2*-3*';
-  if (p < 80) return '3*';
-  if (p < 88) return '3*-4*';
-  return '4*';
-}
-
-function ref2ClampModelRangeToAggregate(rangeMin, rangeMax, aggPct) {
-  let lo = ref2ClampPct(rangeMin);
-  let hi = ref2ClampPct(rangeMax);
-  const p = ref2ClampPct(aggPct);
-
-  if (hi < lo) [lo, hi] = [hi, lo];
-
-  // keep model range but stop it drifting wildly away from ladder result
-  lo = Math.max(lo, p - 12);
-  hi = Math.min(hi, p + 12);
-
-  if (hi < lo) {
-    lo = Math.max(0, p - 8);
-    hi = Math.min(100, p + 8);
-  }
-
-  return { lo, hi };
-}
-
-// ---------- patched prompt builder ----------
-
-function ref2BuildPrompt(doc, item, resolvedUoa, outputType) {
-  const title = item?.openalex?.display_name || item?.label || doc?.title || '';
-  const year  = item?.openalex?.publication_year || item?.year || '';
-  const venue =
-    item?.openalex?.primary_location?.source?.display_name ||
-    item?.openalex?.host_venue?.display_name ||
-    item?.venue || '';
-  const doi = item?.openalex?.doi || item?.doi || '';
-  const authors = Array.isArray(item?.openalex?.authorships)
-    ? item.openalex.authorships
-        .map(a => a?.author?.display_name)
-        .filter(Boolean)
-        .slice(0, 8)
-        .join('; ')
-    : (item?.authors || '');
-
-  const uoaLine = resolvedUoa?.hasRefUoa
-    ? `UoA: ${resolvedUoa.uoa_number} - ${resolvedUoa.uoa_name || ''}`
-    : `UoA: unknown`;
-
-  const outputGuidance = ref2OutputTypeGuidance(outputType);
-  const uoaGuidance = ref2UoaGuidance(resolvedUoa?.uoa_number, resolvedUoa?.uoa_name);
-
-  const sampled = ref2SampleText(doc?.text || '', outputType);
-
-  const sys = `
-You are assisting with a structured REF-style review of ONE research output.
-
-Your task is not to praise the output and not to award a final REF score directly.
-You must first gate the item, then produce a structured evidence-based assessment.
-
-GENERAL RULES
-- Use only the supplied metadata and text.
-- Ignore venue prestige, author reputation, and topic fashion unless explicit evidence is present in the supplied text.
-- Be conservative: if evidence is ambiguous, choose the lower supported level.
-- Many competent outputs should land in the middle range.
-- Top levels require explicit support, not polished language or broad ambition.
-- Journalistic, editorial, promotional, news, or non-research texts must be marked ungraded.
-- Abstract-only, truncated, or website-fragment texts must be marked ungraded.
-
-IMPORTANT CONSISTENCY RULE
-- The criterion ladders are the primary judgement.
-- The provisional numeric range and provisional band must be consistent with the ladder results.
-- If a criterion is described as a clear, substantial, well-executed contribution, it should not remain at level 0.
-- Level 0 should be used only where there is no identifiable contribution/significance/rigour for that criterion.
-- For gradeable academic outputs, level 0 across all three criteria should be extremely rare.
-
-${outputGuidance}
-${uoaGuidance}
-`.trim();
-
-  const user = `
-Assess the following output.
-
-METADATA
-Title: ${title}
-Authors: ${authors}
-Year: ${year}
-Venue: ${venue}
-DOI: ${doi}
-${uoaLine}
-Detected output type: ${outputType}
-
-STEP 0 — GATES
-A. Is this text sufficiently complete to assess as a full research output?
-B. Is this an academic research contribution rather than journalism/editorial/website boilerplate?
-
-If either gate fails, return ungraded with a concise reason.
-
-STEP 1 — EVIDENCE PROFILE
-Return:
-- contribution_claim
-- contribution_type
-- evidence_originality
-- evidence_significance
-- evidence_rigour
-- uncertainties
-
-STEP 2 — CUMULATIVE LADDERS
-For EACH criterion, test levels 0 to 5 cumulatively. A higher level cannot be awarded if any lower level is unsupported.
-
-ORIGINALITY
-0 no identifiable original contribution
-1 incremental adaptation / extension / recombination
-2 clear local novelty in framing / method / material / synthesis
-3 distinct contribution changing understanding/approach in a specialist area
-4 major advance likely to influence thinking/practice beyond the immediate niche
-5 field-defining or paradigm-shifting contribution
-
-SIGNIFICANCE
-0 no clear research significance evident
-1 useful within a narrow specialist conversation
-2 likely to matter within a specific research area or application context
-3 implications beyond the immediate case or niche
-4 likely to influence wider agendas / methods / practices / debates
-5 transformative significance across multiple areas or broad scale
-
-RIGOUR
-0 claims insufficiently supported
-1 basic scholarly competence but limited demonstration/transparency
-2 adequate and credible use of evidence/methods consistent with field norms
-3 strong, well-substantiated execution with clear handling of evidence/method/limitations
-4 very high rigour with unusual care, robustness, and reflexive control
-5 exemplary rigour by standards of the field and output type
-
-For EACH criterion return:
-- support_flags: six booleans for levels 0..5
-- highest_supported_level
-- confidence: very_low | low | medium | high
-- justification
-- blocker_for_next_level
-
-STEP 3 — PROVISIONAL RANGE
-Return:
-- likely_range_min (0-100)
-- likely_range_max (0-100)
-- floor_score (0-100)
-- ceiling_score (0-100)
-- overall_confidence
-
-STEP 4 — PROVISIONAL CALIBRATED BAND
-Derive the provisional band from the ladder profile and likely range.
-Do not output a mid-band range if all three criteria remain at level 0.
-Return only a provisional band range, not a final definitive star judgement:
-- provisional_band_range: one of "ungraded", "1*", "1*-2*", "2*", "2*-3*", "3*", "3*-4*", "4*"
-
-STEP 5 — JSON ONLY
-Return JSON only using exactly this structure:
-
-{
-  "gate": {
-    "is_complete_research_text": true,
-    "is_academic_research_contribution": true,
-    "gradeable": true,
-    "reason_if_ungraded": ""
-  },
-  "output_type_confirmed": "",
-  "evidence_profile": {
-    "contribution_claim": "",
-    "contribution_type": "",
-    "evidence_originality": "",
-    "evidence_significance": "",
-    "evidence_rigour": "",
-    "uncertainties": ""
-  },
-  "criteria": {
-    "originality": {
-      "support_flags": [true,false,false,false,false,false],
-      "highest_supported_level": 0,
-      "confidence": "medium",
-      "justification": "",
-      "blocker_for_next_level": ""
-    },
-    "significance": {
-      "support_flags": [true,false,false,false,false,false],
-      "highest_supported_level": 0,
-      "confidence": "medium",
-      "justification": "",
-      "blocker_for_next_level": ""
-    },
-    "rigour": {
-      "support_flags": [true,false,false,false,false,false],
-      "highest_supported_level": 0,
-      "confidence": "medium",
-      "justification": "",
-      "blocker_for_next_level": ""
-    }
-  },
-  "range": {
-    "likely_range_min": 0,
-    "likely_range_max": 0,
-    "floor_score": 0,
-    "ceiling_score": 0,
-    "overall_confidence": "medium"
-  },
-  "provisional_band_range": "2*-3*",
-  "notes": ""
-}
-
-TEXT
-${sampled}
-`.trim();
-
-  return {
-    messages: [
-      { role: 'system', content: sys },
-      { role: 'user', content: user }
-    ],
-    sampledText: sampled
-  };
-}
-
-
-function ref2NormaliseCriterion(c) {
-  const conf = String(c?.confidence || 'low').toLowerCase();
-  const flagsRaw = Array.isArray(c?.support_flags) ? c.support_flags.slice(0, 6) : [];
-  while (flagsRaw.length < 6) flagsRaw.push(false);
-  const flags = flagsRaw.map(Boolean);
-
-  // enforce cumulative interpretation
-  let highest = 0;
-  for (let i = 0; i < flags.length; i++) {
-    if (flags[i]) highest = i;
-    else break;
-  }
-
-  if (Number.isFinite(Number(c?.highest_supported_level))) {
-    highest = Math.min(highest, ref2ClampInt(c.highest_supported_level, 0, 5));
-  }
-
-  return {
-    support_flags: flags,
-    highest_supported_level: highest,
-    confidence: ['very_low','low','medium','high'].includes(conf) ? conf : 'low',
-    justification: String(c?.justification || '').trim(),
-    blocker_for_next_level: String(c?.blocker_for_next_level || '').trim()
-  };
-}
-
-function ref2LevelToScore(level, supportFlags, confLabel) {
-  const lvl = ref2ClampInt(level, 0, 5);
-  const flags = Array.isArray(supportFlags) ? supportFlags : [];
-  const supportedCount = flags.filter(Boolean).length;
-
-  // More nuanced than a flat 20-point ladder
-  // base by highest supported level, small bonus for internally well-supported climb
-  const baseMap = [8, 24, 42, 61, 80, 95];
-  const base = baseMap[lvl] ?? 8;
-  const supportBonus = Math.max(0, Math.min(4, supportedCount - 1)) * 1.5;
-  const confFactor = ref2ConfidenceFactor(confLabel);
-
-  return ref2ClampPct((base + supportBonus) * confFactor);
-}
-
-function ref2AggregateResult(norm) {
-  const o = norm.criteria.originality;
-  const s = norm.criteria.significance;
-  const r = norm.criteria.rigour;
-
-  const o100 = ref2LevelToScore(o.highest_supported_level, o.support_flags, o.confidence);
-  const s100 = ref2LevelToScore(s.highest_supported_level, s.support_flags, s.confidence);
-  const r100 = ref2LevelToScore(r.highest_supported_level, r.support_flags, r.confidence);
-
-  const w = window.REF2_WEIGHTS || { originality:1, significance:1, rigour:1 };
-  const denom = Math.max(1e-9, Number(w.originality || 1) + Number(w.significance || 1) + Number(w.rigour || 1));
-  const pct = ref2ClampPct(
-    (o100 * Number(w.originality || 1) +
-     s100 * Number(w.significance || 1) +
-     r100 * Number(w.rigour || 1)) / denom
-  );
-
-  return {
-    originality_100: o100,
-    significance_100: s100,
-    rigour_100: r100,
-    ref2_percent: pct
-  };
-}
-
-function ref2BandFromRangeLabel(lbl) {
-  const s = String(lbl || '').trim();
-  if (!s) return 'ungraded';
-  return s;
-}
-
-function ref2MarkdownSummary(rows) {
-  const total = rows.length;
-  const graded = rows.filter(r => r.ref2_gradeable);
-  const ungraded = rows.filter(r => !r.ref2_gradeable);
-
-  const avg = graded.length
-    ? (graded.reduce((a, r) => a + Number(r.ref2_percent || 0), 0) / graded.length)
-    : 0;
-
-  const bands = {};
-  for (const r of rows) {
-    const b = r.ref2_provisional_band_range || 'ungraded';
-    bands[b] = (bands[b] || 0) + 1;
-  }
-
-  let md = '';
-  md += `# REF Assessment 2\n\n`;
-  md += `- Outputs processed: ${total}\n`;
-  md += `- Gradeable: ${graded.length}\n`;
-  md += `- Ungraded: ${ungraded.length}\n`;
-  md += `- Mean provisional REF2 percent (gradeable only): ${avg.toFixed(1)}\n\n`;
-
-  md += `## Provisional band distribution\n`;
-  Object.keys(bands).sort().forEach(k => {
-    md += `- ${k}: ${bands[k]}\n`;
-  });
-
-  if (ungraded.length) {
-    md += `\n## Ungraded items\n`;
-    ungraded.slice(0, 25).forEach(r => {
-      md += `- ${r.title || '(untitled)'} — ${r.ref2_ungraded_reason || 'ungraded'}\n`;
-    });
-    if (ungraded.length > 25) {
-      md += `- … plus ${ungraded.length - 25} more\n`;
-    }
-  }
-
-  return md;
-}
-
-async function runREFLens2() {
-  const docsRaw = (typeof collectVisibleFulltextCorpus === 'function')
-    ? collectVisibleFulltextCorpus()
-    : [];
-
-  if (!docsRaw.length) {
-    openSynthPanel('No cached full texts visible.');
-    return;
-  }
-
-  const docs = docsRaw.map(d => {
-    const i = d?.idx;
-    const p = (Number.isFinite(i) && (typeof parallaxWorldPos === 'function'))
-      ? parallaxWorldPos(i)
-      : (nodes?.[i] || {});
-    return {
-      ...d,
-      x: Number.isFinite(p?.x) ? p.x : 0,
-      y: Number.isFinite(p?.y) ? p.y : 0
-    };
-  });
-
-  openSynthPanel(`REF assessment 2 on ${docs.length} full texts…`);
-  setSynthProgressHtml(`<div>Starting REF assessment 2 for ${docs.length} outputs…</div>`);
-
-  const results = [];
-  const CALL_DELAY_MS = 220;
-  const MAX_TOKENS = 1400;
-
-  for (let i = 0; i < docs.length; i++) {
-    const d = docs[i];
-    const idx = Number(d?.idx);
-    const item = itemsData?.[idx] || {};
-    const oa = item?.openalex || {};
-
-    setSynthProgressHtml(`<div>REF assessment 2: ${i + 1}/${docs.length}…</div>`);
-
-    const title =
-      oa?.display_name ||
-      item?.label ||
-      d?.title ||
-      '(untitled)';
-
-    const authors = Array.isArray(oa?.authorships)
-      ? oa.authorships.map(a => a?.author?.display_name).filter(Boolean).slice(0, 8).join('; ')
-      : '';
-
-    const venue =
-      oa?.primary_location?.source?.display_name ||
-      oa?.host_venue?.display_name ||
-      item?.venue || '';
-
-    const baseRow = {
-      idx,
-      title,
-      authors,
-      year: oa?.publication_year || item?.year || '',
-      venue,
-      doi: oa?.doi || item?.doi || ''
-    };
-
-    // Gate 1: completeness / full research text
-    const completeness = ref2DocumentCompletenessGate(d, item);
-    if (!completeness.ok) {
-      const row = {
-        ...baseRow,
-        ref2_gradeable: false,
-        ref2_ungraded_reason: completeness.reason,
-        ref2_output_type: '',
-        ref2_originality_level: '',
-        ref2_significance_level: '',
-        ref2_rigour_level: '',
-        ref2_originality_100: '',
-        ref2_significance_100: '',
-        ref2_rigour_100: '',
-        ref2_percent: '',
-        ref2_range_min: '',
-        ref2_range_max: '',
-        ref2_floor_score: '',
-        ref2_ceiling_score: '',
-        ref2_overall_confidence: 'very_low',
-        ref2_provisional_band_range: 'ungraded',
-        ref2_notes: 'Gate failed: incomplete/truncated/non-full text'
-      };
-      results.push(row);
-      item.ref2_gradeable = false;
-      item.ref2_ungraded_reason = row.ref2_ungraded_reason;
-      item.ref2_provisional_band_range = 'ungraded';
-      continue;
-    }
-
-    // Gate 2: academic research contribution
-    const academic = ref2IsLikelyAcademicResearch(d, item);
-    if (!academic.ok) {
-      const row = {
-        ...baseRow,
-        ref2_gradeable: false,
-        ref2_ungraded_reason: academic.reasons.join('; ') || 'not clearly an academic research contribution',
-        ref2_output_type: '',
-        ref2_originality_level: '',
-        ref2_significance_level: '',
-        ref2_rigour_level: '',
-        ref2_originality_100: '',
-        ref2_significance_100: '',
-        ref2_rigour_100: '',
-        ref2_percent: '',
-        ref2_range_min: '',
-        ref2_range_max: '',
-        ref2_floor_score: '',
-        ref2_ceiling_score: '',
-        ref2_overall_confidence: 'very_low',
-        ref2_provisional_band_range: 'ungraded',
-        ref2_notes: 'Gate failed: not clearly research'
-      };
-      results.push(row);
-      item.ref2_gradeable = false;
-      item.ref2_ungraded_reason = row.ref2_ungraded_reason;
-      item.ref2_provisional_band_range = 'ungraded';
-      continue;
-    }
-
-    const resolvedUoa = ref2ResolveUoaFromItem(item);
-    const outputType = ref2DetectOutputType(d, item);
-    const prompt = ref2BuildPrompt(d, item, resolvedUoa, outputType);
-
-    let parsed = null;
-    let raw = '';
-
-    try {
-      raw = await openaiChatDirect(prompt.messages, MAX_TOKENS);
-      parsed = ref2SafeJson(raw, null);
-    } catch (e) {
-      parsed = null;
-    }
-
-    if (!parsed || typeof parsed !== 'object') {
-      const row = {
-        ...baseRow,
-        uoa_number: resolvedUoa.uoa_number,
-        uoa_name: resolvedUoa.uoa_name,
-        uoa_source: resolvedUoa.hasRefUoa ? 'stored' : 'unknown',
-        ref2_gradeable: false,
-        ref2_ungraded_reason: 'model returned invalid JSON',
-        ref2_output_type: outputType,
-        ref2_originality_level: '',
-        ref2_significance_level: '',
-        ref2_rigour_level: '',
-        ref2_originality_100: '',
-        ref2_significance_100: '',
-        ref2_rigour_100: '',
-        ref2_percent: '',
-        ref2_range_min: '',
-        ref2_range_max: '',
-        ref2_floor_score: '',
-        ref2_ceiling_score: '',
-        ref2_overall_confidence: 'very_low',
-        ref2_provisional_band_range: 'ungraded',
-        ref2_notes: ref2Take(raw, 400)
-      };
-      results.push(row);
-      item.ref2_gradeable = false;
-      item.ref2_ungraded_reason = row.ref2_ungraded_reason;
-      item.ref2_provisional_band_range = 'ungraded';
-      continue;
-    }
-
-    const gate = parsed.gate || {};
-    const gradeable = !!gate.gradeable &&
-      !!gate.is_complete_research_text &&
-      !!gate.is_academic_research_contribution;
-
-    if (!gradeable) {
-      const row = {
-        ...baseRow,
-        uoa_number: resolvedUoa.uoa_number,
-        uoa_name: resolvedUoa.uoa_name,
-        uoa_source: resolvedUoa.hasRefUoa ? 'stored' : 'unknown',
-        ref2_gradeable: false,
-        ref2_ungraded_reason: String(gate.reason_if_ungraded || 'model judged item ungradeable'),
-        ref2_output_type: String(parsed.output_type_confirmed || outputType),
-        ref2_originality_level: '',
-        ref2_significance_level: '',
-        ref2_rigour_level: '',
-        ref2_originality_100: '',
-        ref2_significance_100: '',
-        ref2_rigour_100: '',
-        ref2_percent: '',
-        ref2_range_min: '',
-        ref2_range_max: '',
-        ref2_floor_score: '',
-        ref2_ceiling_score: '',
-        ref2_overall_confidence: 'very_low',
-        ref2_provisional_band_range: 'ungraded',
-        ref2_notes: String(parsed.notes || '')
-      };
-      results.push(row);
-
-      item.ref2_gradeable = false;
-      item.ref2_ungraded_reason = row.ref2_ungraded_reason;
-      item.ref2_provisional_band_range = 'ungraded';
-
-      if (CALL_DELAY_MS > 0) await new Promise(r => setTimeout(r, CALL_DELAY_MS));
-      continue;
-    }
-
-    const critIn = parsed.criteria || {};
-    const norm = {
-      criteria: {
-        originality: ref2NormaliseCriterion(critIn.originality || {}),
-        significance: ref2NormaliseCriterion(critIn.significance || {}),
-        rigour: ref2NormaliseCriterion(critIn.rigour || {})
-      }
-    };
-
-    const agg = ref2AggregateResult(norm);
-
-    const range = parsed.range || {};
-    const row = {
-      ...baseRow,
-      uoa_number: resolvedUoa.uoa_number,
-      uoa_name: resolvedUoa.uoa_name,
-      uoa_source: resolvedUoa.hasRefUoa ? 'stored' : 'unknown',
-
-      ref2_gradeable: true,
-      ref2_ungraded_reason: '',
-      ref2_output_type: String(parsed.output_type_confirmed || outputType),
-
-      ref2_originality_level: norm.criteria.originality.highest_supported_level,
-      ref2_significance_level: norm.criteria.significance.highest_supported_level,
-      ref2_rigour_level: norm.criteria.rigour.highest_supported_level,
-
-      ref2_originality_confidence: norm.criteria.originality.confidence,
-      ref2_significance_confidence: norm.criteria.significance.confidence,
-      ref2_rigour_confidence: norm.criteria.rigour.confidence,
-
-      ref2_originality_100: agg.originality_100,
-      ref2_significance_100: agg.significance_100,
-      ref2_rigour_100: agg.rigour_100,
-      ref2_percent: agg.ref2_percent,
-
-      ref2_range_min: ref2ClampPct(range.likely_range_min),
-      ref2_range_max: ref2ClampPct(range.likely_range_max),
-      ref2_floor_score: ref2ClampPct(range.floor_score),
-      ref2_ceiling_score: ref2ClampPct(range.ceiling_score),
-      ref2_overall_confidence: String(range.overall_confidence || 'medium').toLowerCase(),
-
-      ref2_provisional_band_range: ref2BandFromRangeLabel(parsed.provisional_band_range),
-
-      ref2_contribution_claim: String(parsed?.evidence_profile?.contribution_claim || ''),
-      ref2_contribution_type: String(parsed?.evidence_profile?.contribution_type || ''),
-      ref2_evidence_originality: String(parsed?.evidence_profile?.evidence_originality || ''),
-      ref2_evidence_significance: String(parsed?.evidence_profile?.evidence_significance || ''),
-      ref2_evidence_rigour: String(parsed?.evidence_profile?.evidence_rigour || ''),
-      ref2_uncertainties: String(parsed?.evidence_profile?.uncertainties || ''),
-      ref2_notes: String(parsed?.notes || '')
-    };
-
-    results.push(row);
-
-    // Store back onto item without overwriting existing REF lens fields
-    item.ref2_gradeable = row.ref2_gradeable;
-    item.ref2_ungraded_reason = row.ref2_ungraded_reason;
-    item.ref2_output_type = row.ref2_output_type;
-    item.ref2_originality_level = row.ref2_originality_level;
-    item.ref2_significance_level = row.ref2_significance_level;
-    item.ref2_rigour_level = row.ref2_rigour_level;
-    item.ref2_originality_confidence = row.ref2_originality_confidence;
-    item.ref2_significance_confidence = row.ref2_significance_confidence;
-    item.ref2_rigour_confidence = row.ref2_rigour_confidence;
-    item.ref2_originality_100 = row.ref2_originality_100;
-    item.ref2_significance_100 = row.ref2_significance_100;
-    item.ref2_rigour_100 = row.ref2_rigour_100;
-    item.ref2_percent = row.ref2_percent;
-    item.ref2_range_min = row.ref2_range_min;
-    item.ref2_range_max = row.ref2_range_max;
-    item.ref2_floor_score = row.ref2_floor_score;
-    item.ref2_ceiling_score = row.ref2_ceiling_score;
-    item.ref2_overall_confidence = row.ref2_overall_confidence;
-    item.ref2_provisional_band_range = row.ref2_provisional_band_range;
-    item.ref2_contribution_claim = row.ref2_contribution_claim;
-    item.ref2_contribution_type = row.ref2_contribution_type;
-    item.ref2_evidence_originality = row.ref2_evidence_originality;
-    item.ref2_evidence_significance = row.ref2_evidence_significance;
-    item.ref2_evidence_rigour = row.ref2_evidence_rigour;
-    item.ref2_uncertainties = row.ref2_uncertainties;
-    item.ref2_notes = row.ref2_notes;
-
-    if (CALL_DELAY_MS > 0) {
-      await new Promise(r => setTimeout(r, CALL_DELAY_MS));
-    }
-  }
-
-  window.__refLens2Last = {
-    when: Date.now(),
-    count: results.length,
-    weights: { ...(window.REF2_WEIGHTS || {}) },
-    results
-  };
-
-  let md = '';
-  try {
-    md = ref2MarkdownSummary(results);
-    setSynthBodyText(md, 'ref_assessment_2.md');
-
-    const headers = [
-      'idx','title','authors','year','venue','doi',
-      'uoa_number','uoa_name','uoa_source',
-      'ref2_gradeable','ref2_ungraded_reason',
-      'ref2_output_type',
-      'ref2_originality_level','ref2_significance_level','ref2_rigour_level',
-      'ref2_originality_confidence','ref2_significance_confidence','ref2_rigour_confidence',
-      'ref2_originality_100','ref2_significance_100','ref2_rigour_100',
-      'ref2_percent',
-      'ref2_range_min','ref2_range_max',
-      'ref2_floor_score','ref2_ceiling_score',
-      'ref2_overall_confidence',
-      'ref2_provisional_band_range',
-      'ref2_contribution_claim','ref2_contribution_type',
-      'ref2_evidence_originality','ref2_evidence_significance','ref2_evidence_rigour',
-      'ref2_uncertainties','ref2_notes'
-    ];
-
-    const csv = toCSV(results, headers);
-    downloadTextFile('ref_assessment_2.csv', csv, 'text/csv');
-  } catch (e) {
-    console.warn('REF2 summary/export failed:', e);
-    md = `REF Assessment 2 completed for ${results.length} outputs, but summary/export failed: ${e.message || e}`;
-    setSynthBodyText(md, 'ref_assessment_2.txt');
-  }
-
-  setSynthProgressHtml(`<div>Done. REF assessment 2 processed ${results.length} outputs.</div>`);
-
-  try {
-    const title = `REF Assessment 2 (${results.length} outputs)`;
-    // use type 'ref' so it reuses your existing Lens_REF icon path
-    addAIFootprintFromItems('ref', docs, md, title);
-    if (typeof updateInfo === 'function') updateInfo();
-    if (typeof redraw === 'function') redraw();
-  } catch (e) {
-    console.warn('Footprint (REF assessment 2) failed:', e);
-  }
-}
-
 
 // ---- [ADD] REF summary stats helpers (GPA, distribution, Publication Power) ----
 function refOverallScoreFromRow(r) {
@@ -18227,18 +17388,577 @@ function buildViewerDetailsObject(i) {
   };
 }
 
+// ─────────────────────────────────────────────────────────────
+// Publish Reports: Overview
+// ─────────────────────────────────────────────────────────────
+
+function escHtml(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function fmtInt(n) {
+  const v = Number(n || 0);
+  return Number.isFinite(v) ? v.toLocaleString() : '0';
+}
+
+function publishTypeBucketForItem(item, i) {
+  const w = item?.openalex || {};
+  const t = String(
+    w.type ||
+    w.type_crossref ||
+    item?.type ||
+    item?.genre ||
+    ''
+  ).toLowerCase();
+
+  const venue =
+    String(
+      w.primary_location?.source?.type ||
+      w.host_venue?.type ||
+      ''
+    ).toLowerCase();
+
+  if (t.includes('book-chapter') || t.includes('book chapter') || t === 'chapter') return 'book_chapter';
+  if (t === 'book' || t.includes('monograph')) return 'book';
+  if (t.includes('proceedings-article') || t.includes('conference') || t.includes('proceeding')) return 'conference_paper';
+  if (t.includes('journal-article') || t.includes('article') || venue === 'journal') return 'journal_paper';
+  return 'other';
+}
+
+function getAbstractTextForItem(item) {
+  try {
+    if (item?.openalex_abstract && String(item.openalex_abstract).trim()) {
+      return String(item.openalex_abstract).trim();
+    }
+    if (typeof getAbstract === 'function') {
+      const txt = getAbstract(item?.openalex || {});
+      if (txt && String(txt).trim()) return String(txt).trim();
+    }
+  } catch {}
+  return '';
+}
+
+function getFingerprintTermsForNode(i) {
+  try {
+    if (typeof getTopicsForNodeIndex === 'function') {
+      const arr = getTopicsForNodeIndex(i) || [];
+      return arr.map(x => String(x || '').trim()).filter(Boolean);
+    }
+  } catch {}
+  const item = itemsData?.[i] || {};
+  const fallback = Array.isArray(item?.invisibleUniTopics) ? item.invisibleUniTopics : [];
+  return fallback.map(x => String(x || '').trim()).filter(Boolean);
+}
+
+function getPublishThresholdValue() {
+  const candidates = [
+    window.AUTHOR_FP_CLUSTER_THRESHOLD,
+    window.CLUSTER_SIM_THRESHOLD,
+    window.FINGERPRINT_CLUSTER_THRESHOLD,
+    window.THEMATIC_CLUSTER_THRESHOLD,
+    window.clusterThreshold
+  ];
+  for (const v of candidates) {
+    const num = Number(v);
+    if (Number.isFinite(num)) return num;
+  }
+  return null;
+}
+
+function computeOverviewReportData(opts = {}) {
+  const total = nodes.length | 0;
+
+  const years = [];
+  let abstracts = 0;
+  let fulltexts = 0;
+
+  const types = {
+    journal_paper: 0,
+    conference_paper: 0,
+    book: 0,
+    book_chapter: 0,
+    other: 0
+  };
+
+  for (let i = 0; i < total; i++) {
+    const item = itemsData?.[i] || {};
+    const w = item?.openalex || {};
+    const yr = Number(nodes?.[i]?.year ?? w.publication_year);
+    if (Number.isFinite(yr)) years.push(yr);
+
+    const bucket = publishTypeBucketForItem(item, i);
+    if (types[bucket] == null) types.other++;
+    else types[bucket]++;
+
+    if (getAbstractTextForItem(item)) abstracts++;
+    if ((item?.fulltext && String(item.fulltext).trim()) || nodes?.[i]?.hasFullText) fulltexts++;
+  }
+
+  const yearMin = years.length ? Math.min(...years) : null;
+  const yearMax = years.length ? Math.max(...years) : null;
+
+  const minClusterSize = getClusterMin();
+  const threshold = getPublishThresholdValue();
+
+  const clusterRows = [];
+  for (let cid = 0; cid < (clusterCount | 0); cid++) {
+    const size = (clusterSizesTotal?.[cid] ?? 0) | 0;
+    if (size < minClusterSize) continue;
+
+    const label = String(clusterLabels?.[cid] || '').trim() || `Cluster ${cid + 1}`;
+    const domainId = Array.isArray(fieldOfCluster) ? fieldOfCluster[cid] : -1;
+    const domainLabel =
+      (domainId != null && domainId >= 0)
+        ? (String(fieldLabels?.[domainId] || '').trim() || `Domain ${domainId + 1}`)
+        : '';
+
+    const members = [];
+    for (let i = 0; i < nodes.length; i++) {
+      if (clusterOf?.[i] === cid) members.push(i);
+    }
+
+    const fpCounts = new Map();
+    for (const i of members) {
+      const fps = Array.from(new Set(getFingerprintTermsForNode(i)));
+      for (const fp of fps) fpCounts.set(fp, (fpCounts.get(fp) || 0) + 1);
+    }
+
+    const topFingerprints = Array.from(fpCounts.entries())
+      .sort((a,b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, 6)
+      .map(([term, count]) => ({ term, count }));
+
+    clusterRows.push({
+      cid,
+      label,
+      size,
+      domainId,
+      domainLabel,
+      topFingerprints
+    });
+  }
+
+  clusterRows.sort((a,b) => b.size - a.size || a.cid - b.cid);
+
+  const domainRows = [];
+  for (let fid = 0; fid < (fieldCount | 0); fid++) {
+    const members = Array.isArray(fieldMembers?.[fid]) ? fieldMembers[fid].slice() : [];
+    if (!members.length) continue;
+
+    const label = String(fieldLabels?.[fid] || '').trim() || `Domain ${fid + 1}`;
+    const totalPubs = members.reduce((acc, cid) => acc + ((clusterSizesTotal?.[cid] ?? 0) | 0), 0);
+
+    domainRows.push({
+      fid,
+      label,
+      size: totalPubs,
+      clusters: members
+        .map(cid => ({
+          cid,
+          label: String(clusterLabels?.[cid] || '').trim() || `Cluster ${cid + 1}`,
+          size: (clusterSizesTotal?.[cid] ?? 0) | 0
+        }))
+        .filter(r => r.size >= minClusterSize)
+        .sort((a,b) => b.size - a.size || a.cid - b.cid)
+    });
+  }
+
+  domainRows.sort((a,b) => b.size - a.size || a.fid - b.fid);
+
+  return {
+    generatedAt: new Date().toISOString(),
+    title: String(opts.userTitle || '').trim(),
+    introText: String(opts.userText || '').trim(),
+    totalObjects: total,
+    types,
+    abstractCount: abstracts,
+    fulltextCount: fulltexts,
+    yearMin,
+    yearMax,
+    threshold,
+    minClusterSize,
+    clusterCountShown: clusterRows.length,
+    domainCountShown: domainRows.length,
+    clusterRows,
+    domainRows
+  };
+}
+
+function renderOverviewMapPNGDataUrl({
+  width = 1600,
+  height = 900,
+  bg = '#ffffff'
+} = {}) {
+  const cvs = document.createElement('canvas');
+  cvs.width = width;
+  cvs.height = height;
+  const ctx = cvs.getContext('2d');
+
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, width, height);
+
+  if (!nodes?.length) {
+    return cvs.toDataURL('image/png');
+  }
+
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (let i = 0; i < nodes.length; i++) {
+    const p = (typeof nodeDrawPos === 'function') ? nodeDrawPos(i) : nodes[i];
+    if (!p) continue;
+    minX = Math.min(minX, p.x);
+    minY = Math.min(minY, p.y);
+    maxX = Math.max(maxX, p.x);
+    maxY = Math.max(maxY, p.y);
+  }
+
+  if (!Number.isFinite(minX) || !Number.isFinite(minY)) {
+    return cvs.toDataURL('image/png');
+  }
+
+  const pad = 50;
+  const bw = Math.max(1, maxX - minX);
+  const bh = Math.max(1, maxY - minY);
+  const scale = Math.min((width - pad * 2) / bw, (height - pad * 2) / bh);
+
+  function tx(x) { return pad + (x - minX) * scale; }
+  function ty(y) { return pad + (y - minY) * scale; }
+
+  // light edges first
+  ctx.save();
+  ctx.globalAlpha = 0.10;
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = '#6b7280';
+  for (const e of (edges || [])) {
+    const s = e?.source | 0;
+    const t = e?.target | 0;
+    if (!nodes[s] || !nodes[t]) continue;
+    const a = (typeof nodeDrawPos === 'function') ? nodeDrawPos(s) : nodes[s];
+    const b = (typeof nodeDrawPos === 'function') ? nodeDrawPos(t) : nodes[t];
+    ctx.beginPath();
+    ctx.moveTo(tx(a.x), ty(a.y));
+    ctx.lineTo(tx(b.x), ty(b.y));
+    ctx.stroke();
+  }
+  ctx.restore();
+
+  // nodes
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i];
+    const p = (typeof nodeDrawPos === 'function') ? nodeDrawPos(i) : n;
+    const cid = clusterOf?.[i] ?? -1;
+    const col = (cid >= 0 && Array.isArray(clusterColors?.[cid]))
+      ? clusterColors[cid]
+      : [180, 180, 190];
+
+    const r = Math.max(2, Math.min(8, (n?.r || NODE_R || 4) * 0.55));
+
+    ctx.beginPath();
+    ctx.arc(tx(p.x), ty(p.y), r, 0, Math.PI * 2);
+    ctx.fillStyle = `rgb(${col[0]|0}, ${col[1]|0}, ${col[2]|0})`;
+    ctx.globalAlpha = 0.92;
+    ctx.fill();
+  }
+
+  return cvs.toDataURL('image/png');
+}
+
+function buildOverviewNarrative(data) {
+  const t = data.types || {};
+  const yrA = data.yearMin ?? 'unknown';
+  const yrB = data.yearMax ?? 'unknown';
+
+  const thresholdTxt = Number.isFinite(data.threshold)
+    ? data.threshold.toFixed(3)
+    : 'not recorded in this export';
+
+  return [
+    `This report covers ${fmtInt(data.totalObjects)} research objects including ${fmtInt(t.journal_paper)} journal papers, ${fmtInt(t.conference_paper)} conference papers, ${fmtInt(t.book)} books and ${fmtInt(t.book_chapter)} book chapters for the period from ${yrA} to ${yrB}.`,
+    `The report accesses abstracts for ${fmtInt(data.abstractCount)} research objects and full text for ${fmtInt(data.fulltextCount)} research objects captured via the OpenAlex-based workflow and local full-text cache where available.`,
+    `Each publication has been fingerprinted using AI-based analysis, and research objects have been clustered by authorship and fingerprint sharing. The active clustering threshold in this export is ${thresholdTxt}.`,
+    `Clusters are titled from publication abstracts and fingerprint signals. In total, this map contains ${fmtInt(data.clusterCountShown)} clusters above the current minimum cluster size threshold of ${fmtInt(data.minClusterSize)}.${data.domainCountShown ? ` ${fmtInt(data.domainCountShown)} higher-level domains are also available, defined as groups of clusters sharing broader contextual similarity.` : ''}`
+  ].join(' ');
+}
+
+function buildOverviewHtml(data, mapImgRelPath = 'assets/overview-map.png') {
+  const cards = [
+    ['Research Objects', fmtInt(data.totalObjects)],
+    ['Journal Papers', fmtInt(data.types?.journal_paper || 0)],
+    ['Conference Papers', fmtInt(data.types?.conference_paper || 0)],
+    ['Books', fmtInt(data.types?.book || 0)],
+    ['Book Chapters', fmtInt(data.types?.book_chapter || 0)],
+    ['Abstracts', fmtInt(data.abstractCount)],
+    ['Full Texts', fmtInt(data.fulltextCount)],
+    ['Clusters', fmtInt(data.clusterCountShown)],
+    ['Domains', fmtInt(data.domainCountShown)],
+    ['Period', `${data.yearMin ?? '–'}–${data.yearMax ?? '–'}`]
+  ];
+
+  const cardsHtml = cards.map(([k,v]) => `
+    <div class="card">
+      <div class="card-k">${escHtml(k)}</div>
+      <div class="card-v">${escHtml(v)}</div>
+    </div>
+  `).join('');
+
+  const domainsHtml = data.domainRows.length
+    ? data.domainRows.map(dom => `
+        <div class="domain-block">
+          <div class="domain-title">${escHtml(dom.label)} <span>${fmtInt(dom.size)} publications</span></div>
+          <ul class="cluster-tree">
+            ${dom.clusters.map(cl => `
+              <li>
+                <span class="cluster-name">${escHtml(cl.label)}</span>
+                <span class="cluster-size">${fmtInt(cl.size)}</span>
+              </li>
+            `).join('')}
+          </ul>
+        </div>
+      `).join('')
+    : `<div class="empty-note">No higher-level domains are active in this map.</div>`;
+
+  const clustersHtml = data.clusterRows.map(cl => `
+    <tr>
+      <td>${escHtml(cl.label)}</td>
+      <td>${fmtInt(cl.size)}</td>
+      <td>${escHtml(cl.domainLabel || '—')}</td>
+      <td>${escHtml((cl.topFingerprints || []).map(x => x.term).join(', ') || '—')}</td>
+    </tr>
+  `).join('');
+
+  const narrative = buildOverviewNarrative(data);
+  const customIntro = data.introText
+    ? `<div class="user-note">${escHtml(data.introText)}</div>`
+    : '';
+
+  const reportTitle = data.title || 'Overview Report';
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>${escHtml(reportTitle)}</title>
+<style>
+  :root{
+    --bg:#f4f6f8;
+    --panel:#ffffff;
+    --ink:#101828;
+    --muted:#667085;
+    --line:#d0d5dd;
+    --accent:#1f2937;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--ink);
+    font:14px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  .page{
+    max-width:1400px;
+    margin:0 auto;
+    padding:32px 28px 48px;
+  }
+  .hero{
+    display:flex;
+    align-items:flex-end;
+    justify-content:space-between;
+    gap:24px;
+    margin-bottom:22px;
+  }
+  .hero h1{
+    margin:0;
+    font-size:30px;
+    line-height:1.1;
+    letter-spacing:-0.02em;
+  }
+  .hero .meta{
+    color:var(--muted);
+    font-size:12px;
+    margin-top:8px;
+  }
+  .user-note,.narrative,.panel{
+    background:var(--panel);
+    border:1px solid var(--line);
+    box-shadow:0 1px 2px rgba(16,24,40,.04);
+  }
+  .user-note{
+    padding:14px 16px;
+    margin:0 0 18px;
+    color:#344054;
+  }
+  .cards{
+    display:grid;
+    grid-template-columns:repeat(5,minmax(0,1fr));
+    gap:14px;
+    margin:0 0 18px;
+  }
+  .card{
+    background:var(--panel);
+    border:1px solid var(--line);
+    padding:14px 16px;
+    min-height:92px;
+    display:flex;
+    flex-direction:column;
+    justify-content:space-between;
+  }
+  .card-k{
+    color:var(--muted);
+    font-size:12px;
+    text-transform:uppercase;
+    letter-spacing:.04em;
+  }
+  .card-v{
+    font-size:28px;
+    font-weight:700;
+    letter-spacing:-.02em;
+  }
+  .narrative{
+    padding:18px 20px;
+    margin-bottom:18px;
+    font-size:15px;
+  }
+  .grid{
+    display:grid;
+    grid-template-columns:1.15fr .85fr;
+    gap:18px;
+    align-items:start;
+  }
+  .panel{
+    padding:18px;
+  }
+  .panel h2{
+    margin:0 0 14px;
+    font-size:16px;
+    letter-spacing:-.01em;
+  }
+  .map-wrap img{
+    width:100%;
+    height:auto;
+    display:block;
+    border:1px solid var(--line);
+    background:#fff;
+  }
+  .cluster-table{
+    width:100%;
+    border-collapse:collapse;
+  }
+  .cluster-table th,.cluster-table td{
+    padding:10px 8px;
+    border-top:1px solid var(--line);
+    text-align:left;
+    vertical-align:top;
+  }
+  .cluster-table th{
+    color:var(--muted);
+    font-size:12px;
+    text-transform:uppercase;
+    letter-spacing:.04em;
+    border-top:none;
+  }
+  .domain-block{
+    padding:0 0 14px;
+    border-bottom:1px solid var(--line);
+    margin-bottom:14px;
+  }
+  .domain-block:last-child{border-bottom:none;margin-bottom:0;padding-bottom:0}
+  .domain-title{
+    display:flex;
+    justify-content:space-between;
+    gap:16px;
+    font-weight:700;
+    margin-bottom:8px;
+  }
+  .domain-title span{
+    color:var(--muted);
+    font-weight:600;
+    font-size:12px;
+  }
+  .cluster-tree{
+    list-style:none;
+    margin:0;
+    padding:0;
+  }
+  .cluster-tree li{
+    display:flex;
+    justify-content:space-between;
+    gap:16px;
+    padding:6px 0;
+    border-top:1px dashed rgba(16,24,40,.08);
+  }
+  .cluster-tree li:first-child{border-top:none}
+  .cluster-name{font-weight:500}
+  .cluster-size{color:var(--muted)}
+  .empty-note{color:var(--muted)}
+  @media (max-width: 1100px){
+    .cards{grid-template-columns:repeat(2,minmax(0,1fr))}
+    .grid{grid-template-columns:1fr}
+  }
+</style>
+</head>
+<body>
+  <div class="page">
+    <div class="hero">
+      <div>
+        <h1>${escHtml(reportTitle)}</h1>
+        <div class="meta">Generated ${escHtml(new Date(data.generatedAt).toLocaleString())}</div>
+      </div>
+    </div>
+
+    ${customIntro}
+
+    <div class="cards">${cardsHtml}</div>
+
+    <div class="narrative">${escHtml(narrative)}</div>
+
+    <div class="grid">
+      <section class="panel map-wrap">
+        <h2>Cluster Map Overview</h2>
+        <img src="${escHtml(mapImgRelPath)}" alt="Overview cluster map" />
+      </section>
+
+      <section class="panel">
+        <h2>Domains and Clusters</h2>
+        ${domainsHtml}
+      </section>
+    </div>
+
+    <section class="panel" style="margin-top:18px;">
+      <h2>Cluster Summary</h2>
+      <table class="cluster-table">
+        <thead>
+          <tr>
+            <th>Cluster</th>
+            <th>Size</th>
+            <th>Domain</th>
+            <th>Top Fingerprints</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${clustersHtml}
+        </tbody>
+      </table>
+    </section>
+  </div>
+</body>
+</html>`;
+}
+
 
 async function exportViewerPackageZip(opts = {}) {
-
   projectMeta = {
-  title: (opts.userTitle || '').toString(),
-  text:  (opts.userText  || '').toString(),
-  created: new Date().toISOString()
-};
-if (infoPanel?.setCanvasOverview) { infoPanel.setCanvasOverview(); infoPanel.show(); }
-
+    title: (opts.userTitle || '').toString(),
+    text:  (opts.userText  || '').toString(),
+    created: new Date().toISOString()
+  };
+  if (infoPanel?.setCanvasOverview) { infoPanel.setCanvasOverview(); infoPanel.show(); }
 
   if (typeof JSZip === 'undefined') { showToast?.('JSZip not found'); return; }
+
   showLoading?.('Preparing viewer package…', 0.05);
   const zip = new JSZip();
 
@@ -18246,26 +17966,36 @@ if (infoPanel?.setCanvasOverview) { infoPanel.setCanvasOverview(); infoPanel.sho
   const dataDir     = base + 'data/';
   const detailsDir  = dataDir + 'details/';
   const aiDir       = dataDir + 'ai/';
+  const reportsDir  = base + 'reports/';
+  const reportAssetsDir = reportsDir + 'assets/';
 
   // 1) Manifest
-  const indexObj = buildViewerIndexObject({ userTitle: opts.userTitle || '', userText: opts.userText || '' });
+  const indexObj = buildViewerIndexObject({
+    userTitle: opts.userTitle || '',
+    userText: opts.userText || ''
+  });
   zip.file(dataDir + 'index.json', JSON.stringify(indexObj));
 
-  // 2) Details shards (one per node)
-  for (let i=0;i<nodes.length;i++){
+  // 2) Details shards
+  for (let i = 0; i < nodes.length; i++) {
     const d = buildViewerDetailsObject(i);
     zip.file(detailsDir + `${d.id}.json`, JSON.stringify(d));
-    if ((i+1)%500===0) setLoadingProgress?.(0.05 + 0.40*((i+1)/nodes.length), `Writing details… ${Math.round(100*(i+1)/nodes.length)}%`);
+    if ((i + 1) % 500 === 0) {
+      setLoadingProgress?.(
+        0.05 + 0.40 * ((i + 1) / Math.max(1, nodes.length)),
+        `Writing details… ${Math.round(100 * (i + 1) / Math.max(1, nodes.length))}%`
+      );
+    }
   }
 
   // 3) AI shards
   const ai = (window.aiFootprints || []);
-  for (let j=0;j<ai.length;j++){
+  for (let j = 0; j < ai.length; j++) {
     const f = ai[j] || {};
     const id = `A${j+1}`;
     const shard = {
       id,
-      title: f.aiTitle || f.title || `AI ${j+1}`,
+      title: f.aiTitle || f.title || `AI ${j + 1}`,
       created: new Date(f.createdAt || Date.now()).toISOString(),
       body: String(f.aiContent || ''),
       sources: Array.isArray(f.nodeIds)
@@ -18275,22 +18005,43 @@ if (infoPanel?.setCanvasOverview) { infoPanel.setCanvasOverview(); infoPanel.sho
     zip.file(aiDir + `${id}.json`, JSON.stringify(shard));
   }
 
-  // 4) Pack + download
-setLoadingProgress?.(0.90, 'Compressing…');
-const blob = await zip.generateAsync({ type:'blob', compression:'DEFLATE' });
-const url = URL.createObjectURL(blob);
-const a = document.createElement('a');
+  // 4) Reports
+  const wantOverview = !!(opts?.reports?.overview);
 
-// derive filename: use provided name or a default
-const fname = String((opts && opts.fileName) ? opts.fileName : `viewer-package-${Date.now()}.zip`).trim() || `viewer-package-${Date.now()}.zip`;
+  if (wantOverview) {
+    setLoadingProgress?.(0.72, 'Building overview report…');
 
-a.href = url;
-a.download = fname;
-a.click();
+    const reportData = computeOverviewReportData({
+      userTitle: opts.userTitle || 'Overview Report',
+      userText: opts.userText || ''
+    });
 
-setTimeout(() => URL.revokeObjectURL(url), 20000);
-hideLoading?.();
-showToast?.('Viewer package exported.');
+    const mapDataUrl = renderOverviewMapPNGDataUrl({ width: 1600, height: 900, bg: '#ffffff' });
+    const base64Png = String(mapDataUrl).split(',')[1] || '';
+
+    const overviewHtml = buildOverviewHtml(reportData, 'assets/overview-map.png');
+
+    zip.file(reportsDir + 'overview.json', JSON.stringify(reportData, null, 2));
+    zip.file(reportsDir + 'overview.html', overviewHtml);
+    zip.file(reportAssetsDir + 'overview-map.png', base64Png, { base64: true });
+  }
+
+  // 5) Pack + download
+  setLoadingProgress?.(0.90, 'Compressing…');
+  const blob = await zip.generateAsync({ type:'blob', compression:'DEFLATE' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+
+  const fname = String((opts && opts.fileName) ? opts.fileName : `viewer-package-${Date.now()}.zip`).trim()
+    || `viewer-package-${Date.now()}.zip`;
+
+  a.href = url;
+  a.download = fname;
+  a.click();
+
+  setTimeout(() => URL.revokeObjectURL(url), 20000);
+  hideLoading?.();
+  showToast?.(wantOverview ? 'Viewer package + Overview report exported.' : 'Viewer package exported.');
 }
 // Map labels across reclusterings by overlap rather than index
 
@@ -18438,8 +18189,8 @@ function openPublishDialog(onSubmit) {
   // modal
   const box = document.createElement('div');
   Object.assign(box.style, {
-    position:'fixed', left:'50%', top:'20%', transform:'translate(-50%, 0)',
-    width:'min(520px, 90vw)', background:'#111', color:'#fff',
+    position:'fixed', left:'50%', top:'14%', transform:'translate(-50%, 0)',
+    width:'min(560px, 92vw)', background:'#111', color:'#fff',
     border:'1px solid rgba(255,255,255,0.2)', borderRadius:'12px',
     boxShadow:'0 12px 40px rgba(0,0,0,0.5)', padding:'16px', zIndex:'10100',
     font:'13px/1.4 system-ui, -apple-system, Segoe UI, Roboto'
@@ -18460,9 +18211,17 @@ function openPublishDialog(onSubmit) {
     <label style="display:block; margin:10px 0 4px;">Text</label>
     <textarea id="pub_text" rows="5" placeholder="Short description shown when the package is opened…" style="width:100%; padding:8px; border-radius:8px; border:1px solid rgba(255,255,255,0.25); background:#000; color:#fff; resize:vertical"></textarea>
 
+    <label style="display:block; margin:10px 0 4px;">Reports</label>
+    <div style="display:flex; gap:12px; align-items:center; padding:10px 12px; border-radius:8px; border:1px solid rgba(255,255,255,0.18); background:rgba(255,255,255,0.03);">
+      <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+        <input id="pub_report_overview" type="checkbox" checked />
+        <span>Include Overview dashboard report</span>
+      </label>
+    </div>
+
     <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:14px;">
       <button id="pub_cancel" style="padding:8px 12px; border-radius:8px; background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.2); color:#fff; cursor:pointer;">Cancel</button>
-      <button id="pub_ok"     style="padding:8px 12px; border-radius:8px; background:#2a7; border:1px solid rgba(255,255,255,0.2); color:#000; cursor:pointer; font-weight:700;">Publish</button>
+      <button id="pub_ok" style="padding:8px 12px; border-radius:8px; background:#2a7; border:1px solid rgba(255,255,255,0.2); color:#000; cursor:pointer; font-weight:700;">Publish</button>
     </div>
   `;
   document.body.appendChild(box);
@@ -18474,8 +18233,13 @@ function openPublishDialog(onSubmit) {
     const name  = String(box.querySelector('#pub_name').value || '').trim() || defaultZip;
     const title = String(box.querySelector('#pub_title').value || '').trim();
     const text  = String(box.querySelector('#pub_text').value || '').trim();
+
+    const reports = {
+      overview: !!box.querySelector('#pub_report_overview')?.checked
+    };
+
     close();
-    if (typeof onSubmit === 'function') onSubmit({ name, title, text });
+    if (typeof onSubmit === 'function') onSubmit({ name, title, text, reports });
   });
 }
 // Build the same stable key that toggleDimensionTool uses
