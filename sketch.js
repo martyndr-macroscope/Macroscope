@@ -4419,7 +4419,7 @@ setCanvasOverview() {
 }
 
 
- _renderDimensionPanel(k) {
+_renderDimensionPanel(k) {
   const d = dimTools?.[k];
   if (!d) { this.hide(); return; }
 
@@ -4439,6 +4439,154 @@ setCanvasOverview() {
     ? `<div style="margin:10px 0 12px 0">${d.summaryHtml}</div>`
     : '';
 
+  // --- NEW: aggregated author summary card ----------------------------------
+  let authorMetaHtml = '';
+
+  if (String(d.type || '').toLowerCase() === 'authors') {
+    const dimLabelNorm = String(d.label || d.key || '')
+      .trim()
+      .toLowerCase();
+
+    const nodeList = Array.isArray(d.nodes)
+      ? d.nodes
+      : (d.nodes && typeof d.nodes.values === 'function')
+        ? Array.from(d.nodes.values())
+        : [];
+
+    const posCounts = { first: 0, middle: 0, last: 0, unknown: 0 };
+    const instCounts = new Map();      // inst name -> count
+    const rawAffCounts = new Map();    // raw affiliation string -> count
+    const sourcePapers = [];           // titles where author matched
+    let matchedPaperCount = 0;
+
+    function bump(map, key, inc = 1) {
+      const k = String(key || '').trim();
+      if (!k) return;
+      map.set(k, (map.get(k) || 0) + inc);
+    }
+
+    function topEntries(map, n = 5) {
+      return Array.from(map.entries())
+        .sort((a, b) => {
+          if (b[1] !== a[1]) return b[1] - a[1];
+          return String(a[0]).localeCompare(String(b[0]));
+        })
+        .slice(0, n);
+    }
+
+    for (const ni of nodeList) {
+      const item = itemsData?.[ni];
+      const w = item?.openalex || item?.openAlex || null;
+      const auths = Array.isArray(w?.authorships) ? w.authorships : [];
+      if (!auths.length) continue;
+
+      const hit = auths.find(a => {
+        const nm = String(a?.author?.display_name || '').trim().toLowerCase();
+        return nm && nm === dimLabelNorm;
+      });
+
+      if (!hit) continue;
+
+      matchedPaperCount++;
+
+      const pos = String(hit.author_position || '').trim().toLowerCase();
+      if (pos === 'first' || pos === 'middle' || pos === 'last') {
+        posCounts[pos]++;
+      } else {
+        posCounts.unknown++;
+      }
+
+      const insts = Array.isArray(hit.institutions) ? hit.institutions : [];
+      if (insts.length) {
+        for (const inst of insts) {
+          const nm = inst?.display_name || inst?.name || '';
+          bump(instCounts, nm);
+        }
+      }
+
+      const rawAff = String(hit.raw_affiliation_string || '').trim();
+      if (rawAff) bump(rawAffCounts, rawAff);
+
+      const paperTitle = String(w?.display_name || w?.title || item?.title || '').trim();
+      if (paperTitle) sourcePapers.push(paperTitle);
+    }
+
+    if (matchedPaperCount > 0) {
+      const totalKnownPos = posCounts.first + posCounts.middle + posCounts.last + posCounts.unknown;
+
+      const posSummary = [
+        posCounts.first  ? `First: ${posCounts.first}` : '',
+        posCounts.middle ? `Middle: ${posCounts.middle}` : '',
+        posCounts.last   ? `Last: ${posCounts.last}` : '',
+        posCounts.unknown ? `Unknown: ${posCounts.unknown}` : ''
+      ].filter(Boolean).join(' · ') || 'No position data';
+
+      const topInsts = topEntries(instCounts, 6);
+      const topRawAffs = topEntries(rawAffCounts, 4);
+
+      const primaryAffiliation = topInsts.length
+        ? topInsts[0][0]
+        : (topRawAffs.length ? topRawAffs[0][0] : 'No affiliation found');
+
+      const affiliationHtml = topInsts.length
+        ? topInsts.map(([name, count]) => `
+            <div style="margin:0 0 4px 0">
+              ${safe(name)}
+              <span style="opacity:.65">(${count})</span>
+            </div>
+          `).join('')
+        : topRawAffs.length
+          ? topRawAffs.map(([name, count]) => `
+              <div style="margin:0 0 4px 0">
+                ${safe(name)}
+                <span style="opacity:.65">(${count})</span>
+              </div>
+            `).join('')
+          : `<div style="opacity:.8">No affiliation found</div>`;
+
+      const samplePapersHtml = sourcePapers.slice(0, 3).map(t => `
+        <div style="margin:0 0 4px 0">${safe(t)}</div>
+      `).join('');
+
+      authorMetaHtml = `
+        <div style="margin:10px 0 12px 0;padding:10px;border:1px solid rgba(255,255,255,0.14);border-radius:8px;background:rgba(255,255,255,0.04)">
+          <div style="font-weight:600;font-size:13px;margin-bottom:8px;">Author Summary</div>
+
+          <div style="display:grid;grid-template-columns:auto 1fr;gap:6px 10px;font-size:12px;margin-bottom:10px;">
+            <div style="opacity:.7">Matched papers</div>
+            <div>${matchedPaperCount}</div>
+
+            <div style="opacity:.7">Primary affiliation</div>
+            <div>${safe(primaryAffiliation)}</div>
+
+            <div style="opacity:.7">Author position</div>
+            <div>${safe(posSummary)}</div>
+          </div>
+
+          <div style="font-weight:600;font-size:12px;margin:8px 0 6px;">Affiliations</div>
+          <div style="font-size:12px;line-height:1.35;margin-bottom:10px;">
+            ${affiliationHtml}
+          </div>
+
+          ${samplePapersHtml ? `
+            <div style="font-weight:600;font-size:12px;margin:8px 0 6px;">Example papers</div>
+            <div style="font-size:12px;line-height:1.35;">
+              ${samplePapersHtml}
+            </div>
+          ` : ''}
+        </div>
+      `;
+    } else {
+      authorMetaHtml = `
+        <div style="margin:10px 0 12px 0;padding:10px;border:1px solid rgba(255,255,255,0.14);border-radius:8px;background:rgba(255,255,255,0.04)">
+          <div style="font-weight:600;font-size:13px;margin-bottom:6px;">Author Summary</div>
+          <div style="font-size:12px;opacity:.8">No affiliation metadata found for this author in the current items.</div>
+        </div>
+      `;
+    }
+  }
+  // -------------------------------------------------------------------------
+
   this.div.html(`
     <div style="font-weight:600;font-size:16px;margin-bottom:6px">${safe(title)}</div>
 
@@ -4448,6 +4596,7 @@ setCanvasOverview() {
     </div>
 
     ${extraSummary}
+    ${authorMetaHtml}
 
     <div style="font-weight:600;font-size:13px;margin:6px 0 4px;">Power</div>
     <input id="${powId}" type="range" min="0" max="100" step="1" value="${power}"
@@ -4481,90 +4630,6 @@ setCanvasOverview() {
     delEl.addEventListener('click', () => {
       deleteDimension?.(k);
     });
-  }
-
-  // --- extra content for CLUSTER dimensions ---
-  if (d.type === 'clusters') {
-    const clusterHtml = buildThematicClusterInfoHTML(d);
-    if (clusterHtml) {
-      this.div.elt.insertAdjacentHTML('beforeend', clusterHtml);
-    }
-  }
-
-  // --- extra content for AI dimensions ---
-  if (d.type === 'ai') {
-    const bodyId = `aiBody_${Date.now()}`;
-    const dlId   = `aiDL_${Date.now()}`;
-    const fullId = `aiOpen_${Date.now()}`;
-    const when   = d.aiCreatedAt ? new Date(d.aiCreatedAt).toLocaleString() : '';
-    const html = `
-      <div style="margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.12)">
-        <div style="font-weight:600;font-size:13px;margin:0 0 4px;">Summary${when ? ` <span style="opacity:.6;font-weight:400">• ${when}</span>` : ''}</div>
-        <div id="${bodyId}" style="white-space:pre-wrap;font-size:12px;line-height:1.5;
-             max-height:200px;overflow:auto;border:1px solid rgba(255,255,255,0.12);
-             background:rgba(255,255,255,0.03);padding:8px;border-radius:6px;"></div>
-        <div style="display:flex;gap:8px;margin-top:8px;">
-          <button id="${dlId}"   style="background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.2);color:#fff;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:12px">Download .md</button>
-          <button id="${fullId}" style="background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.2);color:#fff;padding:6px 10px;border-radius:6px;cursor:pointer;font-size:12px">Open full view</button>
-        </div>
-      </div>
-    `;
-    this.div.elt.insertAdjacentHTML('beforeend', html);
-
-    const bodyEl = document.getElementById(bodyId);
-    if (bodyEl) {
-      ensureReviewStyles();
-      bodyEl.innerHTML = `<div class="review-container">${formatMarkdownToHTML(String(d.aiContent||''))}</div>`;
-    }
-
-    if (bodyEl && (!d.aiContent || !d.aiContent.trim()) && REMOTE_AI_BASE && d.summaryRef) {
-      (async () => {
-        try {
-          const r = await fetch(`${REMOTE_AI_BASE}${d.summaryRef}`);
-          if (r.ok) {
-            const j = await r.json();
-            d.aiContent = String(j.body || '');
-            ensureReviewStyles();
-            bodyEl.innerHTML = `<div class="review-container">${formatMarkdownToHTML(d.aiContent)}</div>`;
-          }
-        } catch {}
-      })();
-    }
-
-    const dlEl = document.getElementById(dlId);
-    if (dlEl) {
-      captureUI?.(dlEl);
-      dlEl.addEventListener('click', () => {
-        const blob = new Blob([d.aiContent || ''], { type: 'text/markdown' });
-        const url  = URL.createObjectURL(blob);
-        const a    = document.createElement('a');
-        const fname = `${(d.aiTitle || 'ai')}.md`;
-        a.href = url; a.download = fname; a.click();
-        setTimeout(() => URL.revokeObjectURL(url), 2500);
-      });
-    }
-
-    const fullEl = document.getElementById(fullId);
-    if (fullEl) {
-      captureUI?.(fullEl);
-      fullEl.addEventListener('click', async () => {
-        const heading = `${d.aiTitle || 'AI summary'}${when ? ' • ' + when : ''}`;
-        openSynthPanel?.(heading);
-
-        if ((!d.aiContent || !d.aiContent.trim()) && REMOTE_AI_BASE && d.summaryRef) {
-          try {
-            const r = await fetch(`${REMOTE_AI_BASE}${d.summaryRef}`);
-            if (r.ok) {
-              const j = await r.json();
-              d.aiContent = String(j.body || '');
-              ensureReviewStyles();
-              bodyEl.innerHTML = `<div class="review-container">${formatMarkdownToHTML(d.aiContent)}</div>`;
-            }
-          } catch {}
-        }
-        setSynthBodyText?.(d.aiContent || '', `${(d.aiTitle || 'ai')}.md`);
-      });
-    }
   }
 }
 
