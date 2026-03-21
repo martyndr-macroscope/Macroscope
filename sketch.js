@@ -18894,42 +18894,68 @@ function compactOA(work) {
          0)
       );
 
-  // NEW: normalise DOI once
   const __doi = (a.doi || (a.ids && a.ids.doi)) ? String(a.doi || a.ids.doi).trim() : null;
+
+  // NEW: keep a lightweight but structured authorships array
+  const compactAuthorships = Array.isArray(a.authorships)
+    ? a.authorships.map(x => ({
+        author_position: x?.author_position || '',
+        raw_affiliation_string: x?.raw_affiliation_string || '',
+        author: x?.author ? {
+          id: x.author.id || null,
+          display_name: x.author.display_name || ''
+        } : null,
+        institutions: Array.isArray(x?.institutions)
+          ? x.institutions.map(ii => ({
+              id: ii?.id || null,
+              display_name: ii?.display_name || '',
+              country_code: ii?.country_code || '',
+              type: ii?.type || ''
+            }))
+          : []
+      }))
+    : [];
 
   return {
     id: a.id || null,
     display_name: a.display_name || a.title || '',
     cited_by_count: Number(a.cited_by_count || 0),
-    publication_year: Number(a.publication_year || (a.from_publication_date||'').slice(0,4)) || null,
+    publication_year: Number(a.publication_year || (a.from_publication_date || '').slice(0, 4)) || null,
     open_access: { is_oa: !!(a.open_access && a.open_access.is_oa) },
-    // --- keep small, but DO include DOI so the Info panel + caching can use it
-    doi: __doi,                        // ← NEW (flat DOI for your UI)
-    ids: __doi ? { doi: __doi } : {},  // ← NEW (minimal compatibility for any callers)
+
+    doi: __doi,
+    ids: __doi ? { doi: __doi } : {},
+
     concepts: Array.isArray(a.concepts)
       ? a.concepts.slice(0, 6).map(c => ({ display_name: c?.display_name, id: c?.id }))
       : [],
-    authors: Array.isArray(a.authorships)
+
+    // KEEP the rich compact authorships for author metadata panels
+    authorships: compactAuthorships,
+
+    // Keep existing flat fallbacks for older code paths
+    authors: compactAuthorships.length
       ? Array.from(new Set(
-          a.authorships.map(x => x?.author?.display_name).filter(Boolean)
-        ))
-      : [],
-    authorship_names: Array.isArray(a.authorships)
-      ? Array.from(new Set(
-          a.authorships.map(x => x?.author?.display_name).filter(Boolean)
+          compactAuthorships.map(x => x?.author?.display_name).filter(Boolean)
         ))
       : [],
 
-    institutions: Array.isArray(a.authorships)
+    authorship_names: compactAuthorships.length
       ? Array.from(new Set(
-          a.authorships.flatMap(x =>
+          compactAuthorships.map(x => x?.author?.display_name).filter(Boolean)
+        ))
+      : [],
+
+    institutions: compactAuthorships.length
+      ? Array.from(new Set(
+          compactAuthorships.flatMap(x =>
             Array.isArray(x?.institutions)
               ? x.institutions.map(ii => ii?.display_name).filter(Boolean)
               : []
           )
         ))
       : [],
-      // compact venue for UI fallbacks
+
     venue_name: inferVenueNameFromWork(a, ''),
     abstract: abs || '',
     refsCount
