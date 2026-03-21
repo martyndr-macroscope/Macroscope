@@ -4570,6 +4570,41 @@ const refScore = item?.ref_star ?? null;
   }
 
   const gpa = refN > 0 ? (refTotal / refN) : null;
+let refHtml = '';
+
+if (refN > 0) {
+  const maxCount = Math.max(...Object.values(refCounts), 1);
+
+  const bar = (score, color) => {
+    const v = refCounts[score] || 0;
+    const w = (v / maxCount) * 100;
+    return `
+      <div style="display:flex;align-items:center;margin-bottom:4px;">
+        <div style="width:16px;font-size:11px;opacity:.7">${score}★</div>
+        <div style="flex:1;height:8px;background:rgba(255,255,255,0.08);margin:0 6px;border-radius:4px;overflow:hidden;">
+          <div style="width:${w}%;height:100%;background:${color};"></div>
+        </div>
+        <div style="font-size:11px;opacity:.7;width:18px;text-align:right;">${v}</div>
+      </div>
+    `;
+  };
+
+  refHtml = `
+    <div style="margin-top:10px;">
+      <div style="font-weight:600;font-size:12px;margin-bottom:6px;">REF Assessment</div>
+      <div style="font-size:12px;margin-bottom:6px;">
+        ${refN} / ${matchedPaperCount} assessed
+        ${gpa != null ? ` · GPA: ${gpa.toFixed(2)}` : ''}
+      </div>
+
+      ${bar(4, '#ff4d4d')}
+      ${bar(3, '#ff9933')}
+      ${bar(2, '#ffd633')}
+      ${bar(1, '#66cc66')}
+    </div>
+  `;
+}
+
       const totalKnownPos = posCounts.first + posCounts.middle + posCounts.last + posCounts.unknown;
 
       const posSummary = [
@@ -10757,7 +10792,7 @@ function rebuildRefLensFromStoredScores(confMin = 0.5) {
     const it = itemsData[idx];
     if (!it) continue;
     if (it.ref_percent == null) continue;
-     s
+     
     const confidence = Number(it.ref_confidence ?? 0);
     const uoa_number = it.ref_uoa_number;
     const pct = Number(it.ref_percent ?? 0);
