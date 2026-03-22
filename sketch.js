@@ -10346,6 +10346,100 @@ function deepCloneJsonSafe(v, fallback = null) {
   }
 }
 
+function serializeState() {
+  const nodePos = nodes.map(n => ({ x: n.x, y: n.y, r: n.r || 3 }));
+
+  const dims = (dimTools || []).map(d => {
+    if (!d) return null;
+    return {
+      type: d.type,
+      key: d.key,
+      label: d.label,
+      cid: (d.cid != null ? d.cid : null),
+      power: Number.isFinite(+d.power) ? +d.power : 0,
+      x: d.x,
+      y: d.y,
+      color: d.color || null,
+      nodes: Array.from(d.nodes || []),
+
+      ...(d.type === 'ai' && {
+        aiSig: d.aiSig || d.aiSignature || null,
+        aiTitle: d.aiTitle || d.label || null,
+        aiContent: d.aiContent || '',
+        aiCreatedAt: d.aiCreatedAt || null,
+        summaryRef: d.summaryRef || null
+      })
+    };
+  });
+
+  const cl = {
+    clusterOf: (clusterOf && clusterOf.length === nodes.length) ? Array.from(clusterOf) : null,
+    labels: Array.isArray(clusterLabels) ? Array.from(clusterLabels) : null,
+    colors: Array.isArray(clusterColors) ? clusterColors.map(c => Array.from(c)) : null,
+    sizesTotal: Array.isArray(clusterSizesTotal) ? Array.from(clusterSizesTotal) : null
+  };
+
+  const filt = {
+    degThreshold,
+    yearLo,
+    yearHi,
+    extCitesThreshold,
+    clusterSizeThreshold,
+    persistentFieldThreshold
+  };
+
+  const camState = { x: cam.x, y: cam.y, scale: cam.scale };
+
+  const visibility = {
+    visAllPubs,
+    visDims,
+    visAIDims,
+    visEdges,
+    visConceptMap,
+    nodeSizeScale,
+    fulltextSizeScale
+  };
+
+  const overlays = {
+    ovAbstracts,
+    ovOpenAccess,
+    ovClusterColors,
+    ovClusterLabels,
+    ovFieldLabels,
+    ovRefAssessment,
+    semanticZoomEnabled
+  };
+
+  const obj = {
+    meta: {
+      format: 'domain-viz-save-v2',
+      exported_at: new Date().toISOString()
+    },
+    items: itemsData,
+    edges: edges,
+    nodePositions: nodePos,
+    dimensions: dims,
+    clusters: cl,
+    lenses: deepCloneJsonSafe(lenses, {}),
+    filters: filt,
+    camera: camState,
+    aiFootprints: deepCloneJsonSafe(aiFootprints, []),
+    visibility,
+    overlays,
+
+    // CRITICAL (your missing piece)
+    viewMode: window.viewMode || 'citation',
+    viewCache: serializeViewCache(),
+
+    persistentFieldState: deepCloneJsonSafe(persistentFieldState, null),
+    aiFieldsState: deepCloneJsonSafe(aiFieldsState, null),
+    conceptState: deepCloneJsonSafe(conceptMapState, null)
+  };
+
+  return obj;
+}
+
+
 function serializeViewCache() {
   const vc = window.__viewCache || {};
   const out = {};
@@ -14484,11 +14578,31 @@ function mergeWorkIntoItem(idx, work) {
   if (!it.openalex || !it.openalex.id || isCompactOpenAlex(it.openalex)) {
     it.openalex = { ...work };
   } else {
-    const fields = [
-      'authorships','host_venue','primary_location','concepts','biblio','open_access',
-      'referenced_works','referencedWorks','referenced','referenced_works_count','ids','doi','id',
-      'display_name','title','publication_year','from_publication_date','cited_by_count'
-    ];
+const fields = [
+  'authorships',
+  'host_venue',
+  'primary_location',
+  'concepts',
+  'biblio',
+  'open_access',
+  'referenced_works',
+  'referencedWorks',
+  'referenced',
+  'referenced_works_count',
+  'ids',
+  'doi',
+  'id',
+  'display_name',
+  'title',
+  'publication_year',
+  'from_publication_date',
+  'cited_by_count',
+
+  // ADD publication type metadata
+  'type',
+  'type_crossref',
+  'genre'
+];
     for (const k of fields) if (work[k] != null) it.openalex[k] = work[k];
   }
 
@@ -14500,6 +14614,33 @@ function mergeWorkIntoItem(idx, work) {
 
   // Keep openalex subobject coherent (optional)
   (it.openalex ||= {}).cited_by_count = it.cbc|0;
+// Keep type metadata coherent for reports / save files
+if (work.type != null) it.openalex.type = work.type;
+if (work.type_crossref != null) it.openalex.type_crossref = work.type_crossref;
+if (work.genre != null) it.openalex.genre = work.genre;
+if (work.from_publication_date != null) it.openalex.from_publication_date = work.from_publication_date;
+
+// Keep minimal source typing even when we are not replacing the whole object
+if (work?.primary_location?.source) {
+  it.openalex.primary_location ||= {};
+  it.openalex.primary_location.source ||= {};
+  if (work.primary_location.source.display_name != null) {
+    it.openalex.primary_location.source.display_name = work.primary_location.source.display_name;
+  }
+  if (work.primary_location.source.type != null) {
+    it.openalex.primary_location.source.type = work.primary_location.source.type;
+  }
+  if (work.primary_location.source.id != null) {
+    it.openalex.primary_location.source.id = work.primary_location.source.id;
+  }
+}
+
+if (work?.host_venue) {
+  it.openalex.host_venue ||= {};
+  if (work.host_venue.display_name != null) it.openalex.host_venue.display_name = work.host_venue.display_name;
+  if (work.host_venue.type != null) it.openalex.host_venue.type = work.host_venue.type;
+  if (work.host_venue.url != null) it.openalex.host_venue.url = work.host_venue.url;
+}
 
    // Persist a friendly venue on the item for UI fallbacks & indexing
  const vname = inferVenueNameFromWork(work, it.venue || '');
@@ -17643,25 +17784,57 @@ function fmtInt(n) {
 
 function publishTypeBucketForItem(item, i) {
   const w = item?.openalex || {};
-  const t = String(
-    w.type ||
-    w.type_crossref ||
-    item?.type ||
-    item?.genre ||
+
+  const rawType = [
+    w.type,
+    w.type_crossref,
+    item?.type,
+    item?.genre,
+    w?.genre
+  ]
+    .map(v => String(v || '').trim().toLowerCase())
+    .filter(Boolean)
+    .join(' | ');
+
+  const sourceType = String(
+    w?.primary_location?.source?.type ||
+    w?.host_venue?.type ||
     ''
-  ).toLowerCase();
+  ).trim().toLowerCase();
 
-  const venue =
-    String(
-      w.primary_location?.source?.type ||
-      w.host_venue?.type ||
-      ''
-    ).toLowerCase();
+  const venueName = String(
+    w?.primary_location?.source?.display_name ||
+    w?.host_venue?.display_name ||
+    item?.venue ||
+    ''
+  ).trim().toLowerCase();
 
-  if (t.includes('book-chapter') || t.includes('book chapter') || t === 'chapter') return 'book_chapter';
-  if (t === 'book' || t.includes('monograph')) return 'book';
-  if (t.includes('proceedings-article') || t.includes('conference') || t.includes('proceeding')) return 'conference_paper';
-  if (t.includes('journal-article') || t.includes('article') || venue === 'journal') return 'journal_paper';
+  if (
+    rawType.includes('book-chapter') ||
+    rawType.includes('book chapter') ||
+    rawType === 'chapter'
+  ) return 'book_chapter';
+
+  if (
+    rawType === 'book' ||
+    rawType.includes('monograph') ||
+    rawType.includes('edited-book')
+  ) return 'book';
+
+  if (
+    rawType.includes('proceedings-article') ||
+    rawType.includes('conference') ||
+    rawType.includes('proceeding') ||
+    sourceType === 'conference'
+  ) return 'conference_paper';
+
+  if (
+    rawType.includes('journal-article') ||
+    rawType.includes('article') ||
+    sourceType === 'journal' ||
+    /\bjournal\b/.test(venueName)
+  ) return 'journal_paper';
+
   return 'other';
 }
 
@@ -18183,7 +18356,119 @@ function buildOverviewHtml(data, mapImgRelPath = 'assets/overview-map.png') {
 </body>
 </html>`;
 }
+async function exportViewerDataZip(opts = {}) {
+  projectMeta = {
+    title: (opts.userTitle || '').toString(),
+    text:  (opts.userText  || '').toString(),
+    created: new Date().toISOString()
+  };
+  if (infoPanel?.setCanvasOverview) { infoPanel.setCanvasOverview(); infoPanel.show(); }
 
+  if (typeof JSZip === 'undefined') { showToast?.('JSZip not found'); return; }
+
+  showLoading?.('Preparing viewer JSON package…', 0.05);
+  const zip = new JSZip();
+
+  const base = `macroscope-viewer-${Date.now()}/`;
+  const dataDir    = base + 'data/';
+  const detailsDir = dataDir + 'details/';
+  const aiDir      = dataDir + 'ai/';
+
+  // 1) Manifest
+  const indexObj = buildViewerIndexObject({
+    userTitle: opts.userTitle || '',
+    userText: opts.userText || ''
+  });
+  zip.file(dataDir + 'index.json', JSON.stringify(indexObj, null, 2));
+
+  // 2) Details shards
+  for (let i = 0; i < nodes.length; i++) {
+    const d = buildViewerDetailsObject(i);
+    zip.file(detailsDir + `${d.id}.json`, JSON.stringify(d, null, 2));
+
+    if ((i + 1) % 500 === 0) {
+      setLoadingProgress?.(
+        0.05 + 0.65 * ((i + 1) / Math.max(1, nodes.length)),
+        `Writing details… ${Math.round(100 * (i + 1) / Math.max(1, nodes.length))}%`
+      );
+    }
+  }
+
+  // 3) AI shards
+  const ai = (window.aiFootprints || []);
+  for (let j = 0; j < ai.length; j++) {
+    const f = ai[j] || {};
+    const id = `A${j+1}`;
+    const shard = {
+      id,
+      title: f.aiTitle || f.title || `AI ${j + 1}`,
+      created: new Date(f.createdAt || Date.now()).toISOString(),
+      body: String(f.aiContent || ''),
+      sources: Array.isArray(f.nodeIds)
+        ? f.nodeIds.map(i => ({ idx:i, id: viewerNodeId(i), title: nodes?.[i]?.label || '' }))
+        : []
+    };
+    zip.file(aiDir + `${id}.json`, JSON.stringify(shard, null, 2));
+  }
+
+  // 4) Pack + download
+  setLoadingProgress?.(0.88, 'Compressing viewer package…');
+  const blob = await zip.generateAsync({ type:'blob', compression:'DEFLATE' });
+
+  const fname = normaliseZipName(
+    opts.fileName,
+    `viewer-data-${Date.now()}`
+  );
+
+  triggerBlobDownload(blob, fname);
+  hideLoading?.();
+  showToast?.('Viewer JSON package exported.');
+}
+
+async function exportOverviewReportZip(opts = {}) {
+  projectMeta = {
+    title: (opts.userTitle || '').toString(),
+    text:  (opts.userText  || '').toString(),
+    created: new Date().toISOString()
+  };
+  if (infoPanel?.setCanvasOverview) { infoPanel.setCanvasOverview(); infoPanel.show(); }
+
+  if (typeof JSZip === 'undefined') { showToast?.('JSZip not found'); return; }
+
+  showLoading?.('Preparing overview report package…', 0.08);
+  const zip = new JSZip();
+
+  const base = `overview-report-${Date.now()}/`;
+  const assetsDir = base + 'assets/';
+
+  const reportData = computeOverviewReportData({
+    userTitle: opts.userTitle || 'Overview Report',
+    userText: opts.userText || ''
+  });
+
+  setLoadingProgress?.(0.40, 'Rendering overview map…');
+  const mapDataUrl = renderOverviewMapPNGDataUrl({ width: 1600, height: 900, bg: '#ffffff' });
+  const base64Png = String(mapDataUrl).split(',')[1] || '';
+
+  setLoadingProgress?.(0.70, 'Building HTML report…');
+  const overviewHtml = buildOverviewHtml(reportData, 'assets/overview-map.png');
+
+  zip.file(base + 'overview.json', JSON.stringify(reportData, null, 2));
+  zip.file(base + 'overview.html', overviewHtml);
+  zip.file(assetsDir + 'overview-map.png', base64Png, { base64: true });
+
+  setLoadingProgress?.(0.90, 'Compressing overview report…');
+  const blob = await zip.generateAsync({ type:'blob', compression:'DEFLATE' });
+
+  const fname = normaliseZipName(
+    opts.fileName,
+    `overview-report-${Date.now()}`
+  );
+
+  triggerBlobDownload(blob, fname);
+  hideLoading?.();
+  showToast?.('Overview HTML report exported.');
+}
 
 async function exportViewerPackageZip(opts = {}) {
   projectMeta = {
@@ -18414,6 +18699,24 @@ function _syncAIDimsWithFootprints() {
   }
 }
 
+function triggerBlobDownload(blob, fileName) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = String(fileName || 'download').trim() || 'download';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 20000);
+}
+
+function normaliseZipName(name, fallbackBase) {
+  let out = String(name || '').trim();
+  if (!out) out = fallbackBase;
+  if (!/\.zip$/i.test(out)) out += '.zip';
+  return out;
+}
+
 function openPublishDialog(onSubmit) {
   // backdrop
   const bg = document.createElement('div');
@@ -18426,58 +18729,86 @@ function openPublishDialog(onSubmit) {
   const box = document.createElement('div');
   Object.assign(box.style, {
     position:'fixed', left:'50%', top:'14%', transform:'translate(-50%, 0)',
-    width:'min(560px, 92vw)', background:'#111', color:'#fff',
+    width:'min(620px, 94vw)', background:'#111', color:'#fff',
     border:'1px solid rgba(255,255,255,0.2)', borderRadius:'12px',
     boxShadow:'0 12px 40px rgba(0,0,0,0.5)', padding:'16px', zIndex:'10100',
     font:'13px/1.4 system-ui, -apple-system, Segoe UI, Roboto'
   });
 
   const nowIso = new Date().toISOString().slice(0,19).replace(/[:T]/g,'-');
-  const defaultZip = `viewer-package-${nowIso}.zip`;
+  const defaultViewerZip = `viewer-data-${nowIso}.zip`;
+  const defaultReportZip = `overview-report-${nowIso}.zip`;
 
   box.innerHTML = `
     <div style="font-weight:700; font-size:15px; margin-bottom:10px;">Publish</div>
 
-    <label style="display:block; margin:8px 0 4px;">Save As (.zip)</label>
-    <input id="pub_name" value="${defaultZip}" style="width:100%; padding:8px; border-radius:8px; border:1px solid rgba(255,255,255,0.25); background:#000; color:#fff" />
+    <label style="display:block; margin:8px 0 4px;">Viewer JSON package name (.zip)</label>
+    <input id="pub_viewer_name" value="${defaultViewerZip}" style="width:100%; padding:8px; border-radius:8px; border:1px solid rgba(255,255,255,0.25); background:#000; color:#fff" />
+
+    <label style="display:block; margin:10px 0 4px;">Overview report package name (.zip)</label>
+    <input id="pub_report_name" value="${defaultReportZip}" style="width:100%; padding:8px; border-radius:8px; border:1px solid rgba(255,255,255,0.25); background:#000; color:#fff" />
 
     <label style="display:block; margin:10px 0 4px;">Title</label>
     <input id="pub_title" placeholder="e.g. My Cluster Map" style="width:100%; padding:8px; border-radius:8px; border:1px solid rgba(255,255,255,0.25); background:#000; color:#fff" />
 
     <label style="display:block; margin:10px 0 4px;">Text</label>
-    <textarea id="pub_text" rows="5" placeholder="Short description shown when the package is opened…" style="width:100%; padding:8px; border-radius:8px; border:1px solid rgba(255,255,255,0.25); background:#000; color:#fff; resize:vertical"></textarea>
+    <textarea id="pub_text" rows="5" placeholder="Short description shown in exported outputs…" style="width:100%; padding:8px; border-radius:8px; border:1px solid rgba(255,255,255,0.25); background:#000; color:#fff; resize:vertical"></textarea>
 
-    <label style="display:block; margin:10px 0 4px;">Reports</label>
-    <div style="display:flex; gap:12px; align-items:center; padding:10px 12px; border-radius:8px; border:1px solid rgba(255,255,255,0.18); background:rgba(255,255,255,0.03);">
-      <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
-        <input id="pub_report_overview" type="checkbox" checked />
-        <span>Include Overview dashboard report</span>
-      </label>
+    <div style="margin-top:12px; padding:10px 12px; border-radius:8px; border:1px solid rgba(255,255,255,0.14); background:rgba(255,255,255,0.03); color:rgba(255,255,255,0.82);">
+      <div style="font-weight:600; margin-bottom:6px;">Export options</div>
+      <div>Viewer JSON package = index.json + details shards + AI shards</div>
+      <div>Overview report package = overview.html + overview.json + map PNG</div>
     </div>
 
-    <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:14px;">
+    <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:14px; flex-wrap:wrap;">
       <button id="pub_cancel" style="padding:8px 12px; border-radius:8px; background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.2); color:#fff; cursor:pointer;">Cancel</button>
-      <button id="pub_ok" style="padding:8px 12px; border-radius:8px; background:#2a7; border:1px solid rgba(255,255,255,0.2); color:#000; cursor:pointer; font-weight:700;">Publish</button>
+      <button id="pub_export_viewer" style="padding:8px 12px; border-radius:8px; background:#5b8def; border:1px solid rgba(255,255,255,0.2); color:#fff; cursor:pointer; font-weight:700;">Export Viewer JSON</button>
+      <button id="pub_export_report" style="padding:8px 12px; border-radius:8px; background:#2a7; border:1px solid rgba(255,255,255,0.2); color:#000; cursor:pointer; font-weight:700;">Export Overview HTML</button>
     </div>
   `;
   document.body.appendChild(box);
 
   const close = () => { box.remove(); bg.remove(); };
   box.querySelector('#pub_cancel').addEventListener('click', close);
+  bg.addEventListener('click', close);
 
-  box.querySelector('#pub_ok').addEventListener('click', () => {
-    const name  = String(box.querySelector('#pub_name').value || '').trim() || defaultZip;
-    const title = String(box.querySelector('#pub_title').value || '').trim();
-    const text  = String(box.querySelector('#pub_text').value || '').trim();
+  const getPayload = () => ({
+    viewerName: normaliseZipName(
+      box.querySelector('#pub_viewer_name')?.value,
+      defaultViewerZip.replace(/\.zip$/i, '')
+    ),
+    reportName: normaliseZipName(
+      box.querySelector('#pub_report_name')?.value,
+      defaultReportZip.replace(/\.zip$/i, '')
+    ),
+    title: String(box.querySelector('#pub_title')?.value || '').trim(),
+    text:  String(box.querySelector('#pub_text')?.value || '').trim()
+  });
 
-    const reports = {
-      overview: !!box.querySelector('#pub_report_overview')?.checked
-    };
-
+  box.querySelector('#pub_export_viewer').addEventListener('click', () => {
+    const payload = getPayload();
     close();
-    if (typeof onSubmit === 'function') onSubmit({ name, title, text, reports });
+    onSubmit?.({
+      action: 'viewer-json',
+      fileName: payload.viewerName,
+      title: payload.title,
+      text: payload.text
+    });
+  });
+
+  box.querySelector('#pub_export_report').addEventListener('click', () => {
+    const payload = getPayload();
+    close();
+    onSubmit?.({
+      action: 'overview-html',
+      fileName: payload.reportName,
+      title: payload.title,
+      text: payload.text
+    });
   });
 }
+
+
 // Build the same stable key that toggleDimensionTool uses
 function dimKeyFor(type, rec){
   const stableId = (type === 'clusters' && rec.cid != null) ? `cid:${rec.cid}` : rec.key;
@@ -18996,7 +19327,6 @@ function compactOA(work) {
 
   const __doi = (a.doi || (a.ids && a.ids.doi)) ? String(a.doi || a.ids.doi).trim() : null;
 
-  // NEW: keep a lightweight but structured authorships array
   const compactAuthorships = Array.isArray(a.authorships)
     ? a.authorships.map(x => ({
         author_position: x?.author_position || '',
@@ -19019,9 +19349,20 @@ function compactOA(work) {
   return {
     id: a.id || null,
     display_name: a.display_name || a.title || '',
+    title: a.title || a.display_name || '',
     cited_by_count: Number(a.cited_by_count || 0),
     publication_year: Number(a.publication_year || (a.from_publication_date || '').slice(0, 4)) || null,
-    open_access: { is_oa: !!(a.open_access && a.open_access.is_oa) },
+    from_publication_date: a.from_publication_date || null,
+
+    // KEEP publication type metadata for reports / save files
+    type: a.type || null,
+    type_crossref: a.type_crossref || null,
+    genre: a.genre || null,
+
+    open_access: {
+      is_oa: !!(a.open_access && a.open_access.is_oa),
+      oa_status: a?.open_access?.oa_status || null
+    },
 
     doi: __doi,
     ids: __doi ? { doi: __doi } : {},
@@ -19030,10 +19371,8 @@ function compactOA(work) {
       ? a.concepts.slice(0, 6).map(c => ({ display_name: c?.display_name, id: c?.id }))
       : [],
 
-    // KEEP the rich compact authorships for author metadata panels
     authorships: compactAuthorships,
 
-    // Keep existing flat fallbacks for older code paths
     authors: compactAuthorships.length
       ? Array.from(new Set(
           compactAuthorships.map(x => x?.author?.display_name).filter(Boolean)
@@ -19055,6 +19394,21 @@ function compactOA(work) {
           )
         ))
       : [],
+
+    // KEEP minimal venue/source typing for publication bucket detection
+    primary_location: a?.primary_location ? {
+      source: a?.primary_location?.source ? {
+        id: a.primary_location.source.id || null,
+        display_name: a.primary_location.source.display_name || '',
+        type: a.primary_location.source.type || null
+      } : null
+    } : null,
+
+    host_venue: a?.host_venue ? {
+      display_name: a.host_venue.display_name || '',
+      type: a.host_venue.type || null,
+      url: a.host_venue.url || null
+    } : null,
 
     venue_name: inferVenueNameFromWork(a, ''),
     abstract: abs || '',
