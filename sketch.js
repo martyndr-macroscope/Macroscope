@@ -10526,252 +10526,6 @@ function restoreNodePositionsIntoCache(modeName, posArr) {
     : null;
 }
 
-async function restoreProjectState(save) {
-  // 1) Put base data back
-  setLoadingProgress(0.28, 'Preparing data…');
-  itemsData = Array.isArray(save.items) ? save.items : [];
-  const es = Array.isArray(save.edges) ? save.edges : buildEdgesFromItems(itemsData);
-
-  // 2) Rebuild nodes from items so all derived fields exist
-  setLoadingProgress(0.30, 'Rebuilding graph…');
-  const payload = { items: itemsData, edges: es };
-  await buildGraphFromPayloadAsync(payload, { autoStartLayout: false });
-
-  // 3) Apply saved positions
-  setLoadingProgress(0.86, 'Applying saved positions…');
-  const pos = Array.isArray(save.nodePositions) ? save.nodePositions : null;
-  if (pos && pos.length === nodes.length) {
-    for (let i = 0; i < nodes.length; i++) {
-      const p = pos[i] || {};
-      if (Number.isFinite(p.x)) nodes[i].x = p.x;
-      if (Number.isFinite(p.y)) nodes[i].y = p.y;
-      if (Number.isFinite(p.r)) nodes[i].r = p.r;
-    }
-  }
-
-  // 4) Restore clusters
-  setLoadingProgress(0.89, 'Restoring clusters…');
-  if (save.clusters && Array.isArray(save.clusters.clusterOf) &&
-      save.clusters.clusterOf.length === nodes.length) {
-    clusterOf = Array.from(save.clusters.clusterOf);
-    clusterCount = Number.isFinite(+save.clusters.count)
-      ? +save.clusters.count
-      : (clusterOf.length ? (Math.max(...clusterOf) + 1) : 0);
-
-    clusterLabels = Array.isArray(save.clusters.labels)
-      ? Array.from(save.clusters.labels)
-      : clusterLabels;
-
-    if (Array.isArray(save.clusters.colors) && save.clusters.colors.length) {
-      clusterColors = save.clusters.colors.map(c => Array.from(c));
-    } else {
-      clusterColors = normalizeClusterColors(makeClusterColors(clusterCount));
-    }
-
-    if (Array.isArray(save.clusters.sizesTotal)) {
-      clusterSizesTotal = Array.from(save.clusters.sizesTotal);
-    }
-  } else {
-    computeDomainClusters?.();
-  }
-
-  // 5) Restore dimensions / tools
-  setLoadingProgress(0.92, 'Restoring tools…');
-  dimTools = [];
-  dimByKey.clear();
-
-  if (Array.isArray(save.dimensions)) {
-    for (const d of save.dimensions) {
-      if (!d) continue;
-
-      const tool = {
-        type: d.type,
-        key: d.key,
-        label: d.label,
-        cid: (d.cid != null ? d.cid : undefined),
-
-        // FIX: restore the saved power, don't replace it with DEFAULT_DIM_POWER
-        power: Number.isFinite(+d.power) ? +d.power : DEFAULT_DIM_POWER,
-
-        x: Number(d.x || 0),
-        y: Number(d.y || 0),
-        color: d.color || (DIM_COLORS?.[d.type] || [220,220,220]),
-        nodes: new Set(Array.isArray(d.nodes) ? d.nodes.map(v => v|0) : [])
-      };
-
-      if (d.type === 'ai') {
-        tool.aiSig = d.aiSig || null;
-        tool.aiSignature = d.aiSig || null;
-        tool.aiTitle = d.aiTitle || d.label || null;
-        tool.aiContent = d.aiContent || '';
-        tool.aiCreatedAt = d.aiCreatedAt || null;
-        tool.summaryRef = d.summaryRef || null;
-      }
-
-      dimTools.push(tool);
-      if (tool.key != null) dimByKey.set(tool.key, tool);
-    }
-  }
-
-  // 6) Restore lenses / filters / camera
-  setLoadingProgress(0.945, 'Restoring settings…');
-
-  if (save.lenses && typeof save.lenses === 'object') {
-    lenses = { ...lenses, ...save.lenses };
-  }
-
-  if (save.filters && typeof save.filters === 'object') {
-    if (Number.isFinite(+save.filters.degThreshold)) degThreshold = +save.filters.degThreshold;
-    if (Number.isFinite(+save.filters.yearLo)) yearLo = +save.filters.yearLo;
-    if (Number.isFinite(+save.filters.yearHi)) yearHi = +save.filters.yearHi;
-    if (Number.isFinite(+save.filters.extCitesThreshold)) extCitesThreshold = +save.filters.extCitesThreshold;
-    if (Number.isFinite(+save.filters.clusterSizeThreshold)) clusterSizeThreshold = +save.filters.clusterSizeThreshold;
-    if (Number.isFinite(+save.filters.persistentFieldThreshold)) {
-      persistentFieldThreshold = +save.filters.persistentFieldThreshold;
-    }
-  }
-
-  if (save.camera && typeof save.camera === 'object') {
-    if (Number.isFinite(+save.camera.x)) cam.x = +save.camera.x;
-    if (Number.isFinite(+save.camera.y)) cam.y = +save.camera.y;
-    if (Number.isFinite(+save.camera.scale)) cam.scale = +save.camera.scale;
-  }
-
-  // 7) Restore AI footprints
-  if (Array.isArray(save.aiFootprints)) {
-    aiFootprints = save.aiFootprints.map(f => ({
-      type: f.type || 'ai',
-      title: String(f.title || ''),
-      nodeIds: Array.isArray(f.nodeIds) ? f.nodeIds.slice() : [],
-      x: Number.isFinite(f.x) ? f.x : null,
-      y: Number.isFinite(f.y) ? f.y : null,
-      content: String(f.content || ''),
-      createdAt: Number.isFinite(+f.createdAt) ? +f.createdAt : null,
-      sig: f.sig || null
-    }));
-    window.aiFootprints = aiFootprints;
-  } else {
-    aiFootprints = [];
-    window.aiFootprints = aiFootprints;
-  }
-
-  // 8) Restore visibility
-  if (save.visibility && typeof save.visibility === 'object') {
-    if (Number.isFinite(+save.visibility.visAllPubs)) visAllPubs = +save.visibility.visAllPubs;
-    if (Number.isFinite(+save.visibility.visDims)) visDims = +save.visibility.visDims;
-    if (Number.isFinite(+save.visibility.visAIDims)) visAIDims = +save.visibility.visAIDims;
-    if (Number.isFinite(+save.visibility.visEdges)) visEdges = +save.visibility.visEdges;
-    if (Number.isFinite(+save.visibility.visConceptMap)) visConceptMap = +save.visibility.visConceptMap;
-    if (Number.isFinite(+save.visibility.nodeSizeScale)) nodeSizeScale = +save.visibility.nodeSizeScale;
-    if (Number.isFinite(+save.visibility.fulltextSizeScale)) fulltextSizeScale = +save.visibility.fulltextSizeScale;
-  }
-
-  // 9) Restore overlays
-  if (save.overlays && typeof save.overlays === 'object') {
-    if (Number.isFinite(+save.overlays.ovAbstracts)) ovAbstracts = +save.overlays.ovAbstracts;
-    if (Number.isFinite(+save.overlays.ovOpenAccess)) ovOpenAccess = +save.overlays.ovOpenAccess;
-    if (Number.isFinite(+save.overlays.ovClusterColors)) ovClusterColors = +save.overlays.ovClusterColors;
-    if (Number.isFinite(+save.overlays.ovClusterLabels)) ovClusterLabels = +save.overlays.ovClusterLabels;
-    if (Number.isFinite(+save.overlays.ovFieldLabels)) ovFieldLabels = +save.overlays.ovFieldLabels;
-    if (Number.isFinite(+save.overlays.ovRefAssessment)) ovRefAssessment = +save.overlays.ovRefAssessment;
-    if (typeof save.overlays.semanticZoomEnabled === 'boolean') {
-      semanticZoomEnabled = save.overlays.semanticZoomEnabled;
-    }
-  }
-
-  // 10) Restore higher-level field/domain state
-  if (save.persistentFieldState && typeof save.persistentFieldState === 'object') {
-    persistentFieldState = deepCloneJsonSafe(save.persistentFieldState, persistentFieldState);
-  }
-
-  if (save.aiFieldsState && typeof save.aiFieldsState === 'object') {
-    aiFieldsState = deepCloneJsonSafe(save.aiFieldsState, aiFieldsState);
-  }
-
-  if (save.fieldState && typeof save.fieldState === 'object') {
-    if (typeof fieldOfCluster !== 'undefined' && Array.isArray(save.fieldState.fieldOfCluster)) {
-      fieldOfCluster = Array.from(save.fieldState.fieldOfCluster);
-    }
-    if (typeof fieldLabels !== 'undefined' && save.fieldState.fieldLabels) {
-      fieldLabels = deepCloneJsonSafe(save.fieldState.fieldLabels, fieldLabels);
-    }
-    if (typeof fieldCount !== 'undefined' && Number.isFinite(+save.fieldState.fieldCount)) {
-      fieldCount = +save.fieldState.fieldCount;
-    }
-    if (typeof fieldLabelCenters !== 'undefined' && save.fieldState.fieldLabelCenters) {
-      fieldLabelCenters = deepCloneJsonSafe(save.fieldState.fieldLabelCenters, {});
-    }
-    if (typeof fieldSelectId !== 'undefined' && Number.isFinite(+save.fieldState.fieldSelectId)) {
-      fieldSelectId = +save.fieldState.fieldSelectId;
-    }
-  }
-
-  // 11) Restore concept state
-  if (save.conceptState && typeof save.conceptState === 'object' &&
-      typeof conceptMapState !== 'undefined') {
-    conceptMapState = deepCloneJsonSafe(save.conceptState, conceptMapState);
-  }
-
-  // 12) Restore view mode + per-mode caches
-  setLoadingProgress(0.97, 'Restoring mode caches…');
-  restoreViewCache(save.viewCache);
-
-  if (typeof save.viewMode === 'string' && save.viewMode) {
-    window.viewMode = save.viewMode;
-  }
-
-  // Ensure current live node positions are also written into the active cache
-  restoreNodePositionsIntoCache(window.viewMode || 'citation', nodes);
-
-  // 13) Rebuild derived UI/index state
-  buildDimensionsIndex?.();
-  updateDimSections?.();
-  refreshDimMembershipFlags?.();
-  recomputeVisibility?.();
-  rebuildAdj?.();
-  updateInfo?.();
-
-  // 14) Push saved values back into UI sliders/buttons where present
-  applySavedSliderValue(allPubsSlider, visAllPubs);
-  applySavedSliderValue(dimsSlider, visDims);
-  applySavedSliderValue(aiDimsSlider, visAIDims);
-  applySavedSliderValue(conceptMapSlider, visConceptMap);
-
-  applySavedOverlayValue(ovAbsSlider, ovAbstracts);
-  applySavedOverlayValue(ovOASlider, ovOpenAccess);
-  applySavedOverlayValue(ovClustColorSlider, ovClusterColors);
-  applySavedOverlayValue(ovClustLabelSlider, ovClusterLabels);
-  applySavedOverlayValue(ovFieldLabelSlider, ovFieldLabels);
-  applySavedOverlayValue(ovRefAssessmentSlider, ovRefAssessment);
-
-  if (nodeSizeSlider?.elt) {
-    nodeSizeSlider.elt.value = Math.round(Math.max(1, Math.min(500, nodeSizeScale * 100)));
-    markZeroClass?.(nodeSizeSlider, Number(nodeSizeSlider.elt.value) === 0);
-  }
-
-  if (typeof semanticZoomRadio !== 'undefined' && semanticZoomRadio?.value) {
-    semanticZoomRadio.value(semanticZoomEnabled ? 'on' : 'off');
-  }
-
-  if (degSlider?.elt && Number.isFinite(+degThreshold)) degSlider.elt.value = degThreshold;
-  if (extCitesSlider?.elt && Number.isFinite(+extCitesThreshold)) extCitesSlider.elt.value = extCitesThreshold;
-  if (clusterSizeSlider?.elt && Number.isFinite(+clusterSizeThreshold)) clusterSizeSlider.elt.value = clusterSizeThreshold;
-  if (yearSliderMin?.elt && Number.isFinite(+yearLo)) yearSliderMin.elt.value = yearLo;
-  if (yearSliderMax?.elt && Number.isFinite(+yearHi)) yearSliderMax.elt.value = yearHi;
-
-  if (degInput) degInput.value(String(degThreshold ?? 0));
-  if (extCitesInput) extCitesInput.value(String(extCitesThreshold ?? 0));
-  if (clusterSizeInput) clusterSizeInput.value(String(clusterSizeThreshold ?? 0));
-  if (yearLoInput) yearLoInput.value(String(yearLo ?? 0));
-  if (yearHiInput) yearHiInput.value(String(yearHi ?? 0));
-  if (persistentFieldInput && Number.isFinite(+persistentFieldThreshold)) {
-    persistentFieldInput.value(String(persistentFieldThreshold));
-  }
-
-  adjustWorldToContent?.(80);
-  redraw?.();
-}
-
 
 function downloadJSON(obj, filename) {
   const blob = new Blob([JSON.stringify(obj)], {type:'application/json'});
@@ -10858,13 +10612,13 @@ async function restoreProjectState(save) {
   setLoadingProgress(0.28, 'Preparing data…');
   itemsData = Array.isArray(save.items) ? save.items : [];
   const es = Array.isArray(save.edges) ? save.edges : buildEdgesFromItems(itemsData);
-
+window.__restoringProjectState = true;
   // 2) Rebuild nodes from items so all derived fields exist
   setLoadingProgress(0.30, 'Rebuilding graph…');
   const payload = { items: itemsData, edges: es };
   await buildGraphFromPayloadAsync(payload, { autoStartLayout: false });
 
-  // 3) Apply saved positions
+  // 3) Apply saved base positions
   setLoadingProgress(0.86, 'Applying saved positions…');
   const pos = Array.isArray(save.nodePositions) ? save.nodePositions : null;
   if (pos && pos.length === nodes.length) {
@@ -10916,10 +10670,7 @@ async function restoreProjectState(save) {
         key: d.key,
         label: d.label,
         cid: (d.cid != null ? d.cid : undefined),
-
-        // FIX: restore the saved power, don't replace it with DEFAULT_DIM_POWER
         power: Number.isFinite(+d.power) ? +d.power : DEFAULT_DIM_POWER,
-
         x: Number(d.x || 0),
         y: Number(d.y || 0),
         color: d.color || (DIM_COLORS?.[d.type] || [220,220,220]),
@@ -10940,7 +10691,7 @@ async function restoreProjectState(save) {
     }
   }
 
-  // 6) Restore lenses / filters / camera
+  // 6) Restore lenses / filters
   setLoadingProgress(0.945, 'Restoring settings…');
 
   if (save.lenses && typeof save.lenses === 'object') {
@@ -10958,11 +10709,12 @@ async function restoreProjectState(save) {
     }
   }
 
-  if (save.camera && typeof save.camera === 'object') {
-    if (Number.isFinite(+save.camera.x)) cam.x = +save.camera.x;
-    if (Number.isFinite(+save.camera.y)) cam.y = +save.camera.y;
-    if (Number.isFinite(+save.camera.scale)) cam.scale = +save.camera.scale;
-  }
+  // keep a copy of the saved camera so later view application cannot wipe it
+  const savedCamera = {
+    x: Number.isFinite(+save?.camera?.x) ? +save.camera.x : null,
+    y: Number.isFinite(+save?.camera?.y) ? +save.camera.y : null,
+    scale: Number.isFinite(+save?.camera?.scale) ? +save.camera.scale : null
+  };
 
   // 7) Restore AI footprints
   if (Array.isArray(save.aiFootprints)) {
@@ -11006,13 +10758,18 @@ async function restoreProjectState(save) {
     }
   }
 
-  // 10) Restore higher-level field/domain state
+  // 10) Restore higher-level state
   if (save.persistentFieldState && typeof save.persistentFieldState === 'object') {
     persistentFieldState = deepCloneJsonSafe(save.persistentFieldState, persistentFieldState);
   }
 
   if (save.aiFieldsState && typeof save.aiFieldsState === 'object') {
     aiFieldsState = deepCloneJsonSafe(save.aiFieldsState, aiFieldsState);
+  }
+
+  if (save.conceptState && typeof save.conceptState === 'object' &&
+      typeof conceptMapState !== 'undefined') {
+    conceptMapState = deepCloneJsonSafe(save.conceptState, conceptMapState);
   }
 
   if (save.fieldState && typeof save.fieldState === 'object') {
@@ -11033,24 +10790,38 @@ async function restoreProjectState(save) {
     }
   }
 
-  // 11) Restore concept state
-  if (save.conceptState && typeof save.conceptState === 'object' &&
-      typeof conceptMapState !== 'undefined') {
-    conceptMapState = deepCloneJsonSafe(save.conceptState, conceptMapState);
-  }
-
-  // 12) Restore view mode + per-mode caches
+  // 11) Restore per-view cache BEFORE applying the active view
   setLoadingProgress(0.97, 'Restoring mode caches…');
   restoreViewCache(save.viewCache);
 
   if (typeof save.viewMode === 'string' && save.viewMode) {
-    window.viewMode = save.viewMode;
+    setActiveViewMode(save.viewMode);
+  } else {
+    setActiveViewMode('citation');
   }
 
-  // Ensure current live node positions are also written into the active cache
-  restoreNodePositionsIntoCache(window.viewMode || 'citation', nodes);
+  // If there is no saved active-view cache, seed it from nodePositions once.
+  {
+    const vc = (window.__viewCache ||= {});
+    const active = String(viewMode || 'citation');
+    if (!vc[active]) vc[active] = {};
+    if (!Array.isArray(vc[active].pos) || vc[active].pos.length !== nodes.length) {
+      vc[active].pos = nodes.map(n => ({ x: n.x, y: n.y, r: n.r }));
+    }
+  }
 
-  // 13) Rebuild derived UI/index state
+  // Apply the saved active view graph/positions/clusters
+  if (typeof __applyView === 'function') {
+    __applyView(viewMode || 'citation');
+  }
+
+  // IMPORTANT: reapply saved camera AFTER __applyView(), because __applyView()
+  // calls fitContentInView() and would otherwise reset the view.
+  if (savedCamera.x !== null) cam.x = savedCamera.x;
+  if (savedCamera.y !== null) cam.y = savedCamera.y;
+  if (savedCamera.scale !== null) cam.scale = savedCamera.scale;
+
+  // 12) Rebuild derived UI/index state
   buildDimensionsIndex?.();
   updateDimSections?.();
   refreshDimMembershipFlags?.();
@@ -11058,7 +10829,7 @@ async function restoreProjectState(save) {
   rebuildAdj?.();
   updateInfo?.();
 
-  // 14) Push saved values back into UI sliders/buttons where present
+  // 13) Push saved values back into UI widgets
   applySavedSliderValue(allPubsSlider, visAllPubs);
   applySavedSliderValue(dimsSlider, visDims);
   applySavedSliderValue(aiDimsSlider, visAIDims);
@@ -11096,6 +10867,7 @@ async function restoreProjectState(save) {
   }
 
   adjustWorldToContent?.(80);
+  window.__restoringProjectState = false;
   redraw?.();
 }
 
@@ -12761,7 +12533,13 @@ function positionMenuUnder(btn, menu) {
 let viewMenuBtn = null;
 let viewMenu = null;
 
-let viewMode = 'citation'; // 'citation' | 'thematic'
+setActiveViewMode('citation');
+
+function setActiveViewMode(mode) {
+  const m = String(mode || 'citation');
+  viewMode = m;
+  window.viewMode = m;
+}
 
 // ─────────────────────────────────────────────────────────────
 // Concept Cluster view (publication graph built from shared OpenAlex concepts)
@@ -13177,7 +12955,7 @@ function nameClustersFromRepresentativeAbstracts(ids, xy, labels, nRep = 6) {
 // ─────────────────────────────────────────────────────────────
 
 // Ensure viewMode exists
-if (typeof viewMode === 'undefined') window.viewMode = 'citation';
+if (typeof viewMode === 'undefined') window.setActiveViewMode('citation');
 
 // Per-view cache (keeps last positions + graph state)
 const __viewCache = (window.__viewCache ||= {
@@ -13496,7 +13274,7 @@ function switchToConceptClusterMode() {
   conceptClusterLevel = Math.max(1, conceptClusterLevel | 0);
   __buildConceptGraphIfNeeded(conceptClusterLevel);
 
-  viewMode = 'concept';
+setActiveViewMode('concept');
 
   // First time in this mode: start from a fresh random scatter
   if (!__viewCache.concept.pos || __viewCache.concept.pos.length !== nodes.length) {
@@ -13550,7 +13328,13 @@ function __applyView(mode) {
   }
 
   adjustWorldToContent?.(160);
-  fitContentInView?.(40);
+
+  // Only auto-fit when there is no meaningful saved camera in play.
+  // On project restore, camera is reapplied afterwards anyway.
+  if (!window.__restoringProjectState) {
+    fitContentInView?.(40);
+  }
+
   recomputeVisibility?.();
   redraw?.();
 }
@@ -13661,7 +13445,7 @@ async function switchToThematicManifoldMode() {
   __buildThematicGraphIfNeeded({ forcePrompt: !__viewCache.thematic.settings });
 
   // move into thematic mode
-  viewMode = 'thematic';
+  setActiveViewMode('thematic');
 
   // If this is the first time and there is no saved thematic pos, keep current positions
   // and let the user run the layout from the separate toggle button.
@@ -24157,7 +23941,7 @@ function ensureThematicBaseClustersForPersistentFields() {
   if (typeof __viewCache === 'object' && __viewCache?.thematic?.clusterOf?.length === nodes.length) {
     if (viewMode !== 'thematic') {
       try { __snapshotView?.(viewMode || 'citation'); } catch (_) {}
-      viewMode = 'thematic';
+setActiveViewMode('thematic');
       __applyView?.('thematic');
     }
   }
