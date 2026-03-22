@@ -554,6 +554,14 @@ let layoutRunning = false;
 let vx = [], vy = [];       // velocities per node
 let adj = [];               // adjacency list (built from edges)
 
+function stopLayoutCompletely() {
+  layoutRunning = false;
+  layoutAlpha = 0;
+  layoutCenter = null;
+  vx = new Array(nodes.length).fill(0);
+  vy = new Array(nodes.length).fill(0);
+}
+
 // ===== Visual tuning (global knobs) =====
 const NODE_IDLE_ALPHA    = 100; // 0–255: default opacity when NOT highlighted
 const NODE_HILITE_ALPHA  = 255; // 0–255: opacity when hovered/selected/neighbor
@@ -10608,15 +10616,30 @@ if (obj?.meta?.format === 'domain-viz-save-v1' ||
 
 
 async function restoreProjectState(save) {
+  window.__restoringProjectState = true;
+
+  // HARD STOP simulation before rebuild
+  layoutRunning = false;
+  layoutAlpha = 0;
+  vx = [];
+  vy = [];
+  layoutCenter = null;
+
   // 1) Put base data back
   setLoadingProgress(0.28, 'Preparing data…');
   itemsData = Array.isArray(save.items) ? save.items : [];
   const es = Array.isArray(save.edges) ? save.edges : buildEdgesFromItems(itemsData);
-window.__restoringProjectState = true;
+
   // 2) Rebuild nodes from items so all derived fields exist
   setLoadingProgress(0.30, 'Rebuilding graph…');
   const payload = { items: itemsData, edges: es };
   await buildGraphFromPayloadAsync(payload, { autoStartLayout: false });
+
+  // HARD STOP again after rebuild
+  layoutRunning = false;
+  layoutAlpha = 0;
+  vx = new Array(nodes.length).fill(0);
+  vy = new Array(nodes.length).fill(0);
 
   // 3) Apply saved base positions
   setLoadingProgress(0.86, 'Applying saved positions…');
@@ -10691,7 +10714,7 @@ window.__restoringProjectState = true;
     }
   }
 
-  // 6) Restore lenses / filters
+  // 6) Restore settings
   setLoadingProgress(0.945, 'Restoring settings…');
 
   if (save.lenses && typeof save.lenses === 'object') {
@@ -10709,14 +10732,12 @@ window.__restoringProjectState = true;
     }
   }
 
-  // keep a copy of the saved camera so later view application cannot wipe it
   const savedCamera = {
     x: Number.isFinite(+save?.camera?.x) ? +save.camera.x : null,
     y: Number.isFinite(+save?.camera?.y) ? +save.camera.y : null,
     scale: Number.isFinite(+save?.camera?.scale) ? +save.camera.scale : null
   };
 
-  // 7) Restore AI footprints
   if (Array.isArray(save.aiFootprints)) {
     aiFootprints = save.aiFootprints.map(f => ({
       type: f.type || 'ai',
@@ -10734,7 +10755,6 @@ window.__restoringProjectState = true;
     window.aiFootprints = aiFootprints;
   }
 
-  // 8) Restore visibility
   if (save.visibility && typeof save.visibility === 'object') {
     if (Number.isFinite(+save.visibility.visAllPubs)) visAllPubs = +save.visibility.visAllPubs;
     if (Number.isFinite(+save.visibility.visDims)) visDims = +save.visibility.visDims;
@@ -10745,7 +10765,6 @@ window.__restoringProjectState = true;
     if (Number.isFinite(+save.visibility.fulltextSizeScale)) fulltextSizeScale = +save.visibility.fulltextSizeScale;
   }
 
-  // 9) Restore overlays
   if (save.overlays && typeof save.overlays === 'object') {
     if (Number.isFinite(+save.overlays.ovAbstracts)) ovAbstracts = +save.overlays.ovAbstracts;
     if (Number.isFinite(+save.overlays.ovOpenAccess)) ovOpenAccess = +save.overlays.ovOpenAccess;
@@ -10758,7 +10777,6 @@ window.__restoringProjectState = true;
     }
   }
 
-  // 10) Restore higher-level state
   if (save.persistentFieldState && typeof save.persistentFieldState === 'object') {
     persistentFieldState = deepCloneJsonSafe(save.persistentFieldState, persistentFieldState);
   }
@@ -10800,7 +10818,6 @@ window.__restoringProjectState = true;
     setActiveViewMode('citation');
   }
 
-  // If there is no saved active-view cache, seed it from nodePositions once.
   {
     const vc = (window.__viewCache ||= {});
     const active = String(viewMode || 'citation');
@@ -10810,18 +10827,21 @@ window.__restoringProjectState = true;
     }
   }
 
-  // Apply the saved active view graph/positions/clusters
   if (typeof __applyView === 'function') {
     __applyView(viewMode || 'citation');
   }
 
-  // IMPORTANT: reapply saved camera AFTER __applyView(), because __applyView()
-  // calls fitContentInView() and would otherwise reset the view.
   if (savedCamera.x !== null) cam.x = savedCamera.x;
   if (savedCamera.y !== null) cam.y = savedCamera.y;
   if (savedCamera.scale !== null) cam.scale = savedCamera.scale;
 
-  // 12) Rebuild derived UI/index state
+  // FINAL HARD STOP
+  layoutRunning = false;
+  layoutAlpha = 0;
+  vx = new Array(nodes.length).fill(0);
+  vy = new Array(nodes.length).fill(0);
+  layoutCenter = null;
+
   buildDimensionsIndex?.();
   updateDimSections?.();
   refreshDimMembershipFlags?.();
@@ -10829,7 +10849,6 @@ window.__restoringProjectState = true;
   rebuildAdj?.();
   updateInfo?.();
 
-  // 13) Push saved values back into UI widgets
   applySavedSliderValue(allPubsSlider, visAllPubs);
   applySavedSliderValue(dimsSlider, visDims);
   applySavedSliderValue(aiDimsSlider, visAIDims);
@@ -13003,12 +13022,12 @@ function __snapshotView(mode) {
   const c = __viewCache[mode];
   if (!c) return;
 
-  c.pos = nodes.map(n => ({ x: n.x, y: n.y }));
+  c.pos = nodes.map(n => ({ x: n.x, y: n.y, r: n.r }));
   c.edges = __cloneEdges(edges);
 
   c.clusterOf = Array.isArray(clusterOf) ? clusterOf.slice() : null;
   c.clusterSizesTotal = Array.isArray(clusterSizesTotal) ? clusterSizesTotal.slice() : null;
-  c.clusterColors = Array.isArray(clusterColors) ? clusterColors.slice() : null;
+  c.clusterColors = Array.isArray(clusterColors) ? clusterColors.map(col => Array.isArray(col) ? col.slice() : col) : null;
   c.clusterLabels = Array.isArray(clusterLabels) ? clusterLabels.slice() : null;
 
   c.lensesShowEdges = (typeof lenses === 'object' && lenses) ? !!lenses.showEdges : null;
@@ -13291,11 +13310,18 @@ function __applyView(mode) {
   const c = __viewCache[mode];
   if (!c) return;
 
+  // HARD STOP any layout motion before applying saved coordinates
+  layoutRunning = false;
+  layoutAlpha = 0;
+  vx = new Array(nodes.length).fill(0);
+  vy = new Array(nodes.length).fill(0);
+
   // Positions
   if (c.pos?.length === nodes.length) {
     for (let i = 0; i < nodes.length; i++) {
-      nodes[i].x = c.pos[i].x;
-      nodes[i].y = c.pos[i].y;
+      if (Number.isFinite(c.pos[i].x)) nodes[i].x = c.pos[i].x;
+      if (Number.isFinite(c.pos[i].y)) nodes[i].y = c.pos[i].y;
+      if (Number.isFinite(c.pos[i].r)) nodes[i].r = c.pos[i].r;
     }
   }
 
@@ -13307,33 +13333,26 @@ function __applyView(mode) {
 
   __applyClustersFromCache(c);
 
-  // Lens edges toggle (keeps visual edge display consistent per view)
-  if (typeof lenses === 'object' && lenses && c.lensesShowEdges != null) {
-    lenses.showEdges = !!c.lensesShowEdges;
+  if (typeof c.lensesShowEdges === 'boolean' && typeof lenses === 'object' && lenses) {
+    lenses.showEdges = c.lensesShowEdges;
   }
 
-  // If thematic, restore thematic cluster names for label overlay if used
-  if (mode === 'thematic' && c.clusterNames) {
-    thematicState = thematicState || {};
+  if (mode === 'thematic' && c.clusterNames && typeof thematicState !== 'undefined' && thematicState) {
     thematicState.clusterNames = Object.assign({}, c.clusterNames);
-  }
-
-  buildDimensionsIndex?.();
-  updateDimSections?.();
-  initClusterFilterUI?.();
-  initConceptLevelFilterUI?.();
-
-  if (mode === 'concept') {
-    conceptClusterLevel = Math.max(1, (__viewCache.concept?.level || conceptClusterLevel || 1) | 0);
   }
 
   adjustWorldToContent?.(160);
 
-  // Only auto-fit when there is no meaningful saved camera in play.
-  // On project restore, camera is reapplied afterwards anyway.
+  // Do not auto-fit while restoring a saved project
   if (!window.__restoringProjectState) {
     fitContentInView?.(40);
   }
+
+  // Freeze again after all downstream helpers
+  layoutRunning = false;
+  layoutAlpha = 0;
+  vx = new Array(nodes.length).fill(0);
+  vy = new Array(nodes.length).fill(0);
 
   recomputeVisibility?.();
   redraw?.();
