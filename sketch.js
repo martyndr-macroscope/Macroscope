@@ -10338,115 +10338,344 @@ async function saveProject() {
   updateInfo(); redraw();
 }
 
-
-function serializeState() {
-  // compact node positions (everything else is rebuilt from itemsData)
-  const nodePos = nodes.map(n => ({ x: n.x, y: n.y, r: n.r || 3 }));
-
-// dimensions: serialise Sets as arrays (WITH AI fields if present)
-const dims = (dimTools || []).map(d => {
-  if (!d) return null;
-  return {
-    type: d.type, key: d.key, label: d.label,
-    cid: (d.cid != null ? d.cid : null),
-    power: d.power|0, x: d.x, y: d.y,
-    color: d.color || null,
-    nodes: Array.from(d.nodes || []),
-    ...(d.type === 'ai' && {
-      aiSig:       d.aiSig || d.aiSignature || null,
-      aiTitle:     d.aiTitle || d.label || null,
-      aiContent:   d.aiContent || '',
-      aiCreatedAt: d.aiCreatedAt || null,
-      summaryRef:  d.summaryRef || null
-    })
-  };
-});
-
-  // cluster data
-  const cl = {
-    clusterOf: (clusterOf && clusterOf.length === nodes.length) ? Array.from(clusterOf) : null,
-    labels: Array.isArray(clusterLabels) ? Array.from(clusterLabels) : null,
-    colors: Array.isArray(clusterColors) ? clusterColors.map(c => Array.from(c)) : null
-  };
-
-  // filters, lenses, camera
- // ... inside serializeState():
-const filt = {
-  degThreshold,
-  yearLo,
-  yearHi,
-  extCitesThreshold,      // <- NEW
-  clusterSizeThreshold    // <- NEW
-};
-
-  const camState = { x: cam.x, y: cam.y, scale: cam.scale };
-// NEW: visibility + overlays state
-const visibility = {
-  visAllPubs,
-  visDims,
-  visAIDims,
-  visEdges,
-  nodeSizeScale       // ← moved here
-};
-const overlays = {
-  ovAbstracts,
-  ovOpenAccess,
-  ovClusterColors,
-  ovClusterLabels,
-  ovFieldLabels,
-  ovRefAssessment,
-  semanticZoomEnabled
-};
-
-
-  // --- NEW: AI footprints (strip volatile fields like _markerScreen) ---
-  const aiDocs = Array.isArray(aiFootprints) ? aiFootprints.map(f => ({
-    type: f.type || 'ai',
-    title: String(f.title || ''),
-    nodeIds: Array.isArray(f.nodeIds) ? f.nodeIds.slice() : [],
-    x: Number.isFinite(f.x) ? f.x : null,
-    y: Number.isFinite(f.y) ? f.y : null,
-    content: String(f.content || ''),
-    createdAt: Number.isFinite(+f.createdAt) ? +f.createdAt : null,
-    sig: f.sig || null
-  })) : [];
-
-  // --- Seed metadata for quick reuse later (optional convenience) ---
-const seeds = [];
-for (let i = 0; i < itemsData.length; i++) {
-  const it = itemsData[i];
-  if (it && it.isSeed) {
-    seeds.push({
-      index: i,
-      oa: (it.openalex && it.openalex.id) || null,
-      doi: (it.openalex && it.openalex.doi) || it.doi || null,
-      title: (it.openalex && (it.openalex.display_name || it.openalex.title)) || it.label || ''
-    });
+function deepCloneJsonSafe(v, fallback = null) {
+  try {
+    return JSON.parse(JSON.stringify(v));
+  } catch {
+    return fallback;
   }
 }
 
+function serializeViewCache() {
+  const vc = window.__viewCache || {};
+  const out = {};
 
-const obj = {
-  meta: {
-    format: 'domain-viz-save-v1',
-    exported_at: new Date().toISOString(),
-    seeds                           // ← ADD
-  },
-  items: itemsData,
-  edges: edges,
-  nodePositions: nodePos,
-  dimensions: dims,
-  clusters: cl,
-  lenses: lenses,
-  filters: filt,
-  camera: camState,
-  aiFootprints: aiDocs,
-  visibility,
-  overlays
+  for (const mode of Object.keys(vc)) {
+    const src = vc[mode] || {};
+    out[mode] = {
+      pos: Array.isArray(src.pos)
+        ? src.pos.map(p => ({
+            x: Number.isFinite(p?.x) ? p.x : 0,
+            y: Number.isFinite(p?.y) ? p.y : 0,
+            r: Number.isFinite(p?.r) ? p.r : undefined
+          }))
+        : null,
 
-};
+      edges: Array.isArray(src.edges)
+        ? src.edges.map(e => ({
+            source: Number(e?.source || 0),
+            target: Number(e?.target || 0)
+          }))
+        : null,
 
-  return obj;
+      clusterOf: Array.isArray(src.clusterOf) ? Array.from(src.clusterOf) : null,
+      clusterSizesTotal: Array.isArray(src.clusterSizesTotal) ? Array.from(src.clusterSizesTotal) : null,
+      clusterColors: Array.isArray(src.clusterColors)
+        ? src.clusterColors.map(c => Array.isArray(c) ? Array.from(c) : c)
+        : null,
+      clusterLabels: Array.isArray(src.clusterLabels) ? Array.from(src.clusterLabels) : null,
+      clusterNames: src.clusterNames ? deepCloneJsonSafe(src.clusterNames, null) : null,
+      lensesShowEdges: (typeof src.lensesShowEdges === 'boolean') ? src.lensesShowEdges : null,
+      settings: src.settings ? deepCloneJsonSafe(src.settings, null) : null,
+      builtKey: src.builtKey ?? null,
+      level: Number.isFinite(src.level) ? src.level : null
+    };
+  }
+
+  return out;
+}
+
+function restoreViewCache(savedVC) {
+  if (!savedVC || typeof savedVC !== 'object') return;
+
+  const target = (window.__viewCache ||= {});
+  for (const mode of Object.keys(savedVC)) {
+    const src = savedVC[mode] || {};
+    target[mode] = {
+      ...(target[mode] || {}),
+      pos: Array.isArray(src.pos) ? src.pos.map(p => ({ ...p })) : null,
+      edges: Array.isArray(src.edges) ? src.edges.map(e => ({ ...e })) : null,
+      clusterOf: Array.isArray(src.clusterOf) ? Array.from(src.clusterOf) : null,
+      clusterSizesTotal: Array.isArray(src.clusterSizesTotal) ? Array.from(src.clusterSizesTotal) : null,
+      clusterColors: Array.isArray(src.clusterColors)
+        ? src.clusterColors.map(c => Array.isArray(c) ? Array.from(c) : c)
+        : null,
+      clusterLabels: Array.isArray(src.clusterLabels) ? Array.from(src.clusterLabels) : null,
+      clusterNames: src.clusterNames ? deepCloneJsonSafe(src.clusterNames, null) : null,
+      lensesShowEdges: (typeof src.lensesShowEdges === 'boolean') ? src.lensesShowEdges : null,
+      settings: src.settings ? deepCloneJsonSafe(src.settings, null) : null,
+      builtKey: src.builtKey ?? null,
+      level: Number.isFinite(src.level) ? src.level : null
+    };
+  }
+}
+
+function applySavedSliderValue(sliderRef, value01) {
+  if (!sliderRef || !sliderRef.elt) return;
+  const pct = Math.round(Math.max(0, Math.min(1, Number(value01 || 0))) * 100);
+  sliderRef.elt.value = pct;
+  markZeroClass?.(sliderRef, pct === 0);
+}
+
+function applySavedOverlayValue(sliderRef, value01) {
+  if (!sliderRef || !sliderRef.elt) return;
+  const pct = Math.round(Math.max(0, Math.min(1, Number(value01 || 0))) * 100);
+  sliderRef.elt.value = pct;
+  markZeroClass?.(sliderRef, pct === 0);
+}
+
+function restoreNodePositionsIntoCache(modeName, posArr) {
+  const vc = (window.__viewCache ||= {});
+  if (!vc[modeName]) vc[modeName] = {};
+  vc[modeName].pos = Array.isArray(posArr)
+    ? posArr.map(p => ({ x: p.x, y: p.y, r: p.r }))
+    : null;
+}
+
+async function restoreProjectState(save) {
+  // 1) Put base data back
+  setLoadingProgress(0.28, 'Preparing data…');
+  itemsData = Array.isArray(save.items) ? save.items : [];
+  const es = Array.isArray(save.edges) ? save.edges : buildEdgesFromItems(itemsData);
+
+  // 2) Rebuild nodes from items so all derived fields exist
+  setLoadingProgress(0.30, 'Rebuilding graph…');
+  const payload = { items: itemsData, edges: es };
+  await buildGraphFromPayloadAsync(payload, { autoStartLayout: false });
+
+  // 3) Apply saved positions
+  setLoadingProgress(0.86, 'Applying saved positions…');
+  const pos = Array.isArray(save.nodePositions) ? save.nodePositions : null;
+  if (pos && pos.length === nodes.length) {
+    for (let i = 0; i < nodes.length; i++) {
+      const p = pos[i] || {};
+      if (Number.isFinite(p.x)) nodes[i].x = p.x;
+      if (Number.isFinite(p.y)) nodes[i].y = p.y;
+      if (Number.isFinite(p.r)) nodes[i].r = p.r;
+    }
+  }
+
+  // 4) Restore clusters
+  setLoadingProgress(0.89, 'Restoring clusters…');
+  if (save.clusters && Array.isArray(save.clusters.clusterOf) &&
+      save.clusters.clusterOf.length === nodes.length) {
+    clusterOf = Array.from(save.clusters.clusterOf);
+    clusterCount = Number.isFinite(+save.clusters.count)
+      ? +save.clusters.count
+      : (clusterOf.length ? (Math.max(...clusterOf) + 1) : 0);
+
+    clusterLabels = Array.isArray(save.clusters.labels)
+      ? Array.from(save.clusters.labels)
+      : clusterLabels;
+
+    if (Array.isArray(save.clusters.colors) && save.clusters.colors.length) {
+      clusterColors = save.clusters.colors.map(c => Array.from(c));
+    } else {
+      clusterColors = normalizeClusterColors(makeClusterColors(clusterCount));
+    }
+
+    if (Array.isArray(save.clusters.sizesTotal)) {
+      clusterSizesTotal = Array.from(save.clusters.sizesTotal);
+    }
+  } else {
+    computeDomainClusters?.();
+  }
+
+  // 5) Restore dimensions / tools
+  setLoadingProgress(0.92, 'Restoring tools…');
+  dimTools = [];
+  dimByKey.clear();
+
+  if (Array.isArray(save.dimensions)) {
+    for (const d of save.dimensions) {
+      if (!d) continue;
+
+      const tool = {
+        type: d.type,
+        key: d.key,
+        label: d.label,
+        cid: (d.cid != null ? d.cid : undefined),
+
+        // FIX: restore the saved power, don't replace it with DEFAULT_DIM_POWER
+        power: Number.isFinite(+d.power) ? +d.power : DEFAULT_DIM_POWER,
+
+        x: Number(d.x || 0),
+        y: Number(d.y || 0),
+        color: d.color || (DIM_COLORS?.[d.type] || [220,220,220]),
+        nodes: new Set(Array.isArray(d.nodes) ? d.nodes.map(v => v|0) : [])
+      };
+
+      if (d.type === 'ai') {
+        tool.aiSig = d.aiSig || null;
+        tool.aiSignature = d.aiSig || null;
+        tool.aiTitle = d.aiTitle || d.label || null;
+        tool.aiContent = d.aiContent || '';
+        tool.aiCreatedAt = d.aiCreatedAt || null;
+        tool.summaryRef = d.summaryRef || null;
+      }
+
+      dimTools.push(tool);
+      if (tool.key != null) dimByKey.set(tool.key, tool);
+    }
+  }
+
+  // 6) Restore lenses / filters / camera
+  setLoadingProgress(0.945, 'Restoring settings…');
+
+  if (save.lenses && typeof save.lenses === 'object') {
+    lenses = { ...lenses, ...save.lenses };
+  }
+
+  if (save.filters && typeof save.filters === 'object') {
+    if (Number.isFinite(+save.filters.degThreshold)) degThreshold = +save.filters.degThreshold;
+    if (Number.isFinite(+save.filters.yearLo)) yearLo = +save.filters.yearLo;
+    if (Number.isFinite(+save.filters.yearHi)) yearHi = +save.filters.yearHi;
+    if (Number.isFinite(+save.filters.extCitesThreshold)) extCitesThreshold = +save.filters.extCitesThreshold;
+    if (Number.isFinite(+save.filters.clusterSizeThreshold)) clusterSizeThreshold = +save.filters.clusterSizeThreshold;
+    if (Number.isFinite(+save.filters.persistentFieldThreshold)) {
+      persistentFieldThreshold = +save.filters.persistentFieldThreshold;
+    }
+  }
+
+  if (save.camera && typeof save.camera === 'object') {
+    if (Number.isFinite(+save.camera.x)) cam.x = +save.camera.x;
+    if (Number.isFinite(+save.camera.y)) cam.y = +save.camera.y;
+    if (Number.isFinite(+save.camera.scale)) cam.scale = +save.camera.scale;
+  }
+
+  // 7) Restore AI footprints
+  if (Array.isArray(save.aiFootprints)) {
+    aiFootprints = save.aiFootprints.map(f => ({
+      type: f.type || 'ai',
+      title: String(f.title || ''),
+      nodeIds: Array.isArray(f.nodeIds) ? f.nodeIds.slice() : [],
+      x: Number.isFinite(f.x) ? f.x : null,
+      y: Number.isFinite(f.y) ? f.y : null,
+      content: String(f.content || ''),
+      createdAt: Number.isFinite(+f.createdAt) ? +f.createdAt : null,
+      sig: f.sig || null
+    }));
+    window.aiFootprints = aiFootprints;
+  } else {
+    aiFootprints = [];
+    window.aiFootprints = aiFootprints;
+  }
+
+  // 8) Restore visibility
+  if (save.visibility && typeof save.visibility === 'object') {
+    if (Number.isFinite(+save.visibility.visAllPubs)) visAllPubs = +save.visibility.visAllPubs;
+    if (Number.isFinite(+save.visibility.visDims)) visDims = +save.visibility.visDims;
+    if (Number.isFinite(+save.visibility.visAIDims)) visAIDims = +save.visibility.visAIDims;
+    if (Number.isFinite(+save.visibility.visEdges)) visEdges = +save.visibility.visEdges;
+    if (Number.isFinite(+save.visibility.visConceptMap)) visConceptMap = +save.visibility.visConceptMap;
+    if (Number.isFinite(+save.visibility.nodeSizeScale)) nodeSizeScale = +save.visibility.nodeSizeScale;
+    if (Number.isFinite(+save.visibility.fulltextSizeScale)) fulltextSizeScale = +save.visibility.fulltextSizeScale;
+  }
+
+  // 9) Restore overlays
+  if (save.overlays && typeof save.overlays === 'object') {
+    if (Number.isFinite(+save.overlays.ovAbstracts)) ovAbstracts = +save.overlays.ovAbstracts;
+    if (Number.isFinite(+save.overlays.ovOpenAccess)) ovOpenAccess = +save.overlays.ovOpenAccess;
+    if (Number.isFinite(+save.overlays.ovClusterColors)) ovClusterColors = +save.overlays.ovClusterColors;
+    if (Number.isFinite(+save.overlays.ovClusterLabels)) ovClusterLabels = +save.overlays.ovClusterLabels;
+    if (Number.isFinite(+save.overlays.ovFieldLabels)) ovFieldLabels = +save.overlays.ovFieldLabels;
+    if (Number.isFinite(+save.overlays.ovRefAssessment)) ovRefAssessment = +save.overlays.ovRefAssessment;
+    if (typeof save.overlays.semanticZoomEnabled === 'boolean') {
+      semanticZoomEnabled = save.overlays.semanticZoomEnabled;
+    }
+  }
+
+  // 10) Restore higher-level field/domain state
+  if (save.persistentFieldState && typeof save.persistentFieldState === 'object') {
+    persistentFieldState = deepCloneJsonSafe(save.persistentFieldState, persistentFieldState);
+  }
+
+  if (save.aiFieldsState && typeof save.aiFieldsState === 'object') {
+    aiFieldsState = deepCloneJsonSafe(save.aiFieldsState, aiFieldsState);
+  }
+
+  if (save.fieldState && typeof save.fieldState === 'object') {
+    if (typeof fieldOfCluster !== 'undefined' && Array.isArray(save.fieldState.fieldOfCluster)) {
+      fieldOfCluster = Array.from(save.fieldState.fieldOfCluster);
+    }
+    if (typeof fieldLabels !== 'undefined' && save.fieldState.fieldLabels) {
+      fieldLabels = deepCloneJsonSafe(save.fieldState.fieldLabels, fieldLabels);
+    }
+    if (typeof fieldCount !== 'undefined' && Number.isFinite(+save.fieldState.fieldCount)) {
+      fieldCount = +save.fieldState.fieldCount;
+    }
+    if (typeof fieldLabelCenters !== 'undefined' && save.fieldState.fieldLabelCenters) {
+      fieldLabelCenters = deepCloneJsonSafe(save.fieldState.fieldLabelCenters, {});
+    }
+    if (typeof fieldSelectId !== 'undefined' && Number.isFinite(+save.fieldState.fieldSelectId)) {
+      fieldSelectId = +save.fieldState.fieldSelectId;
+    }
+  }
+
+  // 11) Restore concept state
+  if (save.conceptState && typeof save.conceptState === 'object' &&
+      typeof conceptMapState !== 'undefined') {
+    conceptMapState = deepCloneJsonSafe(save.conceptState, conceptMapState);
+  }
+
+  // 12) Restore view mode + per-mode caches
+  setLoadingProgress(0.97, 'Restoring mode caches…');
+  restoreViewCache(save.viewCache);
+
+  if (typeof save.viewMode === 'string' && save.viewMode) {
+    window.viewMode = save.viewMode;
+  }
+
+  // Ensure current live node positions are also written into the active cache
+  restoreNodePositionsIntoCache(window.viewMode || 'citation', nodes);
+
+  // 13) Rebuild derived UI/index state
+  buildDimensionsIndex?.();
+  updateDimSections?.();
+  refreshDimMembershipFlags?.();
+  recomputeVisibility?.();
+  rebuildAdj?.();
+  updateInfo?.();
+
+  // 14) Push saved values back into UI sliders/buttons where present
+  applySavedSliderValue(allPubsSlider, visAllPubs);
+  applySavedSliderValue(dimsSlider, visDims);
+  applySavedSliderValue(aiDimsSlider, visAIDims);
+  applySavedSliderValue(conceptMapSlider, visConceptMap);
+
+  applySavedOverlayValue(ovAbsSlider, ovAbstracts);
+  applySavedOverlayValue(ovOASlider, ovOpenAccess);
+  applySavedOverlayValue(ovClustColorSlider, ovClusterColors);
+  applySavedOverlayValue(ovClustLabelSlider, ovClusterLabels);
+  applySavedOverlayValue(ovFieldLabelSlider, ovFieldLabels);
+  applySavedOverlayValue(ovRefAssessmentSlider, ovRefAssessment);
+
+  if (nodeSizeSlider?.elt) {
+    nodeSizeSlider.elt.value = Math.round(Math.max(1, Math.min(500, nodeSizeScale * 100)));
+    markZeroClass?.(nodeSizeSlider, Number(nodeSizeSlider.elt.value) === 0);
+  }
+
+  if (typeof semanticZoomRadio !== 'undefined' && semanticZoomRadio?.value) {
+    semanticZoomRadio.value(semanticZoomEnabled ? 'on' : 'off');
+  }
+
+  if (degSlider?.elt && Number.isFinite(+degThreshold)) degSlider.elt.value = degThreshold;
+  if (extCitesSlider?.elt && Number.isFinite(+extCitesThreshold)) extCitesSlider.elt.value = extCitesThreshold;
+  if (clusterSizeSlider?.elt && Number.isFinite(+clusterSizeThreshold)) clusterSizeSlider.elt.value = clusterSizeThreshold;
+  if (yearSliderMin?.elt && Number.isFinite(+yearLo)) yearSliderMin.elt.value = yearLo;
+  if (yearSliderMax?.elt && Number.isFinite(+yearHi)) yearSliderMax.elt.value = yearHi;
+
+  if (degInput) degInput.value(String(degThreshold ?? 0));
+  if (extCitesInput) extCitesInput.value(String(extCitesThreshold ?? 0));
+  if (clusterSizeInput) clusterSizeInput.value(String(clusterSizeThreshold ?? 0));
+  if (yearLoInput) yearLoInput.value(String(yearLo ?? 0));
+  if (yearHiInput) yearHiInput.value(String(yearHi ?? 0));
+  if (persistentFieldInput && Number.isFinite(+persistentFieldThreshold)) {
+    persistentFieldInput.value(String(persistentFieldThreshold));
+  }
+
+  adjustWorldToContent?.(80);
+  redraw?.();
 }
 
 
@@ -10500,7 +10729,8 @@ function handleProjectFileSelected(p5file) {
       const obj = JSON.parse(text);
 
       await nextTick();
-      if (obj?.meta?.format === 'domain-viz-save-v1') {
+if (obj?.meta?.format === 'domain-viz-save-v1' ||
+    obj?.meta?.format === 'domain-viz-save-v2') {
         setLoadingProgress(0.26, 'Restoring project…');
         await restoreProjectState(obj);   // progress continues inside
       } else if (Array.isArray(obj?.nodes) && Array.isArray(obj?.edges)) {
@@ -10535,13 +10765,13 @@ async function restoreProjectState(save) {
   itemsData = Array.isArray(save.items) ? save.items : [];
   const es = Array.isArray(save.edges) ? save.edges : buildEdgesFromItems(itemsData);
 
-  // 2) Rebuild nodes from items (so derived fields are present)
-    setLoadingProgress(0.30, 'Rebuilding graph…');
+  // 2) Rebuild nodes from items so all derived fields exist
+  setLoadingProgress(0.30, 'Rebuilding graph…');
   const payload = { items: itemsData, edges: es };
-await buildGraphFromPayloadAsync(payload, { autoStartLayout: false });
+  await buildGraphFromPayloadAsync(payload, { autoStartLayout: false });
 
-  // 3) Apply saved positions (if any)
-  setLoadingProgress(0.90, 'Applying saved positions…');
+  // 3) Apply saved positions
+  setLoadingProgress(0.86, 'Applying saved positions…');
   const pos = Array.isArray(save.nodePositions) ? save.nodePositions : null;
   if (pos && pos.length === nodes.length) {
     for (let i = 0; i < nodes.length; i++) {
@@ -10552,221 +10782,227 @@ await buildGraphFromPayloadAsync(payload, { autoStartLayout: false });
     }
   }
 
-  // 4) Restore clusters (if provided)
-
-   setLoadingProgress(0.92, 'Restoring clusters…');
+  // 4) Restore clusters
+  setLoadingProgress(0.89, 'Restoring clusters…');
   if (save.clusters && Array.isArray(save.clusters.clusterOf) &&
       save.clusters.clusterOf.length === nodes.length) {
     clusterOf = Array.from(save.clusters.clusterOf);
-    clusterCount = Math.max(...clusterOf) + 1;
-    clusterLabels = Array.isArray(save.clusters.labels) ? Array.from(save.clusters.labels) : clusterLabels;
-if (Array.isArray(save.clusters.colors) && save.clusters.colors.length === clusterCount) {
-  clusterColors = save.clusters.colors.map(c => Array.from(c));
-} else {
-  clusterColors = makeClusterColors(clusterCount);
-  clusterColors = normalizeClusterColors(clusterColors);
-}
+    clusterCount = Number.isFinite(+save.clusters.count)
+      ? +save.clusters.count
+      : (clusterOf.length ? (Math.max(...clusterOf) + 1) : 0);
 
+    clusterLabels = Array.isArray(save.clusters.labels)
+      ? Array.from(save.clusters.labels)
+      : clusterLabels;
+
+    if (Array.isArray(save.clusters.colors) && save.clusters.colors.length) {
+      clusterColors = save.clusters.colors.map(c => Array.from(c));
+    } else {
+      clusterColors = normalizeClusterColors(makeClusterColors(clusterCount));
+    }
+
+    if (Array.isArray(save.clusters.sizesTotal)) {
+      clusterSizesTotal = Array.from(save.clusters.sizesTotal);
+    }
   } else {
-    // compute if missing
-    computeDomainClusters();
+    computeDomainClusters?.();
   }
 
-  // 5) Restore dimensions tools
-  setLoadingProgress(0.94, 'Restoring tools…');
+  // 5) Restore dimensions / tools
+  setLoadingProgress(0.92, 'Restoring tools…');
   dimTools = [];
   dimByKey.clear();
+
   if (Array.isArray(save.dimensions)) {
     for (const d of save.dimensions) {
       if (!d) continue;
+
       const tool = {
-        type: d.type, key: d.key, label: d.label,
+        type: d.type,
+        key: d.key,
+        label: d.label,
         cid: (d.cid != null ? d.cid : undefined),
-        //power: Number(d.power || 0),
-        power: DEFAULT_DIM_POWER, 
-        x: Number(d.x || 0), y: Number(d.y || 0),
-        color: d.color || (DIM_COLORS[d.type] || [220,220,220]),
-        nodes: new Set(Array.isArray(d.nodes) ? d.nodes : [])
+
+        // FIX: restore the saved power, don't replace it with DEFAULT_DIM_POWER
+        power: Number.isFinite(+d.power) ? +d.power : DEFAULT_DIM_POWER,
+
+        x: Number(d.x || 0),
+        y: Number(d.y || 0),
+        color: d.color || (DIM_COLORS?.[d.type] || [220,220,220]),
+        nodes: new Set(Array.isArray(d.nodes) ? d.nodes.map(v => v|0) : [])
       };
-      const idx = dimTools.push(tool) - 1;
-      dimByKey.set(tool.key, idx);
-    }
-  }
-dimMembershipDirty = true;
-  selectedDim = -1; dimHover = -1; dimDrag = { active:false, idx:-1, dx:0, dy:0, sx:0, sy:0 };
-_syncAIDimsWithFootprints()
-  // 6) Restore lenses and filters (if present)
-setLoadingProgress(0.96, 'Restoring view…');
-if (save.lenses) {
-  // merge but clamp AI to explicit boolean only
-  lenses = { ...lenses, ...save.lenses };
-  lenses.aiDocs = (typeof save.lenses.aiDocs === 'boolean') ? !!save.lenses.aiDocs : false;
-} else {
-  // no lenses in save => AI is OFF
-  lenses.aiDocs = false;
-}
 
-// --- Restore filters & thresholds from the save file ---
-const f = save.filters || {};
-if (Number.isFinite(f.degThreshold))        degThreshold        = f.degThreshold|0;
-if (Number.isFinite(f.extCitesThreshold))   extCitesThreshold   = Math.max(0, f.extCitesThreshold|0);
-if (Number.isFinite(f.clusterSizeThreshold)) clusterSizeThreshold = Math.max(0, f.clusterSizeThreshold|0);
-if (Number.isFinite(f.yearLo))              yearLo              = f.yearLo|0;
-if (Number.isFinite(f.yearHi))              yearHi              = f.yearHi|0;
-
-// Rebuild bounds and sync UIs
-computeYearBounds?.();
-initExtCitesFilterUI?.();
-initClusterFilterUI?.();
-
-initDegreeFilterUI();
-applyDegreeFilter(degThreshold);
-initYearFilterUI();
-recomputeVisibility();
-
-// --- NEW: restore visibility + overlays and sync UI ---
-
-// Visibility (sliders exist as allPubsSlider, dimsSlider, aiDimsSlider, edgesSlider)
-if (save.visibility) {
-  if (Number.isFinite(save.visibility.visAllPubs)) visAllPubs = +save.visibility.visAllPubs;
-  if (Number.isFinite(save.visibility.visDims))    visDims    = +save.visibility.visDims;
-  if (Number.isFinite(save.visibility.visAIDims))  visAIDims  = +save.visibility.visAIDims;
-  if (Number.isFinite(save.visibility.visEdges))   visEdges   = +save.visibility.visEdges;
-
-  // push into sliders if they're already built
-  try {
-    if (allPubsSlider?.elt) { allPubsSlider.elt.value = String(Math.round(visAllPubs*100)); markZeroClass?.(allPubsSlider, visAllPubs===0); }
-    if (dimsSlider?.elt)    { dimsSlider.elt.value    = String(Math.round(visDims*100));    markZeroClass?.(dimsSlider,    visDims===0); }
-    if (aiDimsSlider?.elt)  { aiDimsSlider.elt.value  = String(Math.round(visAIDims*100));  markZeroClass?.(aiDimsSlider,  visAIDims===0); }
-    if (edgesSlider?.elt)   { edgesSlider.elt.value   = String(Math.round(visEdges*100));   markZeroClass?.(edgesSlider,   visEdges===0); }
-  } catch {}
-
-  // ensure graph paints with new vis
-  if (typeof scheduleVisRecompute === 'function') scheduleVisRecompute(); else { recomputeVisibility(); redraw(); }
-// Node size
-if (Number.isFinite(save.visibility.nodeSizeScale)) {
-  nodeSizeScale = +save.visibility.nodeSizeScale;
-  try {
-    if (nodeSizeSlider?.elt) {
-      nodeSizeSlider.elt.value = String(Math.round(nodeSizeScale * 100));
-    }
-  } catch {}
-}
-// Ensure sizes take effect
-if (typeof scheduleVisRecompute === 'function') scheduleVisRecompute();
-else { recomputeVisibility(); redraw(); }
-}
-
-// Overlays (use new slider refs we captured in buildOverlaysInto)
-if (save.overlays) {
-  if (Number.isFinite(save.overlays.ovAbstracts))         ovAbstracts         = +save.overlays.ovAbstracts;
-  if (Number.isFinite(save.overlays.ovOpenAccess))        ovOpenAccess        = +save.overlays.ovOpenAccess;
-  if (Number.isFinite(save.overlays.ovClusterColors))     ovClusterColors     = +save.overlays.ovClusterColors;
-  if (Number.isFinite(save.overlays.ovClusterLabels))     ovClusterLabels     = +save.overlays.ovClusterLabels;
-  if (Number.isFinite(save.overlays.ovFieldLabels))       ovFieldLabels       = +save.overlays.ovFieldLabels;
-  if (Number.isFinite(save.overlays.ovRefAssessment))     ovRefAssessment     = +save.overlays.ovRefAssessment;
-
-  if (typeof save.overlays.semanticZoomEnabled === 'boolean') {
-    semanticZoomEnabled = save.overlays.semanticZoomEnabled;
-  }
-
-  // Keep the 'domainClusters' lens in sync with the two overlay sliders
-  lenses.domainClusters = (ovClusterColors > 0) || (ovClusterLabels > 0) || (ovFieldLabels > 0);
-
-  // Push overlay values back into sliders if they're mounted
-  try {
-    if (ovAbsSlider?.elt)            ovAbsSlider.elt.value            = String(Math.round(ovAbstracts * 100));
-    if (ovOASlider?.elt)             ovOASlider.elt.value             = String(Math.round(ovOpenAccess * 100));
-    if (ovClustColorSlider?.elt)     ovClustColorSlider.elt.value     = String(Math.round(ovClusterColors * 100));
-    if (ovClustLabelSlider?.elt)     ovClustLabelSlider.elt.value     = String(Math.round(ovClusterLabels * 100));
-    if (ovFieldLabelSlider?.elt)     ovFieldLabelSlider.elt.value     = String(Math.round(ovFieldLabels * 100));
-    if (ovRefAssessmentSlider?.elt)  ovRefAssessmentSlider.elt.value  = String(Math.round(ovRefAssessment * 100));
-
-    if (semanticZoomRadio) {
-      semanticZoomRadio.selected(semanticZoomEnabled ? 'on' : 'off');
-    }
-  } catch {}
-
-  // Ensure cluster data exists if overlays are on
-  if (lenses.domainClusters) {
-    if (!Array.isArray(clusterOf) || clusterOf.length !== nodes.length || !clusterCount || !clusterColors?.length) {
-      computeDomainClusters();
-      computeClusterLabels?.();
-      buildDimensionsIndex?.();
-    }
-  }
-  redraw();
-}
-
-
-
-
-  // 7) Restore AI footprints (if provided)
-setLoadingProgress(0.97, 'Restoring AI notes…');
-window.aiFootprints = [];
-if (Array.isArray(save.aiFootprints)) {
-  for (const f of save.aiFootprints) {
-    if (!f) continue;
-
-    // sanitize node ids
-    const idxs = Array.isArray(f.nodeIds)
-      ? f.nodeIds.filter(i => Number.isFinite(i) && i >= 0 && i < nodes.length)
-      : [];
-
-    // use saved world position; if missing, fall back to centroid of current node positions
-    let fx = Number(f.x), fy = Number(f.y);
-    if (!Number.isFinite(fx) || !Number.isFinite(fy)) {
-      if (idxs.length) {
-        let sx = 0, sy = 0, c = 0;
-        for (const i of idxs) { const p = nodes[i]; if (!p) continue; sx += p.x; sy += p.y; c++; }
-        if (c) { fx = sx / c; fy = sy / c; }
+      if (d.type === 'ai') {
+        tool.aiSig = d.aiSig || null;
+        tool.aiSignature = d.aiSig || null;
+        tool.aiTitle = d.aiTitle || d.label || null;
+        tool.aiContent = d.aiContent || '';
+        tool.aiCreatedAt = d.aiCreatedAt || null;
+        tool.summaryRef = d.summaryRef || null;
       }
-    }
 
-    window.aiFootprints.push({
+      dimTools.push(tool);
+      if (tool.key != null) dimByKey.set(tool.key, tool);
+    }
+  }
+
+  // 6) Restore lenses / filters / camera
+  setLoadingProgress(0.945, 'Restoring settings…');
+
+  if (save.lenses && typeof save.lenses === 'object') {
+    lenses = { ...lenses, ...save.lenses };
+  }
+
+  if (save.filters && typeof save.filters === 'object') {
+    if (Number.isFinite(+save.filters.degThreshold)) degThreshold = +save.filters.degThreshold;
+    if (Number.isFinite(+save.filters.yearLo)) yearLo = +save.filters.yearLo;
+    if (Number.isFinite(+save.filters.yearHi)) yearHi = +save.filters.yearHi;
+    if (Number.isFinite(+save.filters.extCitesThreshold)) extCitesThreshold = +save.filters.extCitesThreshold;
+    if (Number.isFinite(+save.filters.clusterSizeThreshold)) clusterSizeThreshold = +save.filters.clusterSizeThreshold;
+    if (Number.isFinite(+save.filters.persistentFieldThreshold)) {
+      persistentFieldThreshold = +save.filters.persistentFieldThreshold;
+    }
+  }
+
+  if (save.camera && typeof save.camera === 'object') {
+    if (Number.isFinite(+save.camera.x)) cam.x = +save.camera.x;
+    if (Number.isFinite(+save.camera.y)) cam.y = +save.camera.y;
+    if (Number.isFinite(+save.camera.scale)) cam.scale = +save.camera.scale;
+  }
+
+  // 7) Restore AI footprints
+  if (Array.isArray(save.aiFootprints)) {
+    aiFootprints = save.aiFootprints.map(f => ({
       type: f.type || 'ai',
       title: String(f.title || ''),
-      nodeIds: idxs,
-      x: Number.isFinite(fx) ? fx : 0,
-      y: Number.isFinite(fy) ? fy : 0,
+      nodeIds: Array.isArray(f.nodeIds) ? f.nodeIds.slice() : [],
+      x: Number.isFinite(f.x) ? f.x : null,
+      y: Number.isFinite(f.y) ? f.y : null,
       content: String(f.content || ''),
-      createdAt: Number.isFinite(+f.createdAt) ? +f.createdAt : Date.now(),
+      createdAt: Number.isFinite(+f.createdAt) ? +f.createdAt : null,
       sig: f.sig || null
-    });
-  }
-}
-_syncAIDimsWithFootprints()
-recomputeVisibility();
-
-// keep local reference in sync if you use a separate var
-if (typeof aiFootprints !== 'undefined') aiFootprints = window.aiFootprints;
-
-  // 8) Camera
-  if (save.camera) {
-    const c = save.camera;
-    if (Number.isFinite(c.x)) cam.x = c.x;
-    if (Number.isFinite(c.y)) cam.y = c.y;
-    if (Number.isFinite(c.scale)) cam.scale = c.scale;
+    }));
+    window.aiFootprints = aiFootprints;
+  } else {
+    aiFootprints = [];
+    window.aiFootprints = aiFootprints;
   }
 
-  // 8) Refresh dimensions sidebar (names may change with cluster labels)
-  setLoadingProgress(0.99, 'Finalising…');
-  buildDimensionsIndex();
-  renderDimensionsUI();
-layoutRunning = false;
-noLoop();
-vx = new Array(nodes.length).fill(0);
-vy = new Array(nodes.length).fill(0);
-// We loaded fixed positions — do NOT compact/reseed on first toggle
-layoutEverStarted = true;
+  // 8) Restore visibility
+  if (save.visibility && typeof save.visibility === 'object') {
+    if (Number.isFinite(+save.visibility.visAllPubs)) visAllPubs = +save.visibility.visAllPubs;
+    if (Number.isFinite(+save.visibility.visDims)) visDims = +save.visibility.visDims;
+    if (Number.isFinite(+save.visibility.visAIDims)) visAIDims = +save.visibility.visAIDims;
+    if (Number.isFinite(+save.visibility.visEdges)) visEdges = +save.visibility.visEdges;
+    if (Number.isFinite(+save.visibility.visConceptMap)) visConceptMap = +save.visibility.visConceptMap;
+    if (Number.isFinite(+save.visibility.nodeSizeScale)) nodeSizeScale = +save.visibility.nodeSizeScale;
+    if (Number.isFinite(+save.visibility.fulltextSizeScale)) fulltextSizeScale = +save.visibility.fulltextSizeScale;
+  }
 
+  // 9) Restore overlays
+  if (save.overlays && typeof save.overlays === 'object') {
+    if (Number.isFinite(+save.overlays.ovAbstracts)) ovAbstracts = +save.overlays.ovAbstracts;
+    if (Number.isFinite(+save.overlays.ovOpenAccess)) ovOpenAccess = +save.overlays.ovOpenAccess;
+    if (Number.isFinite(+save.overlays.ovClusterColors)) ovClusterColors = +save.overlays.ovClusterColors;
+    if (Number.isFinite(+save.overlays.ovClusterLabels)) ovClusterLabels = +save.overlays.ovClusterLabels;
+    if (Number.isFinite(+save.overlays.ovFieldLabels)) ovFieldLabels = +save.overlays.ovFieldLabels;
+    if (Number.isFinite(+save.overlays.ovRefAssessment)) ovRefAssessment = +save.overlays.ovRefAssessment;
+    if (typeof save.overlays.semanticZoomEnabled === 'boolean') {
+      semanticZoomEnabled = save.overlays.semanticZoomEnabled;
+    }
+  }
 
+  // 10) Restore higher-level field/domain state
+  if (save.persistentFieldState && typeof save.persistentFieldState === 'object') {
+    persistentFieldState = deepCloneJsonSafe(save.persistentFieldState, persistentFieldState);
+  }
 
-  msg = 'Project loaded.';
-   adjustWorldToContent(80);
-  if (!save.camera) fitWorldInView(60);  // show the whole world immediately
-  updateInfo(); redraw();
+  if (save.aiFieldsState && typeof save.aiFieldsState === 'object') {
+    aiFieldsState = deepCloneJsonSafe(save.aiFieldsState, aiFieldsState);
+  }
 
+  if (save.fieldState && typeof save.fieldState === 'object') {
+    if (typeof fieldOfCluster !== 'undefined' && Array.isArray(save.fieldState.fieldOfCluster)) {
+      fieldOfCluster = Array.from(save.fieldState.fieldOfCluster);
+    }
+    if (typeof fieldLabels !== 'undefined' && save.fieldState.fieldLabels) {
+      fieldLabels = deepCloneJsonSafe(save.fieldState.fieldLabels, fieldLabels);
+    }
+    if (typeof fieldCount !== 'undefined' && Number.isFinite(+save.fieldState.fieldCount)) {
+      fieldCount = +save.fieldState.fieldCount;
+    }
+    if (typeof fieldLabelCenters !== 'undefined' && save.fieldState.fieldLabelCenters) {
+      fieldLabelCenters = deepCloneJsonSafe(save.fieldState.fieldLabelCenters, {});
+    }
+    if (typeof fieldSelectId !== 'undefined' && Number.isFinite(+save.fieldState.fieldSelectId)) {
+      fieldSelectId = +save.fieldState.fieldSelectId;
+    }
+  }
+
+  // 11) Restore concept state
+  if (save.conceptState && typeof save.conceptState === 'object' &&
+      typeof conceptMapState !== 'undefined') {
+    conceptMapState = deepCloneJsonSafe(save.conceptState, conceptMapState);
+  }
+
+  // 12) Restore view mode + per-mode caches
+  setLoadingProgress(0.97, 'Restoring mode caches…');
+  restoreViewCache(save.viewCache);
+
+  if (typeof save.viewMode === 'string' && save.viewMode) {
+    window.viewMode = save.viewMode;
+  }
+
+  // Ensure current live node positions are also written into the active cache
+  restoreNodePositionsIntoCache(window.viewMode || 'citation', nodes);
+
+  // 13) Rebuild derived UI/index state
+  buildDimensionsIndex?.();
+  updateDimSections?.();
+  refreshDimMembershipFlags?.();
+  recomputeVisibility?.();
+  rebuildAdj?.();
+  updateInfo?.();
+
+  // 14) Push saved values back into UI sliders/buttons where present
+  applySavedSliderValue(allPubsSlider, visAllPubs);
+  applySavedSliderValue(dimsSlider, visDims);
+  applySavedSliderValue(aiDimsSlider, visAIDims);
+  applySavedSliderValue(conceptMapSlider, visConceptMap);
+
+  applySavedOverlayValue(ovAbsSlider, ovAbstracts);
+  applySavedOverlayValue(ovOASlider, ovOpenAccess);
+  applySavedOverlayValue(ovClustColorSlider, ovClusterColors);
+  applySavedOverlayValue(ovClustLabelSlider, ovClusterLabels);
+  applySavedOverlayValue(ovFieldLabelSlider, ovFieldLabels);
+  applySavedOverlayValue(ovRefAssessmentSlider, ovRefAssessment);
+
+  if (nodeSizeSlider?.elt) {
+    nodeSizeSlider.elt.value = Math.round(Math.max(1, Math.min(500, nodeSizeScale * 100)));
+    markZeroClass?.(nodeSizeSlider, Number(nodeSizeSlider.elt.value) === 0);
+  }
+
+  if (typeof semanticZoomRadio !== 'undefined' && semanticZoomRadio?.value) {
+    semanticZoomRadio.value(semanticZoomEnabled ? 'on' : 'off');
+  }
+
+  if (degSlider?.elt && Number.isFinite(+degThreshold)) degSlider.elt.value = degThreshold;
+  if (extCitesSlider?.elt && Number.isFinite(+extCitesThreshold)) extCitesSlider.elt.value = extCitesThreshold;
+  if (clusterSizeSlider?.elt && Number.isFinite(+clusterSizeThreshold)) clusterSizeSlider.elt.value = clusterSizeThreshold;
+  if (yearSliderMin?.elt && Number.isFinite(+yearLo)) yearSliderMin.elt.value = yearLo;
+  if (yearSliderMax?.elt && Number.isFinite(+yearHi)) yearSliderMax.elt.value = yearHi;
+
+  if (degInput) degInput.value(String(degThreshold ?? 0));
+  if (extCitesInput) extCitesInput.value(String(extCitesThreshold ?? 0));
+  if (clusterSizeInput) clusterSizeInput.value(String(clusterSizeThreshold ?? 0));
+  if (yearLoInput) yearLoInput.value(String(yearLo ?? 0));
+  if (yearHiInput) yearHiInput.value(String(yearHi ?? 0));
+  if (persistentFieldInput && Number.isFinite(+persistentFieldThreshold)) {
+    persistentFieldInput.value(String(persistentFieldThreshold));
+  }
+
+  adjustWorldToContent?.(80);
+  redraw?.();
 }
 
 
