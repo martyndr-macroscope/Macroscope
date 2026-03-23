@@ -5484,6 +5484,7 @@ console.log('Pill counts updated', { i, refs: it.refsCount, citedBy: it.cbc });
 
       <div style="display:grid;grid-template-columns:auto 1fr;gap:6px 10px;font-size:13px;margin-bottom:12px">
         <div style="opacity:.7">Year</div><div>${year || '-'}</div>
+        <div style="opacity:.7">Type</div><div>${safe(pubType || '-')}</div>
         <div style="opacity:.7">Venue</div><div>${safe(venue || '-')}</div>
         <div style="opacity:.7">Cited by</div><div>${citedBy}</div>
         <div style="opacity:.7">Network Citations</div><div>${citing}</div>
