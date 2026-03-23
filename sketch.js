@@ -38,6 +38,177 @@ function setClusterMin(v) {
   initClusterFilterUI?.();   // refresh slider/input/label bounds+value
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Persistent Full-Text Cache (IndexedDB)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const FT_DB_NAME = 'MacroscopeFulltextCache';
+const FT_DB_VERSION = 1;
+const FT_STORE = 'fulltexts';
+
+let ftDbPromise = null;
+
+function getStableCacheKeyForIndex(i) {
+  const it = itemsData?.[i] || {};
+  const oa = it?.openalex || {};
+  const oaId = normOA?.(oa.id) || oa.id || '';
+  const doi = normDOI?.(oa.doi || it.doi || '') || '';
+  const title = normTitle?.(oa.display_name || oa.title || it.label || '') || '';
+  return oaId || (doi ? `doi:${doi}` : '') || (title ? `title:${title}` : '') || `idx:${i}`;
+}
+
+function openFulltextDb() {
+  if (ftDbPromise) return ftDbPromise;
+
+  ftDbPromise = new Promise((resolve, reject) => {
+    const req = indexedDB.open(FT_DB_NAME, FT_DB_VERSION);
+
+    req.onupgradeneeded = (ev) => {
+      const db = ev.target.result;
+      if (!db.objectStoreNames.contains(FT_STORE)) {
+        const store = db.createObjectStore(FT_STORE, { keyPath: 'key' });
+        store.createIndex('byUpdatedAt', 'updatedAt', { unique: false });
+      }
+    };
+
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error || new Error('IndexedDB open failed'));
+  });
+
+  return ftDbPromise;
+}
+
+async function ftDbGet(key) {
+  const db = await openFulltextDb();
+  return await new Promise((resolve, reject) => {
+    const tx = db.transaction(FT_STORE, 'readonly');
+    const st = tx.objectStore(FT_STORE);
+    const rq = st.get(key);
+    rq.onsuccess = () => resolve(rq.result || null);
+    rq.onerror = () => reject(rq.error || new Error('IndexedDB read failed'));
+  });
+}
+
+async function ftDbPut(record) {
+  const db = await openFulltextDb();
+  return await new Promise((resolve, reject) => {
+    const tx = db.transaction(FT_STORE, 'readwrite');
+    const st = tx.objectStore(FT_STORE);
+    const rq = st.put(record);
+    rq.onsuccess = () => resolve(true);
+    rq.onerror = () => reject(rq.error || new Error('IndexedDB write failed'));
+  });
+}
+
+async function ftDbDelete(key) {
+  const db = await openFulltextDb();
+  return await new Promise((resolve, reject) => {
+    const tx = db.transaction(FT_STORE, 'readwrite');
+    const st = tx.objectStore(FT_STORE);
+    const rq = st.delete(key);
+    rq.onsuccess = () => resolve(true);
+    rq.onerror = () => reject(rq.error || new Error('IndexedDB delete failed'));
+  });
+}
+
+async function ftDbCount() {
+  const db = await openFulltextDb();
+  return await new Promise((resolve, reject) => {
+    const tx = db.transaction(FT_STORE, 'readonly');
+    const st = tx.objectStore(FT_STORE);
+    const rq = st.count();
+    rq.onsuccess = () => resolve(rq.result || 0);
+    rq.onerror = () => reject(rq.error || new Error('IndexedDB count failed'));
+  });
+}
+
+async function persistFulltextForIndex(i) {
+  const item = itemsData?.[i];
+  if (!item) return false;
+
+  const text = String(item.fulltext || '').trim();
+  if (!text) return false;
+
+  const key = getStableCacheKeyForIndex(i);
+  const rec = {
+    key,
+    idx: i,
+    openalexId: item?.openalex?.id || null,
+    doi: item?.openalex?.doi || item?.doi || null,
+    title: item?.openalex?.display_name || item?.openalex?.title || item?.label || null,
+    text,
+    chars: text.length,
+    source: item.fulltext_source || null,
+    sourceKind: item.fulltext_source_kind || null,
+    validation: item.fulltext_validation || null,
+    extractedAt: item.fulltext_extracted_at || new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  await ftDbPut(rec);
+
+  item.fulltext_cache_key = key;
+  item.fulltext_cached = true;
+  item.fulltext_chars = rec.chars;
+  item.fulltext_persisted_at = rec.updatedAt;
+
+  return true;
+}
+
+async function loadPersistedFulltextForIndex(i, { attachToItem = true } = {}) {
+  const item = itemsData?.[i];
+  if (!item) return null;
+
+  const key = item.fulltext_cache_key || getStableCacheKeyForIndex(i);
+  const rec = await ftDbGet(key);
+  if (!rec || !rec.text) return null;
+
+  if (attachToItem) {
+    item.fulltext = rec.text;
+    item.fulltext_cache_key = rec.key;
+    item.fulltext_cached = true;
+    item.fulltext_chars = rec.chars || rec.text.length;
+    item.fulltext_source = rec.source || item.fulltext_source || null;
+    item.fulltext_source_kind = rec.sourceKind || item.fulltext_source_kind || null;
+    item.fulltext_validation = rec.validation || item.fulltext_validation || null;
+    item.fulltext_extracted_at = rec.extractedAt || item.fulltext_extracted_at || null;
+    if (nodes?.[i]) nodes[i].hasFullText = true;
+  }
+
+  return rec.text;
+}
+
+async function ensureFulltextAvailable(i) {
+  const item = itemsData?.[i];
+  if (!item) return '';
+
+  if (typeof item.fulltext === 'string' && item.fulltext.trim()) {
+    return item.fulltext;
+  }
+
+  const restored = await loadPersistedFulltextForIndex(i, { attachToItem: true });
+  return restored || '';
+}
+
+function stripHeavyFulltextFromMemory({ keepVisible = true } = {}) {
+  const visible = new Set();
+  if (keepVisible && Array.isArray(visibleMask)) {
+    for (let i = 0; i < visibleMask.length; i++) if (visibleMask[i]) visible.add(i);
+  }
+
+  let dropped = 0;
+  for (let i = 0; i < (itemsData?.length || 0); i++) {
+    if (visible.has(i)) continue;
+    const item = itemsData[i];
+    if (!item) continue;
+    if (typeof item.fulltext === 'string' && item.fulltext.length) {
+      delete item.fulltext;
+      dropped++;
+    }
+  }
+  return dropped;
+}
+
 // --- Concept map: global state container ------------------------------------
 // --- Concept map: force-directed layout config ------------------------------
 
@@ -1689,6 +1860,22 @@ try {
       delete item.fulltext_last_fail;
 
       if (nodes[i]) nodes[i].hasFullText = true;
+
+            try {
+        await persistFulltextForIndex(i);
+      } catch (e) {
+        console.warn('Failed to persist fulltext to IndexedDB for index', i, e);
+      }
+
+      // Optional memory pressure relief:
+      // keep metadata + hasFullText flag, but don't keep every full text resident forever
+      if (!silent) {
+        // keep current item in memory for panel/UI
+      } else {
+        delete item.fulltext;
+      }
+
+
 
       if (!silent) {
         msg = `Full text extracted and cached (${extracted.length.toLocaleString()} chars).`;
@@ -9877,6 +10064,25 @@ function ref2UoaGuidance(uoaNum, uoaName) {
   return 'UoA nuance: apply the REF-style criteria in a field-sensitive way. Do not import inappropriate standards from another discipline.';
 }
 
+async function getBestTextForLens(i) {
+  const item = itemsData?.[i] || {};
+  let text = '';
+
+  if (typeof item.fulltext === 'string' && item.fulltext.trim()) {
+    text = item.fulltext.trim();
+  } else {
+    text = await ensureFulltextAvailable(i);
+  }
+
+  if (text) return text;
+
+  const abs =
+    String(item.openalex_abstract || '').trim() ||
+    String(getAbstract?.(item.openalex || {}) || '').trim();
+
+  return abs;
+}
+
 function ref2IsLikelyAcademicResearch(doc, item) {
   const raw = String(doc?.text || '');
   const t = raw.toLowerCase();
@@ -10539,9 +10745,29 @@ function serializeState() {
   const obj = {
     meta: {
       format: 'domain-viz-save-v2',
+            fulltext_cache_mode: 'indexeddb-sidecar',
       exported_at: new Date().toISOString()
+
+
+
+
     },
-    items: itemsData,
+    items: itemsData.map((it, i) => {
+      const clone = { ...(it || {}) };
+
+      const text = typeof clone.fulltext === 'string' ? clone.fulltext : '';
+      if (text.trim()) {
+        clone.fulltext_cache_key = clone.fulltext_cache_key || getStableCacheKeyForIndex(i);
+        clone.fulltext_cached = true;
+        clone.fulltext_chars = clone.fulltext_chars || text.length;
+      }
+
+      // Do NOT embed the heavy full text in normal project saves
+      delete clone.fulltext;
+
+      return clone;
+    }),
+    
     edges: edges,
     nodePositions: nodePos,
     dimensions: dims,
@@ -10730,6 +10956,8 @@ if (obj?.meta?.format === 'domain-viz-save-v1' ||
   };
 
   reader.readAsText(native, 'utf-8');
+
+
 }
 
 
@@ -10752,6 +10980,18 @@ async function restoreProjectState(save) {
   setLoadingProgress(0.30, 'Rebuilding graph…');
   const payload = { items: itemsData, edges: es };
   await buildGraphFromPayloadAsync(payload, { autoStartLayout: false });
+
+  // Reconnect persisted full-text metadata to node state
+  for (let i = 0; i < nodes.length; i++) {
+    const item = itemsData?.[i] || {};
+    const hasFT =
+      !!item.fulltext_cached ||
+      !!item.fulltext_cache_key ||
+      (typeof item.fulltext === 'string' && item.fulltext.trim().length > 0);
+
+    nodes[i].hasFullText = !!hasFT;
+  }
+
 
   // HARD STOP again after rebuild
   layoutRunning = false;
@@ -11076,6 +11316,14 @@ item.fulltext_chars = text.length;
 item.fulltext_validation = validation?.metrics || null;
 item.fulltext_extracted_at = new Date().toISOString();
 if (nodes[i]) nodes[i].hasFullText = true;
+
+try {
+  await persistFulltextForIndex(i);
+} catch (e) {
+  console.warn('Failed to persist local-PDF fulltext to IndexedDB for index', i, e);
+}
+
+
 msg = `Full text extracted from local PDF (${text.length.toLocaleString()} chars).`;
       if (infoPanel && infoPanel.index === i) infoPanel.setItemIndex(i);
     } catch (err) {
@@ -11131,67 +11379,241 @@ function _shouldAttemptFT(i) {
 // Optional global cap (0 = no cap)
 let AUTOCACHE_PER_RUN_CAP = 0;  // set to e.g. 500 if you want a ceiling; keep 0 for unlimited
 
+let AUTOCACHE_CANCELLED = false;
+let AUTOSAVE_EVERY_N_SUCCESSES = 10;
+let AUTOCACHE_MEMORY_TRIM_EVERY = 25;
+
 async function autoCacheVisible({ onlyOnScreen = true } = {}) {
-  // Build the target list ONCE, then iterate without mutating it.
+  AUTOCACHE_CANCELLED = false;
+
   const targets = [];
   for (let i = 0; i < nodes.length; i++) {
     if (!visibleMask?.[i]) continue;
-    if (onlyOnScreen && !inView?.[i]) continue;           // on-screen only
-    if (!nodes[i] || nodes[i].hasFullText) continue;
-    if (!_shouldAttemptFT(i)) continue;                    // per-session attempt budget
+    if (onlyOnScreen && !inView?.[i]) continue;
+    if (!nodes[i]) continue;
+
+    const item = itemsData?.[i] || (itemsData[i] = {});
+    const already =
+      !!nodes[i].hasFullText ||
+      !!item.fulltext_cached ||
+      !!item.fulltext_cache_key;
+
+    if (already) continue;
+    if (!_shouldAttemptFT(i)) continue;
+
     targets.push(i);
   }
 
   if (!targets.length) {
-    msg = 'Auto-cache: nothing to do (all visible already cached or none visible).';
+    msg = 'Auto-cache: nothing to do.';
     updateInfo(); redraw();
     return;
   }
 
-  // Optional cap (0 = unlimited)
-  const maxN = Math.max(0, AUTOCACHE_PER_RUN_CAP|0);
+  const maxN = Math.max(0, AUTOCACHE_PER_RUN_CAP | 0);
   const batch = (maxN > 0 && targets.length > maxN) ? targets.slice(0, maxN) : targets;
 
   showLoading(`Auto-caching ${batch.length} papers…`, 0.02);
 
-    let done = 0, ok = 0, fail = 0;
-  for (const i of batch) {
-    let success = false;
+  let done = 0, ok = 0, fail = 0, autosaved = 0;
 
+  for (const i of batch) {
+    if (AUTOCACHE_CANCELLED) break;
+
+    let success = false;
     try {
-      // Hard cap per paper to prevent one bad item from freezing the run
       success = await withTimeout(
         extractFullTextForIndex(i, null, { silent: true }),
-        45000, // 45s; tweak if you like
+        45000,
         'Full-text cache'
       );
     } catch (e) {
       console.warn('Auto-cache: timeout or error on index', i, e);
       success = false;
-      // Optionally mark it so you can see “stubborn” cases later:
       const it = itemsData?.[i] || (itemsData[i] = {});
       it.fulltext_timeout = true;
     }
 
-    if (success) ok++; else fail++;
+    if (success) {
+      ok++;
+      const item = itemsData?.[i];
+      if (item) {
+        item.fulltext_cached = true;
+        item.fulltext_cache_ok = true;
+      }
+    } else {
+      fail++;
+    }
+
     done++;
+
+    if (ok > 0 && (ok % AUTOSAVE_EVERY_N_SUCCESSES === 0)) {
+      try {
+        await saveProjectCheckpoint({ silent: true });
+        autosaved++;
+      } catch (e) {
+        console.warn('Checkpoint save failed', e);
+      }
+    }
+
+    if (done > 0 && (done % AUTOCACHE_MEMORY_TRIM_EVERY === 0)) {
+      const dropped = stripHeavyFulltextFromMemory({ keepVisible: true });
+      if (dropped > 0) console.log(`Trimmed ${dropped} full texts from RAM after persistence.`);
+    }
 
     const frac = done / batch.length;
     setLoadingProgress(
       0.02 + 0.96 * frac,
-      `Auto-caching… ${done}/${batch.length}`
+      `Auto-caching… ${done}/${batch.length} (${ok} cached, ${fail} failed, ${autosaved} autosaves)`
     );
 
-    await new Promise(r => setTimeout(r, AUTOCACHE_SLEEP_MS)); // keep UI responsive
+    await new Promise(r => setTimeout(r, AUTOCACHE_SLEEP_MS));
   }
 
-
   hideLoading();
-  msg = `Auto-cache finished: ${ok} cached, ${fail} failed.`;
+  msg = AUTOCACHE_CANCELLED
+    ? `Auto-cache stopped: ${ok} cached, ${fail} failed.`
+    : `Auto-cache finished: ${ok} cached, ${fail} failed.`;
+
   updateInfo();
   redraw();
 }
+// ─────────────────────────────────────────────────────────────────────────────
+// Autosave / checkpoint save
+// ─────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Autosave / checkpoint save
+// ─────────────────────────────────────────────────────────────────────────────
+
+let AUTOSAVE_ENABLED = true;
+let AUTOSAVE_PROJECT_SUFFIX = '.checkpoint.json';
+
+// Dedicated handle for silent checkpoint overwrites.
+// This is kept separate from the main project handle.
+window.currentCheckpointHandle = window.currentCheckpointHandle || null;
+window.currentCheckpointName   = window.currentCheckpointName   || null;
+
+
+
+
+
+async function saveProjectCheckpoint({ silent = false } = {}) {
+  if (!AUTOSAVE_ENABLED) return false;
+
+  const obj = serializeState();
+  obj.meta = obj.meta || {};
+  obj.meta.is_checkpoint = true;
+  obj.meta.checkpoint_saved_at = new Date().toISOString();
+
+  const json = JSON.stringify(obj, null, 2);
+
+  // Preferred path: silently overwrite an already-authorised checkpoint handle
+  if (window.currentCheckpointHandle) {
+    try {
+      const writable = await window.currentCheckpointHandle.createWritable();
+      await writable.write(json);
+      await writable.close();
+
+      if (!silent) showToast?.('Checkpoint saved.');
+      return true;
+    } catch (e) {
+      console.warn('Silent checkpoint write failed; falling back to localStorage', e);
+    }
+  }
+
+  // Fallback path: localStorage only (silent, no picker)
+  try {
+    localStorage.setItem('macroscope_autosave_checkpoint_v1', json);
+    localStorage.setItem('macroscope_autosave_checkpoint_meta_v1', JSON.stringify({
+      savedAt: obj.meta.checkpoint_saved_at,
+      projectName: window.currentProjectName || null,
+      checkpointName: window.currentCheckpointName || null,
+      itemCount: Array.isArray(obj.items) ? obj.items.length : 0
+    }));
+
+    if (!silent) showToast?.('Checkpoint saved locally.');
+    return true;
+  } catch (e) {
+    console.warn('localStorage checkpoint failed', e);
+    return false;
+  }
+}
+
+async function chooseCheckpointSaveTarget() {
+  if (!(typeof window !== 'undefined' && window.showSaveFilePicker)) {
+    msg = 'File checkpoint target not supported in this browser. Autosave will use local storage only.';
+    updateInfo?.();
+    redraw?.();
+    return false;
+  }
+
+  try {
+    const base = String(window.currentProjectName || 'domain-map').replace(/\.json$/i, '');
+    const suggestedName = `${base}${AUTOSAVE_PROJECT_SUFFIX}`;
+
+    const handle = await window.showSaveFilePicker({
+      suggestedName,
+      types: [{
+        description: 'Macroscope checkpoint (JSON)',
+        accept: { 'application/json': ['.json'] }
+      }]
+    });
+
+    // Probe write permission now, so later autosaves can be silent
+    const writable = await handle.createWritable();
+    await writable.write(JSON.stringify({
+      meta: {
+        is_checkpoint: true,
+        initialised_at: new Date().toISOString(),
+        note: 'Macroscope checkpoint target initialised'
+      }
+    }, null, 2));
+    await writable.close();
+
+    window.currentCheckpointHandle = handle;
+    window.currentCheckpointName = ensureJsonFilename(
+      handle.name || suggestedName || 'domain-map.checkpoint.json'
+    );
+
+    msg = `Checkpoint target set: ${window.currentCheckpointName}`;
+    updateInfo?.();
+    redraw?.();
+    return true;
+  } catch (e) {
+    if (e && (e.name === 'AbortError' || e.name === 'NotAllowedError')) {
+      msg = 'Checkpoint target selection cancelled. Autosave will continue using local storage.';
+    } else {
+      console.error(e);
+      msg = 'Failed to set checkpoint target. Autosave will continue using local storage.';
+    }
+    updateInfo?.();
+    redraw?.();
+    return false;
+  }
+}
+
+
+
+function loadLocalAutosaveCheckpoint() {
+  try {
+    const raw = localStorage.getItem('macroscope_autosave_checkpoint_v1');
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function clearLocalAutosaveCheckpoint() {
+  try {
+    localStorage.removeItem('macroscope_autosave_checkpoint_v1');
+    localStorage.removeItem('macroscope_autosave_checkpoint_meta_v1');
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function prioritiseFulltextCandidates(candidates) {
   const arr = [...new Set((candidates || []).filter(Boolean))];
