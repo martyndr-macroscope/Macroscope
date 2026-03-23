@@ -812,6 +812,9 @@ const INFO_PANEL_TOP_SHIFT = 200;  // move panel down by this many pixels
 
 // --- Save/Load UI ---
 let saveLoadBar, saveBtn, loadBtn, projectFileInput;
+let jsonProjectFileInput = null;
+let pdfImportFileInput = null;
+let loadMenu = null;
 // Track current project file name / handle so Save vs Save As behaves sensibly
 window.currentProjectName  = window.currentProjectName  || null;
 window.currentProjectHandle = window.currentProjectHandle || null;
@@ -1868,22 +1871,72 @@ saveBtn.mousePressed(saveProject);
 
   // Load
 // Load (JSON / PDF / project file)
+// Load
 loadBtn = createImg('./Icons/Load.png', 'Load');
 loadBtn.parent(saveLoadBar);
 loadBtn.size(40, 40);
 loadBtn.style('display','block');
 loadBtn.style('cursor','pointer');
 loadBtn.attribute('draggable','false');
-loadBtn.attribute('title', 'Load JSON or PDF');
-attachTooltip(loadBtn, 'Load JSON or PDF');
+loadBtn.attribute('title', 'Load');
+attachTooltip(loadBtn, 'Load');
 if (typeof captureUI === 'function') captureUI(loadBtn.elt);
 
 loadBtn.mousePressed(() => {
   if (DEMO_MODE) {
     showDemoDatasetMenu();
   } else {
-    openFileDialog();
+    toggleLoadMenu();
   }
+});
+
+// Small popup menu under Load
+loadMenu = createDiv('');
+loadMenu.parent(document.body);
+loadMenu.style('position', 'fixed');
+loadMenu.style('right', '12px');
+loadMenu.style('top', '60px');
+loadMenu.style('display', 'none');
+loadMenu.style('flex-direction', 'column');
+loadMenu.style('gap', '6px');
+loadMenu.style('padding', '8px');
+loadMenu.style('background', 'rgba(20,20,24,0.96)');
+loadMenu.style('border', '1px solid rgba(255,255,255,0.12)');
+loadMenu.style('border-radius', '10px');
+loadMenu.style('z-index', '10030');
+loadMenu.style('min-width', '180px');
+captureUI?.(loadMenu.elt);
+
+const openJsonBtn = createButton('Open JSON Project');
+openJsonBtn.parent(loadMenu);
+openJsonBtn.style('text-align', 'left');
+openJsonBtn.style('padding', '8px 10px');
+openJsonBtn.style('background', 'rgba(255,255,255,0.06)');
+openJsonBtn.style('color', '#f1f1f1');
+openJsonBtn.style('border', '1px solid rgba(255,255,255,0.08)');
+openJsonBtn.style('border-radius', '8px');
+openJsonBtn.style('cursor', 'pointer');
+captureUI?.(openJsonBtn.elt);
+openJsonBtn.mousePressed(openJsonProjectDialog);
+
+const importPdfBtn = createButton('Import from PDF');
+importPdfBtn.parent(loadMenu);
+importPdfBtn.style('text-align', 'left');
+importPdfBtn.style('padding', '8px 10px');
+importPdfBtn.style('background', 'rgba(255,255,255,0.06)');
+importPdfBtn.style('color', '#f1f1f1');
+importPdfBtn.style('border', '1px solid rgba(255,255,255,0.08)');
+importPdfBtn.style('border-radius', '8px');
+importPdfBtn.style('cursor', 'pointer');
+captureUI?.(importPdfBtn.elt);
+importPdfBtn.mousePressed(openPdfImportDialog);
+
+// Click-away close
+document.addEventListener('pointerdown', (ev) => {
+  if (!loadMenu || loadMenu.elt.style.display === 'none') return;
+  const withinMenu = loadMenu.elt.contains(ev.target);
+  const withinBtn  = loadBtn?.elt?.contains?.(ev.target);
+  if (!withinMenu && !withinBtn) closeLoadMenu();
 });
 // Bug / Feature icon (right side)
 if (BUG_MODE) {
@@ -2355,9 +2408,14 @@ if (importBtn) importBtn.hide();
 
   // Hidden file input driven by the button
 // Use a hidden file input (we trigger it from our top bar)
-hiddenFileInput = createFileInput(handleAnyImportSelected, false);
-hiddenFileInput.elt.style.display = 'none';
-hiddenFileInput.elt.setAttribute('accept', '.json,application/json,application/pdf,.pdf');
+// Hidden file inputs driven by the Load menu
+jsonProjectFileInput = createFileInput(handleJsonProjectSelected, false);
+jsonProjectFileInput.elt.style.display = 'none';
+jsonProjectFileInput.elt.setAttribute('accept', '.json,application/json');
+
+pdfImportFileInput = createFileInput(handlePdfImportSelected, false);
+pdfImportFileInput.elt.style.display = 'none';
+pdfImportFileInput.elt.setAttribute('accept', '.pdf,application/pdf');
 
 // 🔧 Add these:
 createTopControlBar();   // top-left icon bar (Import JSON & Force Layout)
@@ -2995,73 +3053,122 @@ __prevCam.scale = cam.scale;
 
 }
 
-
-
-
-// --- UI handlers -------------------------------------------------------------
-function openFileDialog() {
-  hiddenFileInput.elt.value = ""; // reset so selecting the same file works
-  hiddenFileInput.elt.click();
+function openJsonProjectDialog() {
+  if (!jsonProjectFileInput) return;
+  jsonProjectFileInput.elt.value = '';
+  jsonProjectFileInput.elt.click();
 }
 
-async function handleFileSelected(p5file) {
+function openPdfImportDialog() {
+  if (!pdfImportFileInput) return;
+  pdfImportFileInput.elt.value = '';
+  pdfImportFileInput.elt.click();
+}
+
+function closeLoadMenu() {
+  if (loadMenu) loadMenu.style('display', 'none');
+}
+
+function toggleLoadMenu() {
+  if (!loadMenu) return;
+  const isOpen = loadMenu.elt.style.display !== 'none';
+  loadMenu.style('display', isOpen ? 'none' : 'flex');
+}
+
+async function handleJsonProjectSelected(p5file) {
   const native = p5file?.file || p5file;
-  const name = (native?.name || '').toLowerCase();
-  const type = (native?.type || '').toLowerCase();
-  if (type.includes('pdf') || name.endsWith('.pdf')) {
-    return handleAnyImportSelected(p5file);
-  }
-
   if (!native) {
-    msg = "Could not access the file.";
-    updateInfo(); redraw(); return;
+    msg = 'Could not access the file.';
+    updateInfo(); redraw();
+    return;
   }
 
-  showLoading('Reading file…', 0.02);
+  closeLoadMenu();
+  showLoading('Reading file…', 0.01);
 
   const reader = new FileReader();
 
   reader.onprogress = (e) => {
-    if (e.lengthComputable) {
-      const frac = e.total ? e.loaded / e.total : 0;
-      // Reserve 0–0.60 for reading
-      setLoadingProgress(0.60 * frac, `Reading file… ${Math.round(frac * 100)}%`);
+    if (e && e.lengthComputable) {
+      const p = Math.max(0, Math.min(1, e.loaded / e.total));
+      setLoadingProgress(0.01 + p * 0.19, `Reading file… ${Math.round(p * 100)}%`);
+    } else {
+      setLoadingProgress(0.15, 'Reading file…');
     }
   };
 
   reader.onerror = () => {
     hideLoading();
-    msg = "Failed to read file.";
+    msg = 'Failed to read file.';
     updateInfo(); redraw();
   };
 
   reader.onload = async () => {
-    const text = String(reader.result || "");
-    setLoadingProgress(0.65, 'Parsing JSON…');
-    await nextTick(); // let UI paint
-
-    let data;
     try {
-      data = JSON.parse(text);
+      setLoadingProgress(0.22, 'Parsing JSON…');
+      const text = String(reader.result || '');
+      const obj = JSON.parse(text);
+
+      await nextTick();
+
+      if (obj?.meta?.format === 'domain-viz-save-v1' ||
+          obj?.meta?.format === 'domain-viz-save-v2') {
+        setLoadingProgress(0.26, 'Restoring saved project…');
+        await restoreProjectState(obj);
+        msg = 'Project loaded.';
+      } else if (Array.isArray(obj?.nodes) && Array.isArray(obj?.edges)) {
+        setLoadingProgress(0.26, 'Importing viewer dataset…');
+        await restoreFromViewerIndex(obj);
+        msg = 'Viewer dataset loaded.';
+      } else {
+        // Important: do NOT silently rebuild as a generic dataset when the user
+        // explicitly chose "Open JSON Project". That hides project/load mistakes.
+        throw new Error('This JSON is not a saved Macroscope project or viewer dataset.');
+      }
+
+      setLoadingProgress(1.0, 'Done');
     } catch (e) {
       console.error(e);
-      hideLoading();
-      msg = "Invalid JSON.";
-      updateInfo(); redraw();
-      return;
-    }
-
-    // Build graph with chunked progress updates
-    try {
-      await buildGraphFromPayloadAsync(data);
+      msg = e?.message || 'Invalid project JSON.';
     } finally {
       hideLoading();
+      updateInfo(); redraw();
     }
   };
 
-  reader.readAsText(native, "utf-8");
+  reader.readAsText(native, 'utf-8');
 }
 
+async function handlePdfImportSelected(p5file) {
+  const native = p5file?.file || p5file;
+  if (!native) {
+    msg = 'Could not access the file.';
+    updateInfo(); redraw();
+    return;
+  }
+
+  closeLoadMenu();
+
+  try {
+    showLoading('Starting PDF import…', 0.02);
+    const onStatus = (m, pct) => setLoadingProgress(Math.max(0, Math.min(1, pct || 0)), m);
+    const onWork   = (item, workRaw) => addOpenAlexItemAsNode(item, workRaw);
+
+    await DataRetrieval.importPdfFile(native, { viaProxy, onStatus, onWork });
+
+    hideLoading();
+    msg = 'Paper imported ✓';
+
+    computeDomainClusters?.();
+    buildDimensionsIndex?.();
+    renderDimensionsUI?.();
+    updateInfo(); redraw();
+  } catch (e) {
+    hideLoading();
+    msg = `Import failed: ${e.message || e}`;
+    updateInfo(); redraw();
+  }
+}
 
 
 
