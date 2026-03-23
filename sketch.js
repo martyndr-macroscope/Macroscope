@@ -5143,6 +5143,20 @@ const refsTotal = Array.isArray(w.referenced_works)
     const oaObj = w.open_access || {};
     const isOA = !!oaObj.is_oa;
     const oaStatus = isOA ? (oaObj.oa_status ? ` (${oaObj.oa_status})` : '') : '';
+    const pubTypeRaw =
+      w.type ||
+      w.type_crossref ||
+      w.genre ||
+      item?.openalex?.type ||
+      item?.openalex?.type_crossref ||
+      item?.openalex?.genre ||
+      '';
+
+    const pubType = String(pubTypeRaw || '')
+      .replace(/_/g, ' ')
+      .replace(/\b\w/g, c => c.toUpperCase())
+      .trim();
+
 
     const abstractText = (item.openalex_abstract || (typeof getAbstract==='function' ? getAbstract(w) : '') || '').toString();
     const hasAbstract = abstractText.trim().length > 0;
@@ -5190,10 +5204,11 @@ const refsTotal = Array.isArray(w.referenced_works)
 
       <div style="display:grid;grid-template-columns:auto 1fr;gap:6px 10px;font-size:13px;margin-bottom:12px">
         <div style="opacity:.7">Year</div><div>${year || '-'}</div>
+        <div style="opacity:.7">Type</div><div>${safe(pubType || '-')}</div>
         <div style="opacity:.7">Venue</div><div>${safe(venue || '-')}</div>
         <div style="opacity:.7">Cited by</div><div>${citedBy}</div>
-<div style="opacity:.7">Network Citations</div><div>${citing}</div>
-<div style="opacity:.7">References</div><div>${refsTotal}</div>
+        <div style="opacity:.7">Network Citations</div><div>${citing}</div>
+        <div style="opacity:.7">References</div><div>${refsTotal}</div>
         ${
           hasRefScore
             ? `<div style="opacity:.7">REF score</div>
@@ -19779,6 +19794,11 @@ function compactOA(work) {
       type: a.host_venue.type || null,
       url: a.host_venue.url || null
     } : null,
+
+    // KEEP publication type metadata for UI + reports
+    type: a?.type || null,
+    type_crossref: a?.type_crossref || null,
+    genre: a?.genre || null,
 
     venue_name: inferVenueNameFromWork(a, ''),
     abstract: abs || '',
