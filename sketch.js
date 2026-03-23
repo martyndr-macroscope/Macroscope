@@ -10355,6 +10355,17 @@ function deepCloneJsonSafe(v, fallback = null) {
 }
 
 function serializeState() {
+  // Make sure the currently visible view is written back into the mode cache
+  // before we serialize it. Otherwise save.nodePositions and save.viewCache
+  // can disagree, and load will restore stale/random positions.
+  try {
+    if (typeof __snapshotView === 'function' && nodes?.length) {
+      __snapshotView(window.viewMode || viewMode || 'citation');
+    }
+  } catch (e) {
+    console.warn('Failed to snapshot active view before save:', e);
+  }
+
   const nodePos = nodes.map(n => ({ x: n.x, y: n.y, r: n.r || 3 }));
 
   const dims = (dimTools || []).map(d => {
@@ -10644,6 +10655,9 @@ async function restoreProjectState(save) {
   // 3) Apply saved base positions
   setLoadingProgress(0.86, 'Applying saved positions…');
   const pos = Array.isArray(save.nodePositions) ? save.nodePositions : null;
+  // Keep base restored positions available as the active truth during load
+  restoreNodePositionsIntoCache?.(String(save.viewMode || 'citation'), nodes);
+
   if (pos && pos.length === nodes.length) {
     for (let i = 0; i < nodes.length; i++) {
       const p = pos[i] || {};
@@ -10822,8 +10836,32 @@ async function restoreProjectState(save) {
     const vc = (window.__viewCache ||= {});
     const active = String(viewMode || 'citation');
     if (!vc[active]) vc[active] = {};
-    if (!Array.isArray(vc[active].pos) || vc[active].pos.length !== nodes.length) {
-      vc[active].pos = nodes.map(n => ({ x: n.x, y: n.y, r: n.r }));
+
+    // The freshly restored nodePositions are the source of truth for the
+    // active view during project load. Always write them into the active
+    // view cache before __applyView(), otherwise stale cached positions can
+    // overwrite the restored layout.
+    vc[active].pos = nodes.map(n => ({ x: n.x, y: n.y, r: n.r }));
+
+    // Also ensure edges/clusters exist for the active cache if they were absent
+    if (!Array.isArray(vc[active].edges) || !vc[active].edges.length) {
+      vc[active].edges = Array.isArray(edges)
+        ? edges.map(e => ({ source: e.source|0, target: e.target|0, weight: e.weight }))
+        : [];
+    }
+    if (!Array.isArray(vc[active].clusterOf) || vc[active].clusterOf.length !== nodes.length) {
+      vc[active].clusterOf = Array.isArray(clusterOf) ? clusterOf.slice() : null;
+    }
+    if (!Array.isArray(vc[active].clusterSizesTotal)) {
+      vc[active].clusterSizesTotal = Array.isArray(clusterSizesTotal) ? clusterSizesTotal.slice() : null;
+    }
+    if (!Array.isArray(vc[active].clusterLabels)) {
+      vc[active].clusterLabels = Array.isArray(clusterLabels) ? clusterLabels.slice() : null;
+    }
+    if (!Array.isArray(vc[active].clusterColors)) {
+      vc[active].clusterColors = Array.isArray(clusterColors)
+        ? clusterColors.map(c => Array.isArray(c) ? c.slice() : c)
+        : null;
     }
   }
 
