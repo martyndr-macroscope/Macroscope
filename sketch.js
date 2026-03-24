@@ -122,7 +122,7 @@ async function ftDbCount() {
   });
 }
 
-async function persistFulltextForIndex(i) {
+async function persistFulltextForIndex(i, { dropFromMemory = false, keepPreviewChars = 500 } = {}) {
   const item = itemsData?.[i];
   if (!item) return false;
 
@@ -151,6 +151,11 @@ async function persistFulltextForIndex(i) {
   item.fulltext_cached = true;
   item.fulltext_chars = rec.chars;
   item.fulltext_persisted_at = rec.updatedAt;
+
+  if (dropFromMemory) {
+    item.fulltext_preview = text.slice(0, Math.max(0, keepPreviewChars | 0));
+    delete item.fulltext;
+  }
 
   return true;
 }
@@ -205,6 +210,39 @@ function stripHeavyFulltextFromMemory({ keepVisible = true } = {}) {
       delete item.fulltext;
       dropped++;
     }
+  }
+  return dropped;
+}
+
+const MAX_FULLTEXT_IN_MEMORY = 8;
+
+function enforceFulltextMemoryLimit({ keepVisible = true } = {}) {
+  const visible = new Set();
+  if (keepVisible && Array.isArray(visibleMask)) {
+    for (let i = 0; i < visibleMask.length; i++) {
+      if (visibleMask[i]) visible.add(i);
+    }
+  }
+
+  const loaded = [];
+  for (let i = 0; i < (itemsData?.length || 0); i++) {
+    const item = itemsData?.[i];
+    if (!item) continue;
+    if (typeof item.fulltext === 'string' && item.fulltext.length) {
+      loaded.push(i);
+    }
+  }
+
+  if (loaded.length <= MAX_FULLTEXT_IN_MEMORY) return 0;
+
+  let dropped = 0;
+  for (const i of loaded) {
+    if (visible.has(i)) continue;
+    const item = itemsData[i];
+    if (!item) continue;
+    delete item.fulltext;
+    dropped++;
+    if ((loaded.length - dropped) <= MAX_FULLTEXT_IN_MEMORY) break;
   }
   return dropped;
 }
@@ -1858,6 +1896,19 @@ try {
       item.fulltext_validation = validation?.metrics || null;
       item.fulltext_extracted_at = new Date().toISOString();
       delete item.fulltext_last_fail;
+
+      await persistFulltextForIndex(i, { dropFromMemory: true, keepPreviewChars: 500 });
+
+if (nodes?.[i]) nodes[i].hasFullText = true;
+
+// Drop any remaining large local refs ASAP
+extracted = '';
+validation = null;
+
+
+
+enforceFulltextMemoryLimit({ keepVisible: true });
+await new Promise(r => setTimeout(r, 0));
 
       if (nodes[i]) nodes[i].hasFullText = true;
 
@@ -11334,7 +11385,8 @@ item.fulltext_extracted_at = new Date().toISOString();
 if (nodes[i]) nodes[i].hasFullText = true;
 
 try {
-  await persistFulltextForIndex(i);
+  await persistFulltextForIndex(i, { dropFromMemory: true, keepPreviewChars: 500 });
+enforceFulltextMemoryLimit({ keepVisible: true });
 } catch (e) {
   console.warn('Failed to persist local-PDF fulltext to IndexedDB for index', i, e);
 }
@@ -11396,8 +11448,9 @@ function _shouldAttemptFT(i) {
 let AUTOCACHE_PER_RUN_CAP = 0;  // set to e.g. 500 if you want a ceiling; keep 0 for unlimited
 
 let AUTOCACHE_CANCELLED = false;
-let AUTOSAVE_EVERY_N_SUCCESSES = 10;
-let AUTOCACHE_MEMORY_TRIM_EVERY = 25;
+let AUTOSAVE_EVERY_N_SUCCESSES = 5;
+let AUTOCACHE_MEMORY_TRIM_EVERY = 5;
+
 
 async function autoCacheVisible({ onlyOnScreen = true } = {}) {
   AUTOCACHE_CANCELLED = false;
@@ -11461,6 +11514,13 @@ async function autoCacheVisible({ onlyOnScreen = true } = {}) {
       fail++;
     }
 
+    const trimmedNow = stripHeavyFulltextFromMemory({ keepVisible: true });
+const cappedNow = enforceFulltextMemoryLimit({ keepVisible: true });
+
+if (trimmedNow > 0 || cappedNow > 0) {
+  console.log(`Auto-cache RAM trim: dropped ${trimmedNow + cappedNow} full texts from memory.`);
+}
+
     done++;
 
     if (ok > 0 && (ok % AUTOSAVE_EVERY_N_SUCCESSES === 0)) {
@@ -11471,11 +11531,17 @@ async function autoCacheVisible({ onlyOnScreen = true } = {}) {
         console.warn('Checkpoint save failed', e);
       }
     }
+    
+if (done > 0 && (done % AUTOCACHE_MEMORY_TRIM_EVERY === 0)) {
+  const droppedA = stripHeavyFulltextFromMemory({ keepVisible: true });
+  const droppedB = enforceFulltextMemoryLimit({ keepVisible: true });
 
-    if (done > 0 && (done % AUTOCACHE_MEMORY_TRIM_EVERY === 0)) {
-      const dropped = stripHeavyFulltextFromMemory({ keepVisible: true });
-      if (dropped > 0) console.log(`Trimmed ${dropped} full texts from RAM after persistence.`);
-    }
+  if ((droppedA + droppedB) > 0) {
+    console.log(`Trimmed ${droppedA + droppedB} full texts from RAM after persistence.`);
+  }
+
+  await new Promise(r => setTimeout(r, 25));
+}
 
     const frac = done / batch.length;
     setLoadingProgress(
