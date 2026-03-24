@@ -160,7 +160,7 @@ async function persistFulltextForIndex(i, { dropFromMemory = false, keepPreviewC
   return true;
 }
 
-async function loadPersistedFulltextForIndex(i, { attachToItem = true } = {}) {
+async function loadPersistedFulltextForIndex(i, { attachToItem = false } = {}) {
   const item = itemsData?.[i];
   if (!item) return null;
 
@@ -168,19 +168,34 @@ async function loadPersistedFulltextForIndex(i, { attachToItem = true } = {}) {
   const rec = await ftDbGet(key);
   if (!rec || !rec.text) return null;
 
+  // Always restore lightweight metadata
+  item.fulltext_cache_key = rec.key;
+  item.fulltext_cached = true;
+  item.fulltext_chars = rec.chars || rec.text.length;
+  item.fulltext_source = rec.source || item.fulltext_source || null;
+  item.fulltext_source_kind = rec.sourceKind || item.fulltext_source_kind || null;
+  item.fulltext_validation = rec.validation || item.fulltext_validation || null;
+  item.fulltext_extracted_at = rec.extractedAt || item.fulltext_extracted_at || null;
+  if (nodes?.[i]) nodes[i].hasFullText = true;
+
+  // Only rehydrate the heavy string when explicitly requested
   if (attachToItem) {
     item.fulltext = rec.text;
-    item.fulltext_cache_key = rec.key;
-    item.fulltext_cached = true;
-    item.fulltext_chars = rec.chars || rec.text.length;
-    item.fulltext_source = rec.source || item.fulltext_source || null;
-    item.fulltext_source_kind = rec.sourceKind || item.fulltext_source_kind || null;
-    item.fulltext_validation = rec.validation || item.fulltext_validation || null;
-    item.fulltext_extracted_at = rec.extractedAt || item.fulltext_extracted_at || null;
-    if (nodes?.[i]) nodes[i].hasFullText = true;
   }
 
   return rec.text;
+}
+
+async function ensureFulltextAvailable(i, { attachToItem = false } = {}) {
+  const item = itemsData?.[i];
+  if (!item) return '';
+
+  if (typeof item.fulltext === 'string' && item.fulltext.trim()) {
+    return item.fulltext;
+  }
+
+  const restored = await loadPersistedFulltextForIndex(i, { attachToItem });
+  return restored || '';
 }
 
 async function ensureFulltextAvailable(i) {
@@ -1770,7 +1785,6 @@ async function extractFullTextForIndex(i, ftContainerId = null, opts = {}) {
     } catch {}
   }
 
-  // Prefer repository/PMC/arXiv/PDF links over DOI landing pages.
   cand = prioritiseFulltextCandidates(cand);
 
   const setFtPanel = (html) => {
@@ -1802,29 +1816,28 @@ async function extractFullTextForIndex(i, ftContainerId = null, opts = {}) {
   for (let idx = 0; idx < Math.min(cand.length, 12); idx++) {
     const url = cand[idx];
 
-    try {
-let resp;
-try {
-  resp = await fetchFulltextResponse(url, 25000);
-} catch (err) {
-  throw new Error(`Fetch failed for ${url}: ${err?.message || err}`);
-}
+    let resp = null;
+    let html = '';
+    let extracted = '';
+    let validation = null;
+    let finalUrl = url;
+    let looksPdf = false;
+    let extractedChars = 0;
 
-      const finalUrl = resp.url || url;
+    try {
+      resp = await fetchFulltextResponse(url, 25000);
+      finalUrl = resp.url || url;
+
       const ctype = (resp.headers.get('content-type') || '').toLowerCase();
-      const looksPdf =
+      looksPdf =
         ctype.includes('application/pdf') ||
         /\.pdf(\?|$)/i.test(finalUrl) ||
         /\.pdf(\?|$)/i.test(url);
 
-      let extracted = '';
-      let validation = null;
-
       if (looksPdf) {
-        const blob = await resp.blob();
-        if (blob.size > MAX_PDF_BYTES) throw new Error('PDF too large (>25MB).');
+        const buf = await resp.arrayBuffer();
+        if (buf.byteLength > MAX_PDF_BYTES) throw new Error('PDF too large (>25MB).');
 
-        const buf = await blob.arrayBuffer();
         extracted = await withTimeout(
           extractTextFromPdfBuffer(buf),
           90000,
@@ -1840,7 +1853,7 @@ try {
 
         if (!validation.ok) throw new Error(validation.reason);
       } else {
-        const html = await resp.text();
+        html = await resp.text();
         extracted = extractTextFromHtml(html);
 
         validation = validateExtractedFulltext({
@@ -1852,7 +1865,6 @@ try {
 
         if (!validation.ok) throw new Error(validation.reason);
 
-        // Rescue path: if HTML page mentions a PDF, try it.
         if (extracted.length < 8000 && /pdf/i.test(html)) {
           try {
             const doc = new DOMParser().parseFromString(html, 'text/html');
@@ -1865,9 +1877,8 @@ try {
 
             if (rescuePdf) {
               const pdfResp = await fetchFulltextResponse(rescuePdf, 25000);
-              const pdfBlob = await pdfResp.blob();
-              if (pdfBlob.size <= MAX_PDF_BYTES) {
-                const pdfBuf = await pdfBlob.arrayBuffer();
+              const pdfBuf = await pdfResp.arrayBuffer();
+              if (pdfBuf.byteLength <= MAX_PDF_BYTES) {
                 const pdfText = await withTimeout(
                   extractTextFromPdfBuffer(pdfBuf),
                   90000,
@@ -1882,6 +1893,8 @@ try {
                 if (pdfValidation.ok) {
                   extracted = pdfText;
                   validation = pdfValidation;
+                  looksPdf = true;
+                  finalUrl = pdfResp.url || rescuePdf;
                 }
               }
             }
@@ -1889,48 +1902,34 @@ try {
         }
       }
 
+      extractedChars = extracted.length;
+
+      // Keep only lightweight metadata on the item
       item.fulltext = extracted;
       item.fulltext_source = finalUrl;
       item.fulltext_source_kind = looksPdf ? 'pdf' : 'html';
-      item.fulltext_chars = extracted.length;
+      item.fulltext_chars = extractedChars;
       item.fulltext_validation = validation?.metrics || null;
       item.fulltext_extracted_at = new Date().toISOString();
       delete item.fulltext_last_fail;
 
-      await persistFulltextForIndex(i, { dropFromMemory: true, keepPreviewChars: 500 });
+      // Persist ONCE, and drop from RAM immediately
+      await persistFulltextForIndex(i, { dropFromMemory: true, keepPreviewChars: 300 });
 
-if (nodes?.[i]) nodes[i].hasFullText = true;
+      if (nodes?.[i]) nodes[i].hasFullText = true;
 
-// Drop any remaining large local refs ASAP
-extracted = '';
-validation = null;
+      // aggressively release refs
+      resp = null;
+      html = '';
+      extracted = '';
+      validation = null;
 
-
-
-enforceFulltextMemoryLimit({ keepVisible: true });
-await new Promise(r => setTimeout(r, 0));
-
-      if (nodes[i]) nodes[i].hasFullText = true;
-
-            try {
-        await persistFulltextForIndex(i);
-      } catch (e) {
-        console.warn('Failed to persist fulltext to IndexedDB for index', i, e);
-      }
-
-      // Optional memory pressure relief:
-      // keep metadata + hasFullText flag, but don't keep every full text resident forever
-      if (!silent) {
-        // keep current item in memory for panel/UI
-      } else {
-        delete item.fulltext;
-      }
-
-
+      enforceFulltextMemoryLimit({ keepVisible: false });
+      await new Promise(r => setTimeout(r, 0));
 
       if (!silent) {
-        msg = `Full text extracted and cached (${extracted.length.toLocaleString()} chars).`;
-        setFtPanel(`<div style="opacity:.95">Cached ✓ (${extracted.length.toLocaleString()} chars)</div>`);
+        msg = `Full text extracted and cached (${extractedChars.toLocaleString()} chars).`;
+        setFtPanel(`<div style="opacity:.95">Cached ✓ (${extractedChars.toLocaleString()} chars)</div>`);
         if (infoPanel && infoPanel.index === i) infoPanel.setItemIndex(i);
         hideLoading();
         updateInfo();
@@ -1945,6 +1944,14 @@ await new Promise(r => setTimeout(r, 0));
         message: String(err?.message || 'unknown'),
         at: new Date().toISOString()
       };
+
+      // cleanup on failure too
+      delete item.fulltext;
+      resp = null;
+      html = '';
+      extracted = '';
+      validation = null;
+      await new Promise(r => setTimeout(r, 0));
     }
   }
 
@@ -1973,7 +1980,6 @@ await new Promise(r => setTimeout(r, 0));
 
   return false;
 }
-
 
 
 function setWorldSizeForN(n) {
@@ -10138,7 +10144,7 @@ async function getBestTextForLens(i) {
   if (typeof item.fulltext === 'string' && item.fulltext.trim()) {
     text = item.fulltext.trim();
   } else {
-    text = await ensureFulltextAvailable(i);
+    text = await ensureFulltextAvailable(i, { attachToItem: false });
   }
 
   if (text) return text;
@@ -11531,7 +11537,7 @@ if (trimmedNow > 0 || cappedNow > 0) {
         console.warn('Checkpoint save failed', e);
       }
     }
-    
+
 if (done > 0 && (done % AUTOCACHE_MEMORY_TRIM_EVERY === 0)) {
   const droppedA = stripHeavyFulltextFromMemory({ keepVisible: true });
   const droppedB = enforceFulltextMemoryLimit({ keepVisible: true });
