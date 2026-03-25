@@ -186,7 +186,7 @@ async function loadPersistedFulltextForIndex(i, { attachToItem = false } = {}) {
   return rec.text;
 }
 
-async function ensureFulltextAvailable(i, { attachToItem = false } = {}) {
+async function ensureFulltextAvailable(i, { attachToItem = true } = {}) {
   const item = itemsData?.[i];
   if (!item) return '';
 
@@ -198,16 +198,22 @@ async function ensureFulltextAvailable(i, { attachToItem = false } = {}) {
   return restored || '';
 }
 
-async function ensureFulltextAvailable(i) {
-  const item = itemsData?.[i];
-  if (!item) return '';
+async function rehydrateAllPersistedFulltextsForSave() {
+  for (let i = 0; i < (itemsData?.length || 0); i++) {
+    const item = itemsData?.[i];
+    if (!item) continue;
 
-  if (typeof item.fulltext === 'string' && item.fulltext.trim()) {
-    return item.fulltext;
+    const hasInMemory = typeof item.fulltext === 'string' && item.fulltext.trim().length > 0;
+    const hasPersisted = !!(item.fulltext_cached || item.fulltext_cache_key);
+
+    if (!hasInMemory && hasPersisted) {
+      try {
+        await loadPersistedFulltextForIndex(i, { attachToItem: true });
+      } catch (e) {
+        console.warn('Failed to rehydrate persisted full text before save for index', i, e);
+      }
+    }
   }
-
-  const restored = await loadPersistedFulltextForIndex(i, { attachToItem: true });
-  return restored || '';
 }
 
 function stripHeavyFulltextFromMemory({ keepVisible = true } = {}) {
@@ -1927,7 +1933,7 @@ async function extractFullTextForIndex(i, ftContainerId = null, opts = {}) {
       delete item.fulltext_last_fail;
 
       // Persist ONCE, and drop from RAM immediately
-      await persistFulltextForIndex(i, { dropFromMemory: true, keepPreviewChars: 300 });
+      await persistFulltextForIndex(i, { dropFromMemory: false, keepPreviewChars: 500 });
 
       if (nodes?.[i]) nodes[i].hasFullText = true;
 
@@ -5244,7 +5250,12 @@ const refsTotal = Array.isArray(w.referenced_works)
     const abstractFull = abstractText;
     const abstractShort = abstractFull.length > 1000 ? abstractFull.slice(0,1000) + '…' : abstractFull;
 
-    const hasFullText = typeof item.fulltext === 'string' && item.fulltext.trim().length > 0;
+const hasFullText = !!(
+  (typeof item.fulltext === 'string' && item.fulltext.trim().length > 0) ||
+  item.fulltext_cached ||
+  item.fulltext_cache_key ||
+  nodes?.[i]?.hasFullText
+);
     const canExtract  = _hasFTCand(w, doiUrl);
 
     // REF score display (if available)
@@ -10685,7 +10696,8 @@ function ensureJsonFilename(name) {
 
 // Legacy download-based save (no File System Access API)
 async function saveProjectLegacy() {
-  const obj = serializeState();
+  await rehydrateAllPersistedFulltextsForSave();
+  const obj = serializeState({ checkpointMode: false });
 
   // Base default on current project name (without .json) if we have one
   let base = (window.currentProjectName || 'domain-map')
@@ -10727,7 +10739,9 @@ async function saveProjectLegacy() {
 
 // File System Access API save (Chrome/Edge, etc.)
 async function saveProjectFS() {
-  const obj  = serializeState();
+  await rehydrateAllPersistedFulltextsForSave();
+
+  const obj  = serializeState({ checkpointMode: false });
   const json = JSON.stringify(obj, null, 2);
 
   let handle = window.currentProjectHandle || null;
@@ -10764,7 +10778,6 @@ async function saveProjectFS() {
   await writable.close();
 
   window.currentProjectHandle = handle;
-  // .name is the final name chosen in the picker
   window.currentProjectName = ensureJsonFilename(
     handle.name || window.currentProjectName || 'domain-map'
   );
@@ -10875,6 +10888,22 @@ function serializeState(opts = {}) {
     semanticZoomEnabled
   };
 
+    if (!checkpointMode) {
+    // For a normal save, make best effort to rehydrate persisted texts
+    // so the project JSON is self-contained again.
+    for (let i = 0; i < (itemsData?.length || 0); i++) {
+      const item = itemsData[i];
+      if (!item) continue;
+      if (
+        (!item.fulltext || !String(item.fulltext).trim()) &&
+        (item.fulltext_cached || item.fulltext_cache_key)
+      ) {
+        // fire-and-forget is not enough here, so this path is only best-effort
+        // actual save logic below should be called from async save wrappers
+      }
+    }
+  }
+
   const obj = {
     meta: {
       format: 'domain-viz-save-v2',
@@ -10896,16 +10925,22 @@ function serializeState(opts = {}) {
         clone.fulltext_chars = clone.fulltext_chars || text.length;
       }
 
-      // Never embed heavy extracted text in saved JSON
-      delete clone.fulltext;
-
-      // Session-only bookkeeping should never be persisted
+      // Never persist session-only counters
       delete clone._ftAttemptCount;
 
-      // For checkpoint/autosave files keep them as lean as possible
       if (checkpointMode) {
+        // Lean checkpoint/autosave: no heavy embedded text
+        delete clone.fulltext;
         delete clone.fulltext_preview;
         delete clone.fulltext_validation;
+      } else {
+        // Normal project save: keep the embedded full text
+        // so the JSON is portable and self-contained.
+        if (text.trim()) {
+          clone.fulltext = text;
+        } else {
+          delete clone.fulltext;
+        }
       }
 
       return clone;
@@ -10934,6 +10969,23 @@ function serializeState(opts = {}) {
   return obj;
 }
 
+async function rehydrateAllPersistedFulltextsForSave() {
+  for (let i = 0; i < (itemsData?.length || 0); i++) {
+    const item = itemsData?.[i];
+    if (!item) continue;
+
+    if (
+      (!item.fulltext || !String(item.fulltext).trim()) &&
+      (item.fulltext_cached || item.fulltext_cache_key)
+    ) {
+      try {
+        await loadPersistedFulltextForIndex(i, { attachToItem: true });
+      } catch (e) {
+        console.warn('Failed to rehydrate persisted full text for save:', i, e);
+      }
+    }
+  }
+}
 
 function serializeViewCache() {
   const vc = window.__viewCache || {};
@@ -11461,7 +11513,7 @@ item.fulltext_extracted_at = new Date().toISOString();
 if (nodes[i]) nodes[i].hasFullText = true;
 
 try {
-  await persistFulltextForIndex(i, { dropFromMemory: true, keepPreviewChars: 500 });
+  await persistFulltextForIndex(i, { dropFromMemory: false, keepPreviewChars: 500 });
 enforceFulltextMemoryLimit({ keepVisible: true });
 } catch (e) {
   console.warn('Failed to persist local-PDF fulltext to IndexedDB for index', i, e);
@@ -13317,10 +13369,10 @@ menu.style('backdrop-filter', '');
   }
 
 addItem('Retrieve Full Texts', () => {
-  if (typeof startAutoCacheWithDialog === 'function') {
-    startAutoCacheWithDialog({ onlyOnScreen: false, skipAttempted: true });
+  if (typeof autoCacheVisible === 'function') {
+    autoCacheVisible({ onlyOnScreen: false, skipAttempted: true });
   } else {
-    console.warn('startAutoCacheWithDialog() not found.');
+    console.warn('autoCacheVisible() not found.');
   }
 });
 
