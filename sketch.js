@@ -2319,6 +2319,31 @@ publishOverviewBtn.mousePressed(() => {
   });
 });
 
+const publishCitationsBtn = createButton('Cluster Citations');
+publishCitationsBtn.parent(publishMenu);
+publishCitationsBtn.style('text-align', 'left');
+publishCitationsBtn.style('padding', '8px 10px');
+publishCitationsBtn.style('background', 'rgba(255,255,255,0.06)');
+publishCitationsBtn.style('color', '#f1f1f1');
+publishCitationsBtn.style('border', '1px solid rgba(255,255,255,0.08)');
+publishCitationsBtn.style('border-radius', '8px');
+publishCitationsBtn.style('cursor', 'pointer');
+captureUI?.(publishCitationsBtn.elt);
+
+publishCitationsBtn.mousePressed(() => {
+  closePublishMenu();
+  openPublishDialog({
+    mode: 'citations',
+    onSubmit: ({ name, title, text }) => {
+      exportClusterCitationsZip({
+        fileName: name,
+        userTitle: title,
+        userText: text
+      });
+    }
+  });
+});
+
 const publishPeaksBtn = createButton('Peaks of Excellence');
 publishPeaksBtn.parent(publishMenu);
 publishPeaksBtn.style('text-align', 'left');
@@ -19154,6 +19179,255 @@ function buildOverviewHtml(data, mapImgRelPath = 'assets/overview-map.png') {
 </body>
 </html>`;
 }
+
+function computeClusterCitationsReportData(opts = {}) {
+  const clusterIds = [];
+
+  if (Array.isArray(clusterLabels) && clusterLabels.length) {
+    for (let cid = 0; cid < clusterLabels.length; cid++) clusterIds.push(cid);
+  } else {
+    const seen = new Set((clusterOf || []).filter(v => Number.isFinite(v) && v >= 0));
+    for (const cid of seen) clusterIds.push(cid);
+    clusterIds.sort((a, b) => a - b);
+  }
+
+  const rows = [];
+
+  for (const cid of clusterIds) {
+    const nodeIds = [];
+    let totalCitations = 0;
+
+    for (let i = 0; i < (clusterOf?.length || 0); i++) {
+      if (clusterOf[i] !== cid) continue;
+      nodeIds.push(i);
+
+      const item = itemsData?.[i] || {};
+      const oa = item?.openalex || {};
+      const c =
+        Number(item?.cited_by_count) ||
+        Number(oa?.cited_by_count) ||
+        Number(nodes?.[i]?.cbc) ||
+        0;
+
+      totalCitations += Math.max(0, c);
+    }
+
+    if (!nodeIds.length) continue;
+
+    const label = String(clusterLabels?.[cid] || '').trim() || `Cluster ${cid + 1}`;
+    const avgCitations = totalCitations / Math.max(1, nodeIds.length);
+
+    const topFingerprints = typeof topCountsFromNodeIds === 'function'
+      ? topCountsFromNodeIds(nodeIds, getThematicFingerprintsForItemIndex, 8)
+      : [];
+
+    rows.push({
+      clusterId: cid,
+      clusterLabel: label,
+      publicationCount: nodeIds.length,
+      totalCitations,
+      averageCitations: avgCitations,
+      topFingerprints
+    });
+  }
+
+  rows.sort((a, b) =>
+    (b.totalCitations - a.totalCitations) ||
+    (b.averageCitations - a.averageCitations) ||
+    (b.publicationCount - a.publicationCount) ||
+    a.clusterLabel.localeCompare(b.clusterLabel)
+  );
+
+  return {
+    generatedAt: new Date().toISOString(),
+    title: opts.userTitle || 'Cluster Citations',
+    userText: opts.userText || '',
+    clusterCount: rows.length,
+    rows
+  };
+}
+
+function buildClusterCitationsHtml(data) {
+  const escHtml = (s) => String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+
+  const fmtIntLocal = (n) => {
+    const v = Number(n || 0);
+    return Number.isFinite(v) ? v.toLocaleString() : '0';
+  };
+
+  const fmtNum = (n, dp = 1) => {
+    const v = Number(n || 0);
+    return Number.isFinite(v) ? v.toFixed(dp) : '0.0';
+  };
+
+  const rowsHtml = (data?.rows || []).map((r, i) => {
+    const fp = (r.topFingerprints || []).map(x => x.term).filter(Boolean).join(', ');
+    return `
+      <li class="rank-item">
+        <div class="rank-no">${i + 1}</div>
+        <div class="rank-body">
+          <div class="rank-title">${escHtml(r.clusterLabel)}</div>
+          <div class="rank-meta">
+            <span><strong>Total citations:</strong> ${fmtIntLocal(r.totalCitations)}</span>
+            <span><strong>Publications:</strong> ${fmtIntLocal(r.publicationCount)}</span>
+            <span><strong>Average citations per publication:</strong> ${fmtNum(r.averageCitations, 2)}</span>
+          </div>
+          <div class="rank-fp">${escHtml(fp || '—')}</div>
+        </div>
+      </li>
+    `;
+  }).join('');
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>${escHtml(data?.title || 'Cluster Citations')}</title>
+<style>
+  :root{
+    --bg:#f5f7fa;
+    --panel:#ffffff;
+    --ink:#101828;
+    --muted:#667085;
+    --line:#d0d5dd;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--ink);
+    font:14px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  .page{
+    max-width:1100px;
+    margin:0 auto;
+    padding:40px 28px 56px;
+  }
+  h1{
+    margin:0 0 8px;
+    font-size:34px;
+    line-height:1.1;
+  }
+  .intro{
+    color:var(--muted);
+    font-size:15px;
+    max-width:900px;
+    margin-bottom:24px;
+  }
+  .cards{
+    display:grid;
+    grid-template-columns:repeat(3,minmax(0,1fr));
+    gap:14px;
+    margin-bottom:24px;
+  }
+  .card{
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:14px;
+    padding:16px 18px;
+  }
+  .card-k{
+    color:var(--muted);
+    font-size:12px;
+    margin-bottom:8px;
+  }
+  .card-v{
+    font-size:28px;
+    font-weight:700;
+  }
+  .list-wrap{
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:16px;
+    padding:10px 18px 18px;
+  }
+  .rank-list{
+    list-style:none;
+    margin:0;
+    padding:0;
+  }
+  .rank-item{
+    display:grid;
+    grid-template-columns:56px 1fr;
+    gap:14px;
+    padding:16px 0;
+    border-top:1px solid var(--line);
+  }
+  .rank-item:first-child{
+    border-top:none;
+  }
+  .rank-no{
+    width:44px;
+    height:44px;
+    border-radius:999px;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    background:#111827;
+    color:#fff;
+    font-weight:700;
+    font-size:16px;
+  }
+  .rank-title{
+    font-size:18px;
+    font-weight:700;
+    margin-bottom:6px;
+  }
+  .rank-meta{
+    display:flex;
+    flex-wrap:wrap;
+    gap:10px 18px;
+    color:#344054;
+    margin-bottom:6px;
+  }
+  .rank-fp{
+    color:var(--muted);
+    font-size:13px;
+  }
+  @media (max-width: 900px){
+    .cards{grid-template-columns:1fr}
+    .rank-item{grid-template-columns:44px 1fr}
+  }
+</style>
+</head>
+<body>
+  <div class="page">
+    <h1>${escHtml(data?.title || 'Cluster Citations')}</h1>
+    <div class="intro">
+      ${escHtml(data?.userText || 'This report ranks clusters by the total number of citations across the publications assigned to each cluster.')}
+    </div>
+
+    <div class="cards">
+      <div class="card">
+        <div class="card-k">Ranked clusters</div>
+        <div class="card-v">${fmtIntLocal(data?.clusterCount || 0)}</div>
+      </div>
+      <div class="card">
+        <div class="card-k">Ranking basis</div>
+        <div class="card-v" style="font-size:20px">Total citations</div>
+      </div>
+      <div class="card">
+        <div class="card-k">Generated</div>
+        <div class="card-v" style="font-size:18px">${escHtml(String(data?.generatedAt || '').slice(0,10))}</div>
+      </div>
+    </div>
+
+    <div class="list-wrap">
+      <ol class="rank-list">
+        ${rowsHtml}
+      </ol>
+    </div>
+  </div>
+</body>
+</html>`;
+}
+
+
 function computePeaksOfExcellenceData(opts = {}) {
   const minAssessed = 11; // more than 10
 
@@ -19563,6 +19837,47 @@ async function exportOverviewReportZip(opts = {}) {
   showToast?.('Overview HTML report exported.');
 }
 
+async function exportClusterCitationsZip(opts = {}) {
+  projectMeta = {
+    title: (opts.userTitle || '').toString(),
+    text:  (opts.userText  || '').toString(),
+    created: new Date().toISOString()
+  };
+
+  if (typeof JSZip === 'undefined') {
+    showToast?.('JSZip not found');
+    return;
+  }
+
+  showLoading?.('Preparing cluster citations report…', 0.10);
+  const zip = new JSZip();
+
+  const base = `cluster-citations-${Date.now()}/`;
+
+  const reportData = computeClusterCitationsReportData({
+    userTitle: opts.userTitle || 'Cluster Citations',
+    userText: opts.userText || ''
+  });
+
+  setLoadingProgress?.(0.65, 'Building cluster citations HTML…');
+  const html = buildClusterCitationsHtml(reportData);
+
+  zip.file(base + 'citations.json', JSON.stringify(reportData, null, 2));
+  zip.file(base + 'citations.html', html);
+
+  setLoadingProgress?.(0.90, 'Compressing cluster citations report…');
+  const blob = await zip.generateAsync({ type:'blob', compression:'DEFLATE' });
+
+  const fname = normaliseZipName(
+    opts.fileName,
+    `cluster-citations-${Date.now()}`
+  );
+
+  triggerBlobDownload(blob, fname);
+  hideLoading?.();
+  showToast?.('Cluster citations report exported.');
+}
+
 async function exportPeaksOfExcellenceZip(opts = {}) {
   projectMeta = {
     title: (opts.userTitle || '').toString(),
@@ -19842,22 +20157,25 @@ function openPublishDialog({
 } = {}) {
   const nowIso = new Date().toISOString().slice(0,19).replace(/[:T]/g,'-');
 
-  const defaults = {
+    const defaults = {
     viewer:   `viewer-data-${nowIso}.zip`,
     overview: `overview-report-${nowIso}.zip`,
-    peaks:    `peaks-of-excellence-${nowIso}.zip`
+    peaks:    `peaks-of-excellence-${nowIso}.zip`,
+    citations:`cluster-citations-${nowIso}.zip`
   };
 
   const titles = {
     viewer: 'Publish JSON Package',
     overview: 'Export Overview',
-    peaks: 'Export Peaks of Excellence'
+    peaks: 'Export Peaks of Excellence',
+    citations: 'Export Cluster Citations'
   };
 
   const help = {
     viewer: 'Viewer JSON package = index.json + details shards + AI shards',
     overview: 'Overview report package = overview.html + overview.json + map PNG',
-    peaks: 'Peaks of Excellence = peaks.html + peaks.json'
+    peaks: 'Peaks of Excellence = peaks.html + peaks.json',
+    citations: 'Cluster Citations = citations.html + citations.json'
   };
 
   const bg = document.createElement('div');
