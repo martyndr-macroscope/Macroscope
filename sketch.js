@@ -2241,24 +2241,47 @@ attachTooltip(exportViewerBtn, 'Publish');
 if (typeof captureUI === 'function') captureUI(exportViewerBtn.elt);
 
 // Publish menu
+// Publish menu
 publishMenu = createDiv('');
 publishMenu.parent(document.body);
-publishMenu.style('position', 'absolute');
-publishMenu.style('top', '52px');
-publishMenu.style('right', '0');
+publishMenu.style('position', 'fixed');
+publishMenu.style('left', '0px');
+publishMenu.style('top', '0px');
 publishMenu.style('display', 'none');
-publishMenu.style('min-width', '220px');
+publishMenu.style('min-width', '240px');
 publishMenu.style('padding', '8px');
 publishMenu.style('border-radius', '10px');
 publishMenu.style('background', 'rgba(20,20,20,0.96)');
 publishMenu.style('border', '1px solid rgba(255,255,255,0.10)');
 publishMenu.style('box-shadow', '0 10px 24px rgba(0,0,0,0.35)');
-publishMenu.style('z-index', '99999');
-publishMenu.style('display', 'none');
+publishMenu.style('z-index', '100000');
+publishMenu.style('pointer-events', 'auto');
 captureUI?.(publishMenu.elt);
+
+function positionPublishMenu() {
+  if (!publishMenu || !exportViewerBtn?.elt) return;
+
+  const rect = exportViewerBtn.elt.getBoundingClientRect();
+
+  // Desired width of the menu
+  const menuW = 240;
+  const gap = 6;
+
+  // Open just below the Publish button, aligned to its right edge
+  let left = rect.right - menuW;
+  let top  = rect.bottom + gap;
+
+  // Keep inside viewport
+  left = Math.max(8, Math.min(left, window.innerWidth - menuW - 8));
+  top  = Math.max(8, Math.min(top, window.innerHeight - 8));
+
+  publishMenu.style('left', `${left}px`);
+  publishMenu.style('top', `${top}px`);
+}
 
 function openPublishMenu() {
   if (!publishMenu) return;
+  positionPublishMenu();
   publishMenu.style('display', 'flex');
   publishMenu.style('flex-direction', 'column');
   publishMenu.style('gap', '8px');
@@ -2268,6 +2291,12 @@ function closePublishMenu() {
   if (!publishMenu) return;
   publishMenu.style('display', 'none');
 }
+
+window.addEventListener('resize', () => {
+  if (publishMenu && publishMenu.elt.style.display !== 'none') {
+    positionPublishMenu();
+  }
+});
 
 const publishJsonBtn = createButton('Publish JSON Package');
 publishJsonBtn.parent(publishMenu);
@@ -2398,8 +2427,11 @@ publishGrowthBtn.mousePressed(() => {
 exportViewerBtn.mousePressed(() => {
   if (DEMO_MODE) return;
   const isOpen = publishMenu && publishMenu.elt.style.display !== 'none';
-  if (isOpen) closePublishMenu();
-  else openPublishMenu();
+  if (isOpen) {
+    closePublishMenu();
+  } else {
+    openPublishMenu();
+  }
 });
 
 // Click-away close
