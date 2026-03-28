@@ -2369,6 +2369,31 @@ publishPeaksBtn.mousePressed(() => {
   });
 });
 
+const publishGrowthBtn = createButton('Cluster Growth');
+publishGrowthBtn.parent(publishMenu);
+publishGrowthBtn.style('text-align', 'left');
+publishGrowthBtn.style('padding', '8px 10px');
+publishGrowthBtn.style('background', 'rgba(255,255,255,0.06)');
+publishGrowthBtn.style('color', '#f1f1f1');
+publishGrowthBtn.style('border', '1px solid rgba(255,255,255,0.08)');
+publishGrowthBtn.style('border-radius', '8px');
+publishGrowthBtn.style('cursor', 'pointer');
+captureUI?.(publishGrowthBtn.elt);
+
+publishGrowthBtn.mousePressed(() => {
+  closePublishMenu();
+  openPublishDialog({
+    mode: 'growth',
+    onSubmit: ({ name, title, text }) => {
+      exportClusterGrowthZip({
+        fileName: name,
+        userTitle: title,
+        userText: text
+      });
+    }
+  });
+});
+
 
 exportViewerBtn.mousePressed(() => {
   if (DEMO_MODE) return;
@@ -19180,6 +19205,315 @@ function buildOverviewHtml(data, mapImgRelPath = 'assets/overview-map.png') {
 </html>`;
 }
 
+function computeClusterGrowthReportData(opts = {}) {
+  const clusterRows = [];
+  const yearSet = new Set();
+
+  const clusterIds = [];
+  if (Array.isArray(clusterLabels) && clusterLabels.length) {
+    for (let cid = 0; cid < clusterLabels.length; cid++) clusterIds.push(cid);
+  } else {
+    const seen = new Set((clusterOf || []).filter(v => Number.isFinite(v) && v >= 0));
+    for (const cid of seen) clusterIds.push(cid);
+    clusterIds.sort((a, b) => a - b);
+  }
+
+  for (const cid of clusterIds) {
+    const byYear = Object.create(null);
+    let total = 0;
+
+    for (let i = 0; i < (clusterOf?.length || 0); i++) {
+      if (clusterOf[i] !== cid) continue;
+
+      const item = itemsData?.[i] || {};
+      const oa = item?.openalex || {};
+
+      const y =
+        Number(item?.year) ||
+        Number(item?.publication_year) ||
+        Number(oa?.publication_year) ||
+        Number(oa?.year);
+
+      if (!Number.isFinite(y) || y < 1000 || y > 3000) continue;
+
+      byYear[y] = (byYear[y] || 0) + 1;
+      total++;
+      yearSet.add(y);
+    }
+
+    if (!total) continue;
+
+    clusterRows.push({
+      clusterId: cid,
+      clusterLabel: String(clusterLabels?.[cid] || '').trim() || `Cluster ${cid + 1}`,
+      totalPublications: total,
+      byYear
+    });
+  }
+
+  const years = Array.from(yearSet).sort((a, b) => a - b);
+
+  // Keep top 100 clusters by total publications
+  clusterRows.sort((a, b) =>
+    (b.totalPublications - a.totalPublications) ||
+    a.clusterLabel.localeCompare(b.clusterLabel)
+  );
+
+  const topClusters = clusterRows.slice(0, 100).map(row => ({
+    ...row,
+    series: years.map(y => row.byYear[y] || 0)
+  }));
+
+  return {
+    generatedAt: new Date().toISOString(),
+    title: opts.userTitle || 'Cluster Growth',
+    userText: opts.userText || '',
+    years,
+    clusterCount: topClusters.length,
+    totalClustersWithYears: clusterRows.length,
+    clusters: topClusters
+  };
+}
+function buildClusterGrowthHtml(data) {
+  const escHtml = (s) => String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+
+  const years = Array.isArray(data?.years) ? data.years : [];
+  const clusters = Array.isArray(data?.clusters) ? data.clusters : [];
+
+  const chartW = 1100;
+  const chartH = 560;
+  const padL = 70;
+  const padR = 24;
+  const padT = 28;
+  const padB = 48;
+  const innerW = chartW - padL - padR;
+  const innerH = chartH - padT - padB;
+
+  const maxY = Math.max(
+    1,
+    ...clusters.flatMap(c => Array.isArray(c.series) ? c.series : [0])
+  );
+
+  const xFor = (idx) => {
+    if (years.length <= 1) return padL + innerW / 2;
+    return padL + (idx / (years.length - 1)) * innerW;
+  };
+  const yFor = (v) => padT + innerH - (Math.max(0, v) / maxY) * innerH;
+
+  // Light palette generated from cluster id
+  const lineColor = (cid) => {
+    const hue = (cid * 47) % 360;
+    return `hsl(${hue} 62% 48%)`;
+  };
+
+  const yTicks = 5;
+  const yGrid = Array.from({ length: yTicks + 1 }, (_, i) => {
+    const v = (maxY / yTicks) * i;
+    const y = yFor(v);
+    return { v, y };
+  });
+
+  const linePaths = clusters.map(c => {
+    const pts = c.series.map((v, i) => `${i === 0 ? 'M' : 'L'} ${xFor(i).toFixed(2)} ${yFor(v).toFixed(2)}`).join(' ');
+    return `
+      <path d="${pts}"
+            fill="none"
+            stroke="${lineColor(c.clusterId)}"
+            stroke-width="1.8"
+            opacity="0.72">
+        <title>${escHtml(c.clusterLabel)} (${c.totalPublications} pubs)</title>
+      </path>
+    `;
+  }).join('');
+
+  const xLabels = years.map((y, i) => `
+    <text x="${xFor(i)}" y="${chartH - 16}" text-anchor="middle" font-size="11" fill="#667085">${y}</text>
+  `).join('');
+
+  const yLabels = yGrid.map(g => `
+    <g>
+      <line x1="${padL}" y1="${g.y}" x2="${chartW - padR}" y2="${g.y}" stroke="#e5e7eb" stroke-width="1"/>
+      <text x="${padL - 10}" y="${g.y + 4}" text-anchor="end" font-size="11" fill="#667085">${Math.round(g.v)}</text>
+    </g>
+  `).join('');
+
+  const legendHtml = clusters.map((c, i) => `
+    <div class="legend-item">
+      <span class="swatch" style="background:${lineColor(c.clusterId)}"></span>
+      <span class="legend-rank">${i + 1}.</span>
+      <span class="legend-label">${escHtml(c.clusterLabel)}</span>
+      <span class="legend-meta">(${c.totalPublications})</span>
+    </div>
+  `).join('');
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>${escHtml(data?.title || 'Cluster Growth')}</title>
+<style>
+  :root{
+    --bg:#f8fafc;
+    --panel:#ffffff;
+    --ink:#101828;
+    --muted:#667085;
+    --line:#d0d5dd;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--ink);
+    font:14px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  .page{
+    max-width:1320px;
+    margin:0 auto;
+    padding:36px 24px 56px;
+  }
+  h1{
+    margin:0 0 8px;
+    font-size:34px;
+    line-height:1.1;
+  }
+  .intro{
+    color:var(--muted);
+    font-size:15px;
+    max-width:980px;
+    margin-bottom:22px;
+  }
+  .cards{
+    display:grid;
+    grid-template-columns:repeat(4,minmax(0,1fr));
+    gap:14px;
+    margin-bottom:24px;
+  }
+  .card{
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:14px;
+    padding:16px 18px;
+  }
+  .card-k{
+    color:var(--muted);
+    font-size:12px;
+    margin-bottom:8px;
+  }
+  .card-v{
+    font-size:28px;
+    font-weight:700;
+  }
+  .chart-wrap, .legend-wrap{
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:16px;
+    padding:18px;
+  }
+  .chart-wrap{
+    margin-bottom:18px;
+    overflow:auto;
+  }
+  .legend-wrap h2{
+    margin:0 0 12px;
+    font-size:20px;
+  }
+  .legend-grid{
+    display:grid;
+    grid-template-columns:repeat(2,minmax(0,1fr));
+    gap:8px 18px;
+  }
+  .legend-item{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    min-width:0;
+    font-size:13px;
+  }
+  .swatch{
+    width:12px;
+    height:12px;
+    border-radius:999px;
+    flex:0 0 auto;
+  }
+  .legend-rank{
+    color:var(--muted);
+    width:26px;
+    flex:0 0 auto;
+    text-align:right;
+  }
+  .legend-label{
+    font-weight:600;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+  }
+  .legend-meta{
+    color:var(--muted);
+    flex:0 0 auto;
+  }
+  @media (max-width: 980px){
+    .cards{grid-template-columns:repeat(2,minmax(0,1fr))}
+    .legend-grid{grid-template-columns:1fr}
+  }
+</style>
+</head>
+<body>
+  <div class="page">
+    <h1>${escHtml(data?.title || 'Cluster Growth')}</h1>
+    <div class="intro">
+      ${escHtml(data?.userText || 'This report shows the number of publications in each of the top 100 clusters over time, using the publication years available in the dataset.')}
+    </div>
+
+    <div class="cards">
+      <div class="card">
+        <div class="card-k">Clusters shown</div>
+        <div class="card-v">${clusters.length}</div>
+      </div>
+      <div class="card">
+        <div class="card-k">Total clusters with year data</div>
+        <div class="card-v">${Number(data?.totalClustersWithYears || 0)}</div>
+      </div>
+      <div class="card">
+        <div class="card-k">Year range</div>
+        <div class="card-v" style="font-size:22px">${years.length ? `${years[0]}–${years[years.length - 1]}` : 'n/a'}</div>
+      </div>
+      <div class="card">
+        <div class="card-k">Generated</div>
+        <div class="card-v" style="font-size:18px">${escHtml(String(data?.generatedAt || '').slice(0,10))}</div>
+      </div>
+    </div>
+
+    <div class="chart-wrap">
+      <svg width="${chartW}" height="${chartH}" viewBox="0 0 ${chartW} ${chartH}" role="img" aria-label="Cluster growth chart">
+        <rect x="0" y="0" width="${chartW}" height="${chartH}" fill="#fff"/>
+        ${yLabels}
+        <line x1="${padL}" y1="${padT + innerH}" x2="${chartW - padR}" y2="${padT + innerH}" stroke="#101828" stroke-width="1.2"/>
+        <line x1="${padL}" y1="${padT}" x2="${padL}" y2="${padT + innerH}" stroke="#101828" stroke-width="1.2"/>
+        ${xLabels}
+        ${linePaths}
+        <text x="${chartW/2}" y="${chartH - 4}" text-anchor="middle" font-size="12" fill="#475467">Publication year</text>
+        <text x="18" y="${chartH/2}" text-anchor="middle" font-size="12" fill="#475467" transform="rotate(-90 18 ${chartH/2})">Publications per year</text>
+      </svg>
+    </div>
+
+    <div class="legend-wrap">
+      <h2>Top 100 clusters included</h2>
+      <div class="legend-grid">
+        ${legendHtml}
+      </div>
+    </div>
+  </div>
+</body>
+</html>`;
+}
+
+
+
 function computeClusterCitationsReportData(opts = {}) {
   const clusterIds = [];
 
@@ -19878,6 +20212,47 @@ async function exportClusterCitationsZip(opts = {}) {
   showToast?.('Cluster citations report exported.');
 }
 
+async function exportClusterGrowthZip(opts = {}) {
+  projectMeta = {
+    title: (opts.userTitle || '').toString(),
+    text:  (opts.userText  || '').toString(),
+    created: new Date().toISOString()
+  };
+
+  if (typeof JSZip === 'undefined') {
+    showToast?.('JSZip not found');
+    return;
+  }
+
+  showLoading?.('Preparing cluster growth report…', 0.10);
+  const zip = new JSZip();
+
+  const base = `cluster-growth-${Date.now()}/`;
+
+  const reportData = computeClusterGrowthReportData({
+    userTitle: opts.userTitle || 'Cluster Growth',
+    userText: opts.userText || ''
+  });
+
+  setLoadingProgress?.(0.65, 'Building cluster growth HTML…');
+  const html = buildClusterGrowthHtml(reportData);
+
+  zip.file(base + 'growth.json', JSON.stringify(reportData, null, 2));
+  zip.file(base + 'growth.html', html);
+
+  setLoadingProgress?.(0.90, 'Compressing cluster growth report…');
+  const blob = await zip.generateAsync({ type:'blob', compression:'DEFLATE' });
+
+  const fname = normaliseZipName(
+    opts.fileName,
+    `cluster-growth-${Date.now()}`
+  );
+
+  triggerBlobDownload(blob, fname);
+  hideLoading?.();
+  showToast?.('Cluster growth report exported.');
+}
+
 async function exportPeaksOfExcellenceZip(opts = {}) {
   projectMeta = {
     title: (opts.userTitle || '').toString(),
@@ -20157,25 +20532,28 @@ function openPublishDialog({
 } = {}) {
   const nowIso = new Date().toISOString().slice(0,19).replace(/[:T]/g,'-');
 
-    const defaults = {
+     const defaults = {
     viewer:   `viewer-data-${nowIso}.zip`,
     overview: `overview-report-${nowIso}.zip`,
     peaks:    `peaks-of-excellence-${nowIso}.zip`,
-    citations:`cluster-citations-${nowIso}.zip`
+    citations:`cluster-citations-${nowIso}.zip`,
+    growth:   `cluster-growth-${nowIso}.zip`
   };
 
   const titles = {
     viewer: 'Publish JSON Package',
     overview: 'Export Overview',
     peaks: 'Export Peaks of Excellence',
-    citations: 'Export Cluster Citations'
+    citations: 'Export Cluster Citations',
+    growth: 'Export Cluster Growth'
   };
 
   const help = {
     viewer: 'Viewer JSON package = index.json + details shards + AI shards',
     overview: 'Overview report package = overview.html + overview.json + map PNG',
     peaks: 'Peaks of Excellence = peaks.html + peaks.json',
-    citations: 'Cluster Citations = citations.html + citations.json'
+    citations: 'Cluster Citations = citations.html + citations.json',
+    growth: 'Cluster Growth = growth.html + growth.json'
   };
 
   const bg = document.createElement('div');
