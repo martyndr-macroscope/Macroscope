@@ -4023,8 +4023,8 @@ function svgClusterRefBars(sum, width = 236, height = 86) {
   `;
 }
 
-function buildThematicClusterInfoHTML(d) {
-  if (!d || d.type !== 'clusters') return '';
+function buildClusterDimensionInfoHTML(d) {
+  if (!d || String(d.type || '').toLowerCase() !== 'clusters') return '';
 
   const nodeIds = d.nodes
     ? (Array.isArray(d.nodes) ? d.nodes.slice() : Array.from(d.nodes))
@@ -4032,9 +4032,11 @@ function buildThematicClusterInfoHTML(d) {
 
   if (!nodeIds.length) return '';
 
-    // Show thematic cluster info if:
-  // 1) this handle came from thematic mode, OR
-  // 2) the cluster's papers clearly contain thematic fingerprints.
+  const totalOutputs = nodeIds.length;
+  const refSum = collectClusterRefSummary(nodeIds);
+  const gpaTxt = refSum.n ? refSum.gpa.toFixed(2) : 'n/a';
+
+  // Optional thematic extras when this cluster was created in thematic mode
   const hasStoredThematicMode = String(d.clusterMode || '') === 'thematic';
 
   let thematicFingerprintHits = 0;
@@ -4046,13 +4048,13 @@ function buildThematicClusterInfoHTML(d) {
     }
   }
 
-  const hasThematicData = thematicFingerprintHits > 0;
+  const hasThematicData = hasStoredThematicMode || thematicFingerprintHits > 0;
 
-  if (!hasStoredThematicMode && !hasThematicData) return '';
+  const topFingerprints = hasThematicData
+    ? topCountsFromNodeIds(nodeIds, getThematicFingerprintsForItemIndex, 12)
+    : [];
 
-  const topFingerprints = topCountsFromNodeIds(nodeIds, getThematicFingerprintsForItemIndex, 12);
-  const topAuthors      = topCountsFromNodeIds(nodeIds, getAuthorsForItemIndex, 12);
-  const refSum          = collectClusterRefSummary(nodeIds);
+  const topAuthors = topCountsFromNodeIds(nodeIds, getAuthorsForItemIndex, 12);
 
   const chipList = (rows, emptyLabel) => {
     if (!rows || !rows.length) {
@@ -4075,58 +4077,39 @@ function buildThematicClusterInfoHTML(d) {
     `;
   };
 
-  const gpaTxt = refSum.n ? refSum.gpa.toFixed(2) : 'n/a';
-
-  let refHtml = '';
-
-  if (refN > 0) {
-    const maxCount = Math.max(...Object.values(refCounts), 1);
-
-    const bar = (score, color) => {
-      const v = refCounts[score] || 0;
-      const w = (v / maxCount) * 100;
-      return `
-        <div style="display:flex;align-items:center;margin-bottom:4px;">
-          <div style="width:16px;font-size:11px;opacity:.7">${score}★</div>
-          <div style="flex:1;height:8px;background:rgba(255,255,255,0.08);margin:0 6px;border-radius:4px;overflow:hidden;">
-            <div style="width:${w}%;height:100%;background:${color};"></div>
-          </div>
-          <div style="font-size:11px;opacity:.7;width:18px;text-align:right;">${v}</div>
-        </div>
-      `;
-    };
-
-    refHtml = `
-      <div style="margin-top:10px;">
-        <div style="font-weight:600;font-size:12px;margin-bottom:6px;">REF Assessment</div>
-
-        <div style="font-size:12px;margin-bottom:6px;">
-          ${refN} / ${matchedPaperCount} assessed
-          ${gpa != null ? ` · GPA: ${gpa.toFixed(2)}` : ''}
-        </div>
-
-        ${bar(4, '#ff4d4d')}
-        ${bar(3, '#ff9933')}
-        ${bar(2, '#ffd633')}
-        ${bar(1, '#66cc66')}
-      </div>
-    `;
-  }
-
   return `
-    <div style="margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.12)">
-      <div style="font-weight:600;font-size:13px;margin:0 0 6px;">Thematic Fingerprints</div>
-      ${chipList(topFingerprints, 'No thematic fingerprints found for this cluster.')}
+    <div style="margin:10px 0 12px 0;padding:10px;border:1px solid rgba(255,255,255,0.14);border-radius:8px;background:rgba(255,255,255,0.04)">
+      <div style="font-weight:600;font-size:13px;margin-bottom:8px;">Cluster Summary</div>
 
-      <div style="font-weight:600;font-size:13px;margin:12px 0 6px;">Authors Defining Links</div>
+      <div style="display:grid;grid-template-columns:auto 1fr;gap:6px 10px;font-size:12px;margin-bottom:10px;">
+        <div style="opacity:.7">Publications</div>
+        <div>${totalOutputs}</div>
+
+        <div style="opacity:.7">REF scored outputs</div>
+        <div>${refSum.n}</div>
+
+        <div style="opacity:.7">GPA</div>
+        <div>${gpaTxt}</div>
+      </div>
+
+      <div style="font-weight:600;font-size:12px;margin:8px 0 6px;">REF Assessment</div>
+      ${
+        refSum.n
+          ? svgClusterRefBars(refSum, 236, 86)
+          : `<div style="opacity:.65;font-size:12px">No REF scores available for this cluster.</div>`
+      }
+
+      <div style="font-weight:600;font-size:12px;margin:10px 0 6px;">Authors Defining Links</div>
       ${chipList(topAuthors, 'No author data found for this cluster.')}
 
-      <div style="font-weight:600;font-size:13px;margin:12px 0 4px;">REF Profile</div>
-      <div style="display:grid;grid-template-columns:auto 1fr;gap:6px 10px;font-size:12px;margin-bottom:8px">
-        <div style="opacity:.7">Scored outputs</div><div>${refSum.n}</div>
-        <div style="opacity:.7">GPA</div><div>${gpaTxt}</div>
-      </div>
-      ${refSum.n ? svgClusterRefBars(refSum, 236, 86) : `<div style="opacity:.65;font-size:12px">No REF scores available for this cluster.</div>`}
+      ${
+        hasThematicData
+          ? `
+            <div style="font-weight:600;font-size:12px;margin:10px 0 6px;">Thematic Fingerprints</div>
+            ${chipList(topFingerprints, 'No thematic fingerprints found for this cluster.')}
+          `
+          : ''
+      }
     </div>
   `;
 }
@@ -4862,9 +4845,13 @@ _renderDimensionPanel(k) {
   const safe = s => String(s ?? '').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
 
   const delLabel = (String(d.type).toLowerCase() === 'ai') ? 'Delete Lens' : 'Delete Dimension';
-  const extraSummary = (d.type === 'fields' && d.summaryHtml)
-    ? `<div style="margin:10px 0 12px 0">${d.summaryHtml}</div>`
-    : '';
+
+  let extraSummary = '';
+  if (d.type === 'fields' && d.summaryHtml) {
+    extraSummary = `<div style="margin:10px 0 12px 0">${d.summaryHtml}</div>`;
+  } else if (String(d.type || '').toLowerCase() === 'clusters') {
+    extraSummary = buildClusterDimensionInfoHTML(d);
+  }
 
   // --- NEW: aggregated author summary card ----------------------------------
   let authorMetaHtml = '';
