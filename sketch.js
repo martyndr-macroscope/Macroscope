@@ -2230,8 +2230,6 @@ if (BUG_MODE) {
 // Export Viewer (using image instead of text)
 // After you create Save/Load buttons:
 // Publish (using image instead of text)
-// After you create Save/Load buttons:
-// Publish
 const exportViewerBtn = createImg('./Icons/Publish.png', 'Publish');
 exportViewerBtn.parent(saveLoadBar);
 exportViewerBtn.size(40, 40);
@@ -2242,22 +2240,21 @@ exportViewerBtn.attribute('title', 'Publish');
 attachTooltip(exportViewerBtn, 'Publish');
 if (typeof captureUI === 'function') captureUI(exportViewerBtn.elt);
 
-// Ensure menu positions correctly
-saveLoadBar.style('position', 'relative');
-
+// Publish menu
 publishMenu = createDiv('');
 publishMenu.parent(saveLoadBar);
 publishMenu.style('position', 'absolute');
 publishMenu.style('top', '52px');
 publishMenu.style('right', '0');
 publishMenu.style('display', 'none');
-publishMenu.style('min-width', '230px');
+publishMenu.style('min-width', '220px');
 publishMenu.style('padding', '8px');
 publishMenu.style('border-radius', '10px');
 publishMenu.style('background', 'rgba(20,20,20,0.96)');
 publishMenu.style('border', '1px solid rgba(255,255,255,0.10)');
 publishMenu.style('box-shadow', '0 10px 24px rgba(0,0,0,0.35)');
 publishMenu.style('z-index', '10050');
+publishMenu.style('display', 'none');
 captureUI?.(publishMenu.elt);
 
 function openPublishMenu() {
@@ -2272,20 +2269,17 @@ function closePublishMenu() {
   publishMenu.style('display', 'none');
 }
 
-function stylePublishMenuButton(btn) {
-  btn.style('text-align', 'left');
-  btn.style('padding', '8px 10px');
-  btn.style('background', 'rgba(255,255,255,0.06)');
-  btn.style('color', '#f1f1f1');
-  btn.style('border', '1px solid rgba(255,255,255,0.08)');
-  btn.style('border-radius', '8px');
-  btn.style('cursor', 'pointer');
-  captureUI?.(btn.elt);
-}
-
 const publishJsonBtn = createButton('Publish JSON Package');
 publishJsonBtn.parent(publishMenu);
-stylePublishMenuButton(publishJsonBtn);
+publishJsonBtn.style('text-align', 'left');
+publishJsonBtn.style('padding', '8px 10px');
+publishJsonBtn.style('background', 'rgba(255,255,255,0.06)');
+publishJsonBtn.style('color', '#f1f1f1');
+publishJsonBtn.style('border', '1px solid rgba(255,255,255,0.08)');
+publishJsonBtn.style('border-radius', '8px');
+publishJsonBtn.style('cursor', 'pointer');
+captureUI?.(publishJsonBtn.elt);
+
 publishJsonBtn.mousePressed(() => {
   closePublishMenu();
   openPublishDialog({
@@ -2302,7 +2296,15 @@ publishJsonBtn.mousePressed(() => {
 
 const publishOverviewBtn = createButton('Export Overview');
 publishOverviewBtn.parent(publishMenu);
-stylePublishMenuButton(publishOverviewBtn);
+publishOverviewBtn.style('text-align', 'left');
+publishOverviewBtn.style('padding', '8px 10px');
+publishOverviewBtn.style('background', 'rgba(255,255,255,0.06)');
+publishOverviewBtn.style('color', '#f1f1f1');
+publishOverviewBtn.style('border', '1px solid rgba(255,255,255,0.08)');
+publishOverviewBtn.style('border-radius', '8px');
+publishOverviewBtn.style('cursor', 'pointer');
+captureUI?.(publishOverviewBtn.elt);
+
 publishOverviewBtn.mousePressed(() => {
   closePublishMenu();
   openPublishDialog({
@@ -2319,7 +2321,15 @@ publishOverviewBtn.mousePressed(() => {
 
 const publishPeaksBtn = createButton('Peaks of Excellence');
 publishPeaksBtn.parent(publishMenu);
-stylePublishMenuButton(publishPeaksBtn);
+publishPeaksBtn.style('text-align', 'left');
+publishPeaksBtn.style('padding', '8px 10px');
+publishPeaksBtn.style('background', 'rgba(255,255,255,0.06)');
+publishPeaksBtn.style('color', '#f1f1f1');
+publishPeaksBtn.style('border', '1px solid rgba(255,255,255,0.08)');
+publishPeaksBtn.style('border-radius', '8px');
+publishPeaksBtn.style('cursor', 'pointer');
+captureUI?.(publishPeaksBtn.elt);
+
 publishPeaksBtn.mousePressed(() => {
   closePublishMenu();
   openPublishDialog({
@@ -2334,6 +2344,7 @@ publishPeaksBtn.mousePressed(() => {
   });
 });
 
+
 exportViewerBtn.mousePressed(() => {
   if (DEMO_MODE) return;
   const isOpen = publishMenu && publishMenu.elt.style.display !== 'none';
@@ -2341,6 +2352,7 @@ exportViewerBtn.mousePressed(() => {
   else openPublishMenu();
 });
 
+// Click-away close
 document.addEventListener('pointerdown', (ev) => {
   if (!publishMenu || publishMenu.elt.style.display === 'none') return;
   const withinMenu = publishMenu.elt.contains(ev.target);
@@ -2348,11 +2360,13 @@ document.addEventListener('pointerdown', (ev) => {
   if (!withinMenu && !withinBtn) closePublishMenu();
 });
 
-if (DEMO_MODE) {
-  exportViewerBtn.style('opacity', '0.1');
-  exportViewerBtn.style('pointer-events', 'none');
-  exportViewerBtn.style('cursor', 'default');
-  exportViewerBtn.attribute('title', 'Publish (disabled in Demo mode)');
+
+  if (DEMO_MODE) {
+    exportViewerBtn.style('opacity', '0.1');
+    exportViewerBtn.style('pointer-events', 'none');
+    exportViewerBtn.style('cursor', 'default');
+    exportViewerBtn.attribute('title', 'Publish (disabled in Demo mode)');
+  }
 }
 
 // Cache for the demo list to avoid refetching
@@ -18662,9 +18676,6 @@ function getPublishThresholdValue() {
   return null;
 }
 
-
-
-
 function computeOverviewReportData(opts = {}) {
   const total = nodes.length | 0;
 
@@ -18877,191 +18888,6 @@ function buildOverviewNarrative(data) {
     `Each publication has been fingerprinted using AI-based analysis, and research objects have been clustered by authorship and fingerprint sharing. The active clustering threshold in this export is ${thresholdTxt}.`,
     `Clusters are titled from publication abstracts and fingerprint signals. In total, this map contains ${fmtInt(data.clusterCountShown)} clusters above the current minimum cluster size threshold of ${fmtInt(data.minClusterSize)}.${data.domainCountShown ? ` ${fmtInt(data.domainCountShown)} higher-level domains are also available, defined as groups of clusters sharing broader contextual similarity.` : ''}`
   ].join(' ');
-}
-
-function buildPeaksOfExcellenceHtml(reportData) {
-  const escHtml = (s) => String(s ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-
-  const meta = reportData?.meta || {};
-  const byGpa = reportData?.rankings?.byGpa || [];
-  const byFourStar = reportData?.rankings?.byFourStar || [];
-
-  const rowHtml = (r, i, mode = 'gpa') => `
-    <tr>
-      <td>${i + 1}</td>
-      <td>${escHtml(r.clusterLabel)}</td>
-      <td>${r.totalPublications}</td>
-      <td>${r.assessedPublications}</td>
-      <td>${Number(r.gpa || 0).toFixed(2)}</td>
-      <td>${r.fourStarEquivalent}</td>
-      <td>${r.c4plus}</td>
-      <td>${r.c4}</td>
-      <td>${r.c4minus}</td>
-    </tr>
-  `;
-
-  return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${escHtml(meta.title || 'Peaks of Excellence')}</title>
-<style>
-  :root{
-    --bg:#ffffff;
-    --fg:#111111;
-    --muted:#666;
-    --line:#dddddd;
-    --soft:#f5f5f5;
-    --accent:#111;
-  }
-  *{box-sizing:border-box}
-  body{
-    margin:0;
-    background:var(--bg);
-    color:var(--fg);
-    font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
-  }
-  .page{
-    max-width:1200px;
-    margin:0 auto;
-    padding:40px 32px 56px;
-  }
-  h1{
-    font-size:34px;
-    line-height:1.1;
-    margin:0 0 10px;
-  }
-  .lede{
-    color:var(--muted);
-    font-size:15px;
-    max-width:900px;
-    margin-bottom:24px;
-  }
-  .meta{
-    display:grid;
-    grid-template-columns:repeat(3,minmax(160px,1fr));
-    gap:12px;
-    margin:18px 0 28px;
-  }
-  .card{
-    border:1px solid var(--line);
-    background:var(--soft);
-    border-radius:12px;
-    padding:14px 16px;
-  }
-  .k{
-    font-size:12px;
-    color:var(--muted);
-    margin-bottom:6px;
-  }
-  .v{
-    font-size:24px;
-    font-weight:700;
-  }
-  h2{
-    font-size:22px;
-    margin:36px 0 12px;
-  }
-  table{
-    width:100%;
-    border-collapse:collapse;
-    margin:0 0 28px;
-  }
-  th, td{
-    border-bottom:1px solid var(--line);
-    padding:10px 8px;
-    text-align:left;
-    vertical-align:top;
-  }
-  th{
-    font-size:12px;
-    letter-spacing:.02em;
-    text-transform:uppercase;
-    color:var(--muted);
-    background:#fafafa;
-    position:sticky;
-    top:0;
-  }
-  .note{
-    color:var(--muted);
-    font-size:13px;
-    margin-top:8px;
-  }
-</style>
-</head>
-<body>
-  <div class="page">
-    <h1>${escHtml(meta.title || 'Peaks of Excellence')}</h1>
-    <div class="lede">
-      ${escHtml(meta.text || 'This report identifies clusters with more than 10 REF-scored outputs and ranks them by overall GPA and by the number of 4-star-equivalent outputs (4+, 4, 4-).')}
-    </div>
-
-    <div class="meta">
-      <div class="card">
-        <div class="k">Eligible clusters</div>
-        <div class="v">${meta.eligibleClusterCount || 0}</div>
-      </div>
-      <div class="card">
-        <div class="k">Eligibility threshold</div>
-        <div class="v">&gt; ${Math.max(0, (meta.minAssessed || 11) - 1)}</div>
-      </div>
-      <div class="card">
-        <div class="k">Created</div>
-        <div class="v" style="font-size:18px">${escHtml(String(meta.created || '').slice(0,10))}</div>
-      </div>
-    </div>
-
-    <h2>Clusters ranked by GPA</h2>
-    <table>
-      <thead>
-        <tr>
-          <th>Rank</th>
-          <th>Cluster</th>
-          <th>Total pubs</th>
-          <th>REF assessed</th>
-          <th>GPA</th>
-          <th>4★ total</th>
-          <th>4+</th>
-          <th>4</th>
-          <th>4-</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${byGpa.map((r, i) => rowHtml(r, i, 'gpa')).join('')}
-      </tbody>
-    </table>
-
-    <h2>Clusters ranked by number of 4★ publications</h2>
-    <table>
-      <thead>
-        <tr>
-          <th>Rank</th>
-          <th>Cluster</th>
-          <th>Total pubs</th>
-          <th>REF assessed</th>
-          <th>GPA</th>
-          <th>4★ total</th>
-          <th>4+</th>
-          <th>4</th>
-          <th>4-</th>
-        </tr>
-      </thead>
-      <tbody>
-        ${byFourStar.map((r, i) => rowHtml(r, i, 'four')).join('')}
-      </tbody>
-    </table>
-
-    <div class="note">
-      Only clusters with more than 10 REF-scored outputs are included.
-    </div>
-  </div>
-</body>
-</html>`;
 }
 
 function buildOverviewHtml(data, mapImgRelPath = 'assets/overview-map.png') {
@@ -19328,6 +19154,301 @@ function buildOverviewHtml(data, mapImgRelPath = 'assets/overview-map.png') {
 </body>
 </html>`;
 }
+function computePeaksOfExcellenceData(opts = {}) {
+  const minAssessed = 11; // more than 10
+
+  const rows = [];
+  const clusterIds = [];
+
+  if (Array.isArray(clusterLabels) && clusterLabels.length) {
+    for (let cid = 0; cid < clusterLabels.length; cid++) clusterIds.push(cid);
+  } else {
+    const seen = new Set((clusterOf || []).filter(v => Number.isFinite(v) && v >= 0));
+    for (const cid of seen) clusterIds.push(cid);
+    clusterIds.sort((a, b) => a - b);
+  }
+
+  for (const cid of clusterIds) {
+    const nodeIds = [];
+    for (let i = 0; i < (clusterOf?.length || 0); i++) {
+      if (clusterOf[i] === cid) nodeIds.push(i);
+    }
+
+    if (!nodeIds.length) continue;
+
+    const ref = collectClusterRefSummary(nodeIds);
+    if ((ref?.n || 0) < minAssessed) continue;
+
+    const dist = ref.dist || {};
+
+    const row = {
+      clusterId: cid,
+      clusterLabel: String(clusterLabels?.[cid] || '').trim() || `Cluster ${cid + 1}`,
+      totalPublications: nodeIds.length,
+      assessedPublications: ref.n || 0,
+      gpa: Number(ref.gpa || 0),
+
+      c4plus: Number(dist['4+'] || 0),
+      c4: Number(dist['4'] || 0),
+      c4minus: Number(dist['4-'] || 0),
+
+      c3plus: Number(dist['3+'] || 0),
+      c3: Number(dist['3'] || 0),
+      c3minus: Number(dist['3-'] || 0),
+
+      c2plus: Number(dist['2+'] || 0),
+      c2: Number(dist['2'] || 0),
+      c2minus: Number(dist['2-'] || 0),
+
+      c1plus: Number(dist['1+'] || 0),
+      c1: Number(dist['1'] || 0),
+      c1minus: Number(dist['1-'] || 0),
+
+      c0: Number(dist['0'] || 0)
+    };
+
+    row.fourStarTotal = row.c4plus + row.c4 + row.c4minus;
+    rows.push(row);
+  }
+
+  const byGpa = rows.slice().sort((a, b) =>
+    (b.gpa - a.gpa) ||
+    (b.fourStarTotal - a.fourStarTotal) ||
+    (b.assessedPublications - a.assessedPublications) ||
+    a.clusterLabel.localeCompare(b.clusterLabel)
+  );
+
+  const byFourStar = rows.slice().sort((a, b) =>
+    (b.fourStarTotal - a.fourStarTotal) ||
+    (b.gpa - a.gpa) ||
+    (b.assessedPublications - a.assessedPublications) ||
+    a.clusterLabel.localeCompare(b.clusterLabel)
+  );
+
+  return {
+    generatedAt: new Date().toISOString(),
+    title: opts.userTitle || 'Peaks of Excellence',
+    userText: opts.userText || '',
+    minAssessed,
+    eligibleClusterCount: rows.length,
+    rankings: {
+      byGpa,
+      byFourStar
+    }
+  };
+}
+
+function buildPeaksOfExcellenceHtml(data) {
+  const escHtml = (s) => String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+
+  const byGpa = data?.rankings?.byGpa || [];
+  const byFourStar = data?.rankings?.byFourStar || [];
+
+  const renderRows = (rows) => rows.map((r, i) => `
+    <tr>
+      <td>${i + 1}</td>
+      <td>${escHtml(r.clusterLabel)}</td>
+      <td>${r.totalPublications}</td>
+      <td>${r.assessedPublications}</td>
+      <td>${Number(r.gpa || 0).toFixed(2)}</td>
+      <td>${r.fourStarTotal}</td>
+      <td>${r.c4plus}</td>
+      <td>${r.c4}</td>
+      <td>${r.c4minus}</td>
+    </tr>
+  `).join('');
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escHtml(data?.title || 'Peaks of Excellence')}</title>
+<style>
+  :root{
+    --bg:#ffffff;
+    --fg:#111111;
+    --muted:#667085;
+    --line:#e5e7eb;
+    --soft:#f8fafc;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--fg);
+    font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  .page{
+    max-width:1200px;
+    margin:0 auto;
+    padding:40px 32px 56px;
+  }
+  .hero{
+    display:flex;
+    justify-content:space-between;
+    align-items:flex-start;
+    gap:16px;
+    margin-bottom:22px;
+  }
+  h1{
+    font-size:34px;
+    line-height:1.08;
+    margin:0 0 8px;
+  }
+  .meta{
+    color:var(--muted);
+    font-size:13px;
+  }
+  .intro{
+    color:#344054;
+    font-size:15px;
+    max-width:980px;
+    margin:0 0 24px;
+  }
+  .cards{
+    display:grid;
+    grid-template-columns:repeat(3,minmax(0,1fr));
+    gap:14px;
+    margin-bottom:26px;
+  }
+  .card{
+    background:var(--soft);
+    border:1px solid var(--line);
+    border-radius:14px;
+    padding:16px 18px;
+  }
+  .card .k{
+    color:var(--muted);
+    font-size:12px;
+    margin-bottom:8px;
+  }
+  .card .v{
+    font-size:28px;
+    font-weight:700;
+  }
+  .panel{
+    border:1px solid var(--line);
+    border-radius:14px;
+    background:#fff;
+    padding:18px;
+    margin-top:18px;
+  }
+  h2{
+    margin:0 0 12px;
+    font-size:22px;
+  }
+  table{
+    width:100%;
+    border-collapse:collapse;
+  }
+  th, td{
+    text-align:left;
+    padding:10px 8px;
+    border-top:1px solid var(--line);
+    vertical-align:top;
+  }
+  th{
+    border-top:none;
+    font-size:12px;
+    text-transform:uppercase;
+    letter-spacing:.03em;
+    color:var(--muted);
+    background:#fcfcfd;
+  }
+  .note{
+    color:var(--muted);
+    font-size:13px;
+    margin-top:10px;
+  }
+  @media (max-width: 1000px){
+    .cards{grid-template-columns:1fr}
+  }
+</style>
+</head>
+<body>
+  <div class="page">
+    <div class="hero">
+      <div>
+        <h1>${escHtml(data?.title || 'Peaks of Excellence')}</h1>
+        <div class="meta">Generated ${escHtml(new Date(data.generatedAt).toLocaleString())}</div>
+      </div>
+    </div>
+
+    <div class="intro">
+      ${escHtml(data?.userText || 'This report identifies clusters with more than 10 REF-scored publications and ranks them by overall GPA and by the number of 4-star outputs.')}
+    </div>
+
+    <div class="cards">
+      <div class="card">
+        <div class="k">Eligible clusters</div>
+        <div class="v">${data?.eligibleClusterCount || 0}</div>
+      </div>
+      <div class="card">
+        <div class="k">REF threshold</div>
+        <div class="v">&gt; 10</div>
+      </div>
+      <div class="card">
+        <div class="k">Ranking basis</div>
+        <div class="v" style="font-size:20px">GPA + 4★ count</div>
+      </div>
+    </div>
+
+    <section class="panel">
+      <h2>Clusters ranked by overall GPA</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Rank</th>
+            <th>Cluster</th>
+            <th>Total pubs</th>
+            <th>REF assessed</th>
+            <th>GPA</th>
+            <th>4★ total</th>
+            <th>4+</th>
+            <th>4</th>
+            <th>4-</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${renderRows(byGpa)}
+        </tbody>
+      </table>
+    </section>
+
+    <section class="panel">
+      <h2>Clusters ranked by number of 4★ publications</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Rank</th>
+            <th>Cluster</th>
+            <th>Total pubs</th>
+            <th>REF assessed</th>
+            <th>GPA</th>
+            <th>4★ total</th>
+            <th>4+</th>
+            <th>4</th>
+            <th>4-</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${renderRows(byFourStar)}
+        </tbody>
+      </table>
+      <div class="note">Only clusters with more than 10 REF-scored outputs are included.</div>
+    </section>
+  </div>
+</body>
+</html>`;
+}
+
+
+
 async function exportViewerDataZip(opts = {}) {
   projectMeta = {
     title: (opts.userTitle || '').toString(),
@@ -19397,47 +19518,6 @@ async function exportViewerDataZip(opts = {}) {
   showToast?.('Viewer JSON package exported.');
 }
 
-async function exportPeaksOfExcellenceZip(opts = {}) {
-  projectMeta = {
-    title: (opts.userTitle || '').toString(),
-    text:  (opts.userText  || '').toString(),
-    created: new Date().toISOString()
-  };
-
-  if (typeof JSZip === 'undefined') {
-    showToast?.('JSZip not found');
-    return;
-  }
-
-  showLoading?.('Preparing Peaks of Excellence report…', 0.10);
-  const zip = new JSZip();
-
-  const base = `peaks-of-excellence-${Date.now()}/`;
-
-  const reportData = computePeaksOfExcellenceData({
-    userTitle: opts.userTitle || 'Peaks of Excellence',
-    userText: opts.userText || ''
-  });
-
-  setLoadingProgress?.(0.65, 'Building Peaks of Excellence HTML…');
-  const html = buildPeaksOfExcellenceHtml(reportData);
-
-  zip.file(base + 'peaks.json', JSON.stringify(reportData, null, 2));
-  zip.file(base + 'peaks.html', html);
-
-  setLoadingProgress?.(0.90, 'Compressing Peaks of Excellence report…');
-  const blob = await zip.generateAsync({ type:'blob', compression:'DEFLATE' });
-
-  const fname = normaliseZipName(
-    opts.fileName,
-    `peaks-of-excellence-${Date.now()}`
-  );
-
-  triggerBlobDownload(blob, fname);
-  hideLoading?.();
-  showToast?.('Peaks of Excellence report exported.');
-}
-
 async function exportOverviewReportZip(opts = {}) {
   projectMeta = {
     title: (opts.userTitle || '').toString(),
@@ -19483,6 +19563,48 @@ async function exportOverviewReportZip(opts = {}) {
   showToast?.('Overview HTML report exported.');
 }
 
+async function exportPeaksOfExcellenceZip(opts = {}) {
+  projectMeta = {
+    title: (opts.userTitle || '').toString(),
+    text:  (opts.userText  || '').toString(),
+    created: new Date().toISOString()
+  };
+
+  if (typeof JSZip === 'undefined') {
+    showToast?.('JSZip not found');
+    return;
+  }
+
+  showLoading?.('Preparing Peaks of Excellence report…', 0.10);
+  const zip = new JSZip();
+
+  const base = `peaks-of-excellence-${Date.now()}/`;
+
+  const reportData = computePeaksOfExcellenceData({
+    userTitle: opts.userTitle || 'Peaks of Excellence',
+    userText: opts.userText || ''
+  });
+
+  setLoadingProgress?.(0.65, 'Building Peaks of Excellence HTML…');
+  const html = buildPeaksOfExcellenceHtml(reportData);
+
+  zip.file(base + 'peaks.json', JSON.stringify(reportData, null, 2));
+  zip.file(base + 'peaks.html', html);
+
+  setLoadingProgress?.(0.90, 'Compressing Peaks of Excellence report…');
+  const blob = await zip.generateAsync({ type:'blob', compression:'DEFLATE' });
+
+  const fname = normaliseZipName(
+    opts.fileName,
+    `peaks-of-excellence-${Date.now()}`
+  );
+
+  triggerBlobDownload(blob, fname);
+  hideLoading?.();
+  showToast?.('Peaks of Excellence report exported.');
+}
+
+
 async function exportViewerPackageZip(opts = {}) {
   projectMeta = {
     title: (opts.userTitle || '').toString(),
@@ -19507,12 +19629,14 @@ async function exportViewerPackageZip(opts = {}) {
   const detailsDir = dataDir + 'details/';
   const aiDir      = dataDir + 'ai/';
 
+  // 1) Manifest
   const indexObj = buildViewerIndexObject({
     userTitle: opts.userTitle || '',
     userText: opts.userText || ''
   });
   zip.file(dataDir + 'index.json', JSON.stringify(indexObj, null, 2));
 
+  // 2) Details shards
   for (let i = 0; i < nodes.length; i++) {
     const d = buildViewerDetailsObject(i);
     zip.file(detailsDir + `${d.id}.json`, JSON.stringify(d, null, 2));
@@ -19525,10 +19649,11 @@ async function exportViewerPackageZip(opts = {}) {
     }
   }
 
+  // 3) AI shards
   const ai = (window.aiFootprints || []);
   for (let j = 0; j < ai.length; j++) {
     const f = ai[j] || {};
-    const id = `A${j+1}`;
+    const id = `A${j + 1}`;
     const shard = {
       id,
       title: f.aiTitle || f.title || `AI ${j + 1}`,
@@ -19545,6 +19670,7 @@ async function exportViewerPackageZip(opts = {}) {
     zip.file(aiDir + `${id}.json`, JSON.stringify(shard, null, 2));
   }
 
+  // 4) Pack + download
   setLoadingProgress?.(0.88, 'Compressing viewer package…');
   const blob = await zip.generateAsync({ type:'blob', compression:'DEFLATE' });
 
