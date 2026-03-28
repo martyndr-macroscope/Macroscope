@@ -2253,7 +2253,7 @@ publishMenu.style('border-radius', '10px');
 publishMenu.style('background', 'rgba(20,20,20,0.96)');
 publishMenu.style('border', '1px solid rgba(255,255,255,0.10)');
 publishMenu.style('box-shadow', '0 10px 24px rgba(0,0,0,0.35)');
-publishMenu.style('z-index', '10050');
+publishMenu.style('z-index', '99999');
 publishMenu.style('display', 'none');
 captureUI?.(publishMenu.elt);
 
