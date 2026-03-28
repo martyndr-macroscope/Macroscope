@@ -2242,7 +2242,7 @@ if (typeof captureUI === 'function') captureUI(exportViewerBtn.elt);
 
 // Publish menu
 publishMenu = createDiv('');
-publishMenu.parent(saveLoadBar);
+publishMenu.parent(document.body);
 publishMenu.style('position', 'absolute');
 publishMenu.style('top', '52px');
 publishMenu.style('right', '0');
