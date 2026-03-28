@@ -21677,6 +21677,40 @@ function compactOA(work) {
     refsCount
   };
 }
+function computeClusterGrowthSeries(nodeIds) {
+  const ids = Array.isArray(nodeIds) ? nodeIds : Array.from(nodeIds || []);
+  if (!ids.length) return [];
+
+  const byYear = Object.create(null);
+  const yearSet = new Set();
+
+  for (const i of ids) {
+    const item = itemsData?.[i] || {};
+    const oa = item?.openalex || {};
+
+    const y =
+      Number(item?.year) ||
+      Number(item?.publication_year) ||
+      Number(oa?.publication_year) ||
+      Number(oa?.year);
+
+    if (!Number.isFinite(y) || y < 1000 || y > 3000) continue;
+
+    byYear[y] = (byYear[y] || 0) + 1;
+    yearSet.add(y);
+  }
+
+  const years = Array.from(yearSet).sort((a, b) => a - b);
+  if (!years.length) return [];
+
+  // CUMULATIVE series, to match your current Cluster Growth report logic
+  let running = 0;
+  return years.map(y => {
+    running += (byYear[y] || 0);
+    return running;
+  });
+}
+
 function computeClusterImportanceScores() {
   const rows = [];
 
