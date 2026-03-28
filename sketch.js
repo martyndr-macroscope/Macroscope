@@ -2423,6 +2423,30 @@ publishGrowthBtn.mousePressed(() => {
   });
 });
 
+const publishImportanceBtn = createButton('Cluster Importance');
+publishImportanceBtn.parent(publishMenu);
+publishImportanceBtn.style('text-align', 'left');
+publishImportanceBtn.style('padding', '8px 10px');
+publishImportanceBtn.style('background', 'rgba(255,255,255,0.06)');
+publishImportanceBtn.style('color', '#f1f1f1');
+publishImportanceBtn.style('border', '1px solid rgba(255,255,255,0.08)');
+publishImportanceBtn.style('border-radius', '8px');
+publishImportanceBtn.style('cursor', 'pointer');
+captureUI?.(publishImportanceBtn.elt);
+
+publishImportanceBtn.mousePressed(() => {
+  closePublishMenu();
+  openPublishDialog({
+    mode: 'importance',
+    onSubmit: ({ name, title, text }) => {
+      exportClusterImportanceZip({
+        fileName: name,
+        userTitle: title,
+        userText: text
+      });
+    }
+  });
+});
 
 exportViewerBtn.mousePressed(() => {
   if (DEMO_MODE) return;
@@ -19885,6 +19909,327 @@ function computePeaksOfExcellenceData(opts = {}) {
     }
   };
 }
+function buildClusterImportanceHtml(data) {
+  const escHtml = (s) => String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+
+  const fmtInt = (n) => {
+    const v = Number(n || 0);
+    return Number.isFinite(v) ? v.toLocaleString() : '0';
+  };
+
+  const fmtNum = (n, dp = 3) => {
+    const v = Number(n || 0);
+    return Number.isFinite(v) ? v.toFixed(dp) : '0.000';
+  };
+
+  const rows = Array.isArray(data?.rows) ? data.rows : [];
+    // --- Scatter plot prep ---------------------------------------------------
+  const plotW = 980;
+  const plotH = 560;
+  const padL = 72;
+  const padR = 24;
+  const padT = 24;
+  const padB = 56;
+  const innerW = plotW - padL - padR;
+  const innerH = plotH - padT - padB;
+
+  const citationVals = rows.map(r => Math.max(0, Number(r.citations || 0)));
+  const growthVals   = rows.map(r => Math.max(0, Number(r.growth || 0)));
+  const sizeVals     = rows.map(r => Math.max(1, Number(r.size || 1)));
+  const gpaVals      = rows.map(r => Math.max(0, Number(r.gpa || 0)));
+
+  const minCitation = Math.min(...citationVals, 0);
+  const maxCitation = Math.max(...citationVals, 1);
+  const minGrowth   = Math.min(...growthVals, 0);
+  const maxGrowth   = Math.max(...growthVals, 1);
+  const minSize     = Math.min(...sizeVals, 1);
+  const maxSize     = Math.max(...sizeVals, 1);
+  const minGpa      = Math.min(...gpaVals, 0);
+  const maxGpa      = Math.max(...gpaVals, 4);
+
+  const safeNorm = (v, lo, hi) => {
+    if (!Number.isFinite(v)) return 0;
+    if (!(hi > lo)) return 0.5;
+    return (v - lo) / (hi - lo);
+  };
+
+  // Use log scale on citations for readability
+  const log1p = (x) => Math.log(1 + Math.max(0, x));
+  const minCitationLog = log1p(minCitation);
+  const maxCitationLog = log1p(maxCitation);
+
+  const xFor = (cit) => {
+    const t = safeNorm(log1p(cit), minCitationLog, maxCitationLog);
+    return padL + t * innerW;
+  };
+
+  const yFor = (growth) => {
+    const t = safeNorm(growth, minGrowth, maxGrowth);
+    return padT + innerH - t * innerH;
+  };
+
+  const rFor = (size) => {
+    const t = safeNorm(size, minSize, maxSize);
+    return 4 + t * 14;
+  };
+
+  // GPA colour: low = cool blue, high = warm red
+  const colorForGpa = (gpa) => {
+    const t = safeNorm(gpa, minGpa, maxGpa);
+    const hue = 220 - (220 * t); // 220 -> 0
+    return `hsl(${hue} 75% 52%)`;
+  };
+
+  const xTicks = 5;
+  const yTicks = 5;
+
+  const xTickVals = Array.from({ length: xTicks + 1 }, (_, i) => {
+    const t = i / xTicks;
+    const lv = minCitationLog + t * (maxCitationLog - minCitationLog);
+    const v = Math.round(Math.exp(lv) - 1);
+    return v;
+  });
+
+  const yTickVals = Array.from({ length: yTicks + 1 }, (_, i) => {
+    const t = i / yTicks;
+    return minGrowth + t * (maxGrowth - minGrowth);
+  });
+
+  const xGrid = xTickVals.map(v => {
+    const x = xFor(v);
+    return `
+      <g>
+        <line x1="${x}" y1="${padT}" x2="${x}" y2="${padT + innerH}" stroke="#e5e7eb" stroke-width="1"/>
+        <text x="${x}" y="${plotH - 18}" text-anchor="middle" font-size="11" fill="#667085">${fmtInt(v)}</text>
+      </g>
+    `;
+  }).join('');
+
+  const yGrid = yTickVals.map(v => {
+    const y = yFor(v);
+    return `
+      <g>
+        <line x1="${padL}" y1="${y}" x2="${padL + innerW}" y2="${y}" stroke="#e5e7eb" stroke-width="1"/>
+        <text x="${padL - 10}" y="${y + 4}" text-anchor="end" font-size="11" fill="#667085">${fmtNum(v, 1)}</text>
+      </g>
+    `;
+  }).join('');
+
+  const scatterDots = rows.map((r, i) => {
+    const x = xFor(Number(r.citations || 0));
+    const y = yFor(Number(r.growth || 0));
+    const rr = rFor(Number(r.size || 1));
+    const fill = colorForGpa(Number(r.gpa || 0));
+    const label = r.label || `Cluster ${Number(r.cid || 0) + 1}`;
+
+    return `
+      <g>
+        <circle cx="${x}" cy="${y}" r="${rr}" fill="${fill}" fill-opacity="0.72" stroke="#ffffff" stroke-width="1.2">
+          <title>${escHtml(label)} | Importance ${fmtNum(r.importance, 3)} | GPA ${fmtNum(r.gpa, 2)} | Citations ${fmtInt(r.citations)} | Size ${fmtInt(r.size)} | Growth ${fmtNum(r.growth, 2)}</title>
+        </circle>
+        ${i < 20 ? `<text x="${x + rr + 4}" y="${y + 4}" font-size="10" fill="#344054">${escHtml(label)}</text>` : ''}
+      </g>
+    `;
+  }).join('');
+
+  const scatterSvg = `
+    <svg width="${plotW}" height="${plotH}" viewBox="0 0 ${plotW} ${plotH}" role="img" aria-label="Cluster importance scatter plot">
+      <rect x="0" y="0" width="${plotW}" height="${plotH}" fill="#fff"/>
+      ${xGrid}
+      ${yGrid}
+      <line x1="${padL}" y1="${padT + innerH}" x2="${padL + innerW}" y2="${padT + innerH}" stroke="#101828" stroke-width="1.2"/>
+      <line x1="${padL}" y1="${padT}" x2="${padL}" y2="${padT + innerH}" stroke="#101828" stroke-width="1.2"/>
+      ${scatterDots}
+      <text x="${plotW / 2}" y="${plotH - 2}" text-anchor="middle" font-size="12" fill="#475467">Citations (log scale)</text>
+      <text x="18" y="${plotH / 2}" text-anchor="middle" font-size="12" fill="#475467" transform="rotate(-90 18 ${plotH / 2})">Growth</text>
+    </svg>
+  `;
+
+  const rowsHtml = rows.map((r, i) => `
+    <tr>
+      <td>${i + 1}</td>
+      <td>${escHtml(r.label || `Cluster ${r.cid + 1}`)}</td>
+      <td>${fmtNum(r.importance, 3)}</td>
+      <td>${fmtNum(r.gpa, 2)}</td>
+      <td>${fmtInt(r.citations)}</td>
+      <td>${fmtInt(r.size)}</td>
+      <td>${fmtNum(r.growth, 2)}</td>
+      <td>${fmtNum(r.gpa_n, 3)}</td>
+      <td>${fmtNum(r.citations_n, 3)}</td>
+      <td>${fmtNum(r.size_n, 3)}</td>
+      <td>${fmtNum(r.growth_n, 3)}</td>
+    </tr>
+  `).join('');
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>${escHtml(data?.title || 'Cluster Importance')}</title>
+<style>
+  :root{
+    --bg:#f5f7fa;
+    --panel:#ffffff;
+    --ink:#101828;
+    --muted:#667085;
+    --line:#d0d5dd;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--ink);
+    font:14px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  .page{
+    max-width:1400px;
+    margin:0 auto;
+    padding:36px 28px 56px;
+  }
+  h1{
+    margin:0 0 8px;
+    font-size:34px;
+    line-height:1.1;
+  }
+  .intro{
+    color:var(--muted);
+    font-size:15px;
+    max-width:980px;
+    margin-bottom:22px;
+  }
+  .cards{
+    display:grid;
+    grid-template-columns:repeat(4,minmax(0,1fr));
+    gap:14px;
+    margin-bottom:24px;
+  }
+  .card{
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:14px;
+    padding:16px 18px;
+  }
+  .card-k{
+    color:var(--muted);
+    font-size:12px;
+    margin-bottom:8px;
+  }
+  .card-v{
+    font-size:28px;
+    font-weight:700;
+  }
+  .panel{
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:16px;
+    padding:18px;
+  }
+  h2{
+    margin:0 0 12px;
+    font-size:22px;
+  }
+  table{
+    width:100%;
+    border-collapse:collapse;
+  }
+  th, td{
+    text-align:left;
+    padding:10px 8px;
+    border-top:1px solid var(--line);
+    vertical-align:top;
+    font-size:13px;
+  }
+  th{
+    border-top:none;
+    font-size:12px;
+    text-transform:uppercase;
+    letter-spacing:.03em;
+    color:var(--muted);
+    background:#fcfcfd;
+    position:sticky;
+    top:0;
+  }
+  .note{
+    color:var(--muted);
+    font-size:13px;
+    margin-top:12px;
+  }
+  @media (max-width: 1100px){
+    .cards{grid-template-columns:repeat(2,minmax(0,1fr))}
+  }
+</style>
+</head>
+<body>
+  <div class="page">
+    <h1>${escHtml(data?.title || 'Cluster Importance')}</h1>
+    <div class="intro">
+      ${escHtml(data?.userText || 'This report ranks clusters using the composite importance score generated from REF performance, citations, growth, and cluster size.')}
+    </div>
+
+    <div class="cards">
+      <div class="card">
+        <div class="card-k">Ranked clusters</div>
+        <div class="card-v">${fmtInt(rows.length)}</div>
+      </div>
+      <div class="card">
+        <div class="card-k">Primary ranking basis</div>
+        <div class="card-v" style="font-size:20px">Composite score</div>
+      </div>
+      <div class="card">
+        <div class="card-k">Signals combined</div>
+        <div class="card-v" style="font-size:20px">REF · Citations · Growth · Size</div>
+      </div>
+      <div class="card">
+        <div class="card-k">Generated</div>
+        <div class="card-v" style="font-size:18px">${escHtml(String(data?.generatedAt || '').slice(0,10))}</div>
+      </div>
+    </div>
+
+        <div class="panel" style="margin-bottom:18px;">
+      <h2 style="margin:0 0 12px;font-size:22px;">Importance landscape</h2>
+      <div style="color:var(--muted);font-size:13px;margin-bottom:12px;">
+        X = citations, Y = growth, dot size = cluster size, dot colour = GPA.
+      </div>
+      <div style="overflow:auto;">
+        ${scatterSvg}
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2 style="margin:0 0 12px;font-size:22px;">Ranked clusters</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Rank</th>
+            <th>Cluster</th>
+            <th>Importance</th>
+            <th>GPA</th>
+            <th>Citations</th>
+            <th>Size</th>
+            <th>Growth</th>
+            <th>REF n</th>
+            <th>Citations n</th>
+            <th>Size n</th>
+            <th>Growth n</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rowsHtml}
+        </tbody>
+      </table>
+      <div class="note">
+        Scores shown here come directly from <code>computeClusterImportanceScores()</code>. The normalised columns expose the contribution of each component to the final composite score.
+      </div>
+    </div>
+  </div>
+</body>
+</html>`;
+}
 
 function buildPeaksOfExcellenceHtml(data) {
   const escHtml = (s) => String(s ?? '')
@@ -20209,6 +20554,50 @@ async function exportOverviewReportZip(opts = {}) {
   triggerBlobDownload(blob, fname);
   hideLoading?.();
   showToast?.('Overview HTML report exported.');
+}
+
+async function exportClusterImportanceZip(opts = {}) {
+  projectMeta = {
+    title: (opts.userTitle || '').toString(),
+    text:  (opts.userText  || '').toString(),
+    created: new Date().toISOString()
+  };
+
+  if (typeof JSZip === 'undefined') {
+    showToast?.('JSZip not found');
+    return;
+  }
+
+  showLoading?.('Preparing cluster importance report…', 0.10);
+  const zip = new JSZip();
+
+  const base = `cluster-importance-${Date.now()}/`;
+
+  const rows = computeClusterImportanceScores();
+  const reportData = {
+    generatedAt: new Date().toISOString(),
+    title: opts.userTitle || 'Cluster Importance',
+    userText: opts.userText || '',
+    rows
+  };
+
+  setLoadingProgress?.(0.65, 'Building cluster importance HTML…');
+  const html = buildClusterImportanceHtml(reportData);
+
+  zip.file(base + 'importance.json', JSON.stringify(reportData, null, 2));
+  zip.file(base + 'importance.html', html);
+
+  setLoadingProgress?.(0.90, 'Compressing cluster importance report…');
+  const blob = await zip.generateAsync({ type:'blob', compression:'DEFLATE' });
+
+  const fname = normaliseZipName(
+    opts.fileName,
+    `cluster-importance-${Date.now()}`
+  );
+
+  triggerBlobDownload(blob, fname);
+  hideLoading?.();
+  showToast?.('Cluster importance report exported.');
 }
 
 async function exportClusterCitationsZip(opts = {}) {
@@ -20572,12 +20961,13 @@ function openPublishDialog({
 } = {}) {
   const nowIso = new Date().toISOString().slice(0,19).replace(/[:T]/g,'-');
 
-     const defaults = {
-    viewer:   `viewer-data-${nowIso}.zip`,
-    overview: `overview-report-${nowIso}.zip`,
-    peaks:    `peaks-of-excellence-${nowIso}.zip`,
-    citations:`cluster-citations-${nowIso}.zip`,
-    growth:   `cluster-growth-${nowIso}.zip`
+  const defaults = {
+    viewer:     `viewer-data-${nowIso}.zip`,
+    overview:   `overview-report-${nowIso}.zip`,
+    peaks:      `peaks-of-excellence-${nowIso}.zip`,
+    citations:  `cluster-citations-${nowIso}.zip`,
+    growth:     `cluster-growth-${nowIso}.zip`,
+    importance: `cluster-importance-${nowIso}.zip`
   };
 
   const titles = {
@@ -20585,7 +20975,8 @@ function openPublishDialog({
     overview: 'Export Overview',
     peaks: 'Export Peaks of Excellence',
     citations: 'Export Cluster Citations',
-    growth: 'Export Cluster Growth'
+    growth: 'Export Cluster Growth',
+    importance: 'Export Cluster Importance'
   };
 
   const help = {
@@ -20593,7 +20984,8 @@ function openPublishDialog({
     overview: 'Overview report package = overview.html + overview.json + map PNG',
     peaks: 'Peaks of Excellence = peaks.html + peaks.json',
     citations: 'Cluster Citations = citations.html + citations.json',
-    growth: 'Cluster Growth = growth.html + growth.json'
+    growth: 'Cluster Growth = growth.html + growth.json',
+    importance: 'Cluster Importance = importance.html + importance.json'
   };
 
   const bg = document.createElement('div');
@@ -21285,7 +21677,70 @@ function compactOA(work) {
     refsCount
   };
 }
+function computeClusterImportanceScores() {
+  const rows = [];
 
+  // loop clusters (same pattern as your other reports)
+  for (let cid = 0; cid < clusterLabels.length; cid++) {
+    const nodeIds = [];
+    for (let i = 0; i < clusterOf.length; i++) {
+      if (clusterOf[i] === cid) nodeIds.push(i);
+    }
+    if (!nodeIds.length) continue;
+
+    const ref = collectClusterRefSummary(nodeIds);
+
+    let totalCitations = 0;
+    nodeIds.forEach(i => {
+      const item = itemsData?.[i] || {};
+      const c = Number(item?.cited_by_count || item?.openalex?.cited_by_count || 0);
+      totalCitations += c;
+    });
+
+    const growth = computeClusterGrowthSeries(nodeIds); // reuse your growth logic
+
+    const slope =
+      growth.length > 5
+        ? growth[growth.length - 1] - growth[growth.length - 5]
+        : growth[growth.length - 1];
+
+    rows.push({
+      cid,
+      label: clusterLabels[cid] || `Cluster ${cid + 1}`,
+      gpa: ref.gpa || 0,
+      citations: totalCitations,
+      size: nodeIds.length,
+      growth: slope
+    });
+  }
+
+  // NORMALISE
+  const norm = (arr, key) => {
+    const vals = arr.map(x => x[key]);
+    const min = Math.min(...vals);
+    const max = Math.max(...vals);
+    arr.forEach(x => {
+      x[key + '_n'] = max > min ? (x[key] - min) / (max - min) : 0;
+    });
+  };
+
+  norm(rows, 'gpa');
+  norm(rows, 'citations');
+  norm(rows, 'growth');
+  norm(rows, 'size');
+
+  rows.forEach(r => {
+    r.importance =
+      0.35 * r.gpa_n +
+      0.30 * r.citations_n +
+      0.20 * r.growth_n +
+      0.15 * r.size_n;
+  });
+
+  rows.sort((a, b) => b.importance - a.importance);
+
+  return rows;
+}
 
 function isCompactOpenAlex(w) {
   if (!w || typeof w !== 'object') return true;
