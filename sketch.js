@@ -2230,6 +2230,8 @@ if (BUG_MODE) {
 // Export Viewer (using image instead of text)
 // After you create Save/Load buttons:
 // Publish (using image instead of text)
+// After you create Save/Load buttons:
+// Publish
 const exportViewerBtn = createImg('./Icons/Publish.png', 'Publish');
 exportViewerBtn.parent(saveLoadBar);
 exportViewerBtn.size(40, 40);
@@ -2240,21 +2242,22 @@ exportViewerBtn.attribute('title', 'Publish');
 attachTooltip(exportViewerBtn, 'Publish');
 if (typeof captureUI === 'function') captureUI(exportViewerBtn.elt);
 
-// Publish menu
+// Ensure menu positions correctly
+saveLoadBar.style('position', 'relative');
+
 publishMenu = createDiv('');
 publishMenu.parent(saveLoadBar);
 publishMenu.style('position', 'absolute');
 publishMenu.style('top', '52px');
 publishMenu.style('right', '0');
 publishMenu.style('display', 'none');
-publishMenu.style('min-width', '220px');
+publishMenu.style('min-width', '230px');
 publishMenu.style('padding', '8px');
 publishMenu.style('border-radius', '10px');
 publishMenu.style('background', 'rgba(20,20,20,0.96)');
 publishMenu.style('border', '1px solid rgba(255,255,255,0.10)');
 publishMenu.style('box-shadow', '0 10px 24px rgba(0,0,0,0.35)');
 publishMenu.style('z-index', '10050');
-publishMenu.style('display', 'none');
 captureUI?.(publishMenu.elt);
 
 function openPublishMenu() {
@@ -2269,17 +2272,20 @@ function closePublishMenu() {
   publishMenu.style('display', 'none');
 }
 
+function stylePublishMenuButton(btn) {
+  btn.style('text-align', 'left');
+  btn.style('padding', '8px 10px');
+  btn.style('background', 'rgba(255,255,255,0.06)');
+  btn.style('color', '#f1f1f1');
+  btn.style('border', '1px solid rgba(255,255,255,0.08)');
+  btn.style('border-radius', '8px');
+  btn.style('cursor', 'pointer');
+  captureUI?.(btn.elt);
+}
+
 const publishJsonBtn = createButton('Publish JSON Package');
 publishJsonBtn.parent(publishMenu);
-publishJsonBtn.style('text-align', 'left');
-publishJsonBtn.style('padding', '8px 10px');
-publishJsonBtn.style('background', 'rgba(255,255,255,0.06)');
-publishJsonBtn.style('color', '#f1f1f1');
-publishJsonBtn.style('border', '1px solid rgba(255,255,255,0.08)');
-publishJsonBtn.style('border-radius', '8px');
-publishJsonBtn.style('cursor', 'pointer');
-captureUI?.(publishJsonBtn.elt);
-
+stylePublishMenuButton(publishJsonBtn);
 publishJsonBtn.mousePressed(() => {
   closePublishMenu();
   openPublishDialog({
@@ -2296,21 +2302,30 @@ publishJsonBtn.mousePressed(() => {
 
 const publishOverviewBtn = createButton('Export Overview');
 publishOverviewBtn.parent(publishMenu);
-publishOverviewBtn.style('text-align', 'left');
-publishOverviewBtn.style('padding', '8px 10px');
-publishOverviewBtn.style('background', 'rgba(255,255,255,0.06)');
-publishOverviewBtn.style('color', '#f1f1f1');
-publishOverviewBtn.style('border', '1px solid rgba(255,255,255,0.08)');
-publishOverviewBtn.style('border-radius', '8px');
-publishOverviewBtn.style('cursor', 'pointer');
-captureUI?.(publishOverviewBtn.elt);
-
+stylePublishMenuButton(publishOverviewBtn);
 publishOverviewBtn.mousePressed(() => {
   closePublishMenu();
   openPublishDialog({
     mode: 'overview',
     onSubmit: ({ name, title, text }) => {
       exportOverviewReportZip({
+        fileName: name,
+        userTitle: title,
+        userText: text
+      });
+    }
+  });
+});
+
+const publishPeaksBtn = createButton('Peaks of Excellence');
+publishPeaksBtn.parent(publishMenu);
+stylePublishMenuButton(publishPeaksBtn);
+publishPeaksBtn.mousePressed(() => {
+  closePublishMenu();
+  openPublishDialog({
+    mode: 'peaks',
+    onSubmit: ({ name, title, text }) => {
+      exportPeaksOfExcellenceZip({
         fileName: name,
         userTitle: title,
         userText: text
@@ -2326,7 +2341,6 @@ exportViewerBtn.mousePressed(() => {
   else openPublishMenu();
 });
 
-// Click-away close
 document.addEventListener('pointerdown', (ev) => {
   if (!publishMenu || publishMenu.elt.style.display === 'none') return;
   const withinMenu = publishMenu.elt.contains(ev.target);
@@ -2334,13 +2348,11 @@ document.addEventListener('pointerdown', (ev) => {
   if (!withinMenu && !withinBtn) closePublishMenu();
 });
 
-
-  if (DEMO_MODE) {
-    exportViewerBtn.style('opacity', '0.1');
-    exportViewerBtn.style('pointer-events', 'none');
-    exportViewerBtn.style('cursor', 'default');
-    exportViewerBtn.attribute('title', 'Publish (disabled in Demo mode)');
-  }
+if (DEMO_MODE) {
+  exportViewerBtn.style('opacity', '0.1');
+  exportViewerBtn.style('pointer-events', 'none');
+  exportViewerBtn.style('cursor', 'default');
+  exportViewerBtn.attribute('title', 'Publish (disabled in Demo mode)');
 }
 
 // Cache for the demo list to avoid refetching
@@ -18650,6 +18662,9 @@ function getPublishThresholdValue() {
   return null;
 }
 
+
+
+
 function computeOverviewReportData(opts = {}) {
   const total = nodes.length | 0;
 
@@ -18862,6 +18877,191 @@ function buildOverviewNarrative(data) {
     `Each publication has been fingerprinted using AI-based analysis, and research objects have been clustered by authorship and fingerprint sharing. The active clustering threshold in this export is ${thresholdTxt}.`,
     `Clusters are titled from publication abstracts and fingerprint signals. In total, this map contains ${fmtInt(data.clusterCountShown)} clusters above the current minimum cluster size threshold of ${fmtInt(data.minClusterSize)}.${data.domainCountShown ? ` ${fmtInt(data.domainCountShown)} higher-level domains are also available, defined as groups of clusters sharing broader contextual similarity.` : ''}`
   ].join(' ');
+}
+
+function buildPeaksOfExcellenceHtml(reportData) {
+  const escHtml = (s) => String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+
+  const meta = reportData?.meta || {};
+  const byGpa = reportData?.rankings?.byGpa || [];
+  const byFourStar = reportData?.rankings?.byFourStar || [];
+
+  const rowHtml = (r, i, mode = 'gpa') => `
+    <tr>
+      <td>${i + 1}</td>
+      <td>${escHtml(r.clusterLabel)}</td>
+      <td>${r.totalPublications}</td>
+      <td>${r.assessedPublications}</td>
+      <td>${Number(r.gpa || 0).toFixed(2)}</td>
+      <td>${r.fourStarEquivalent}</td>
+      <td>${r.c4plus}</td>
+      <td>${r.c4}</td>
+      <td>${r.c4minus}</td>
+    </tr>
+  `;
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escHtml(meta.title || 'Peaks of Excellence')}</title>
+<style>
+  :root{
+    --bg:#ffffff;
+    --fg:#111111;
+    --muted:#666;
+    --line:#dddddd;
+    --soft:#f5f5f5;
+    --accent:#111;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--fg);
+    font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  .page{
+    max-width:1200px;
+    margin:0 auto;
+    padding:40px 32px 56px;
+  }
+  h1{
+    font-size:34px;
+    line-height:1.1;
+    margin:0 0 10px;
+  }
+  .lede{
+    color:var(--muted);
+    font-size:15px;
+    max-width:900px;
+    margin-bottom:24px;
+  }
+  .meta{
+    display:grid;
+    grid-template-columns:repeat(3,minmax(160px,1fr));
+    gap:12px;
+    margin:18px 0 28px;
+  }
+  .card{
+    border:1px solid var(--line);
+    background:var(--soft);
+    border-radius:12px;
+    padding:14px 16px;
+  }
+  .k{
+    font-size:12px;
+    color:var(--muted);
+    margin-bottom:6px;
+  }
+  .v{
+    font-size:24px;
+    font-weight:700;
+  }
+  h2{
+    font-size:22px;
+    margin:36px 0 12px;
+  }
+  table{
+    width:100%;
+    border-collapse:collapse;
+    margin:0 0 28px;
+  }
+  th, td{
+    border-bottom:1px solid var(--line);
+    padding:10px 8px;
+    text-align:left;
+    vertical-align:top;
+  }
+  th{
+    font-size:12px;
+    letter-spacing:.02em;
+    text-transform:uppercase;
+    color:var(--muted);
+    background:#fafafa;
+    position:sticky;
+    top:0;
+  }
+  .note{
+    color:var(--muted);
+    font-size:13px;
+    margin-top:8px;
+  }
+</style>
+</head>
+<body>
+  <div class="page">
+    <h1>${escHtml(meta.title || 'Peaks of Excellence')}</h1>
+    <div class="lede">
+      ${escHtml(meta.text || 'This report identifies clusters with more than 10 REF-scored outputs and ranks them by overall GPA and by the number of 4-star-equivalent outputs (4+, 4, 4-).')}
+    </div>
+
+    <div class="meta">
+      <div class="card">
+        <div class="k">Eligible clusters</div>
+        <div class="v">${meta.eligibleClusterCount || 0}</div>
+      </div>
+      <div class="card">
+        <div class="k">Eligibility threshold</div>
+        <div class="v">&gt; ${Math.max(0, (meta.minAssessed || 11) - 1)}</div>
+      </div>
+      <div class="card">
+        <div class="k">Created</div>
+        <div class="v" style="font-size:18px">${escHtml(String(meta.created || '').slice(0,10))}</div>
+      </div>
+    </div>
+
+    <h2>Clusters ranked by GPA</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Rank</th>
+          <th>Cluster</th>
+          <th>Total pubs</th>
+          <th>REF assessed</th>
+          <th>GPA</th>
+          <th>4★ total</th>
+          <th>4+</th>
+          <th>4</th>
+          <th>4-</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${byGpa.map((r, i) => rowHtml(r, i, 'gpa')).join('')}
+      </tbody>
+    </table>
+
+    <h2>Clusters ranked by number of 4★ publications</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Rank</th>
+          <th>Cluster</th>
+          <th>Total pubs</th>
+          <th>REF assessed</th>
+          <th>GPA</th>
+          <th>4★ total</th>
+          <th>4+</th>
+          <th>4</th>
+          <th>4-</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${byFourStar.map((r, i) => rowHtml(r, i, 'four')).join('')}
+      </tbody>
+    </table>
+
+    <div class="note">
+      Only clusters with more than 10 REF-scored outputs are included.
+    </div>
+  </div>
+</body>
+</html>`;
 }
 
 function buildOverviewHtml(data, mapImgRelPath = 'assets/overview-map.png') {
@@ -19197,6 +19397,47 @@ async function exportViewerDataZip(opts = {}) {
   showToast?.('Viewer JSON package exported.');
 }
 
+async function exportPeaksOfExcellenceZip(opts = {}) {
+  projectMeta = {
+    title: (opts.userTitle || '').toString(),
+    text:  (opts.userText  || '').toString(),
+    created: new Date().toISOString()
+  };
+
+  if (typeof JSZip === 'undefined') {
+    showToast?.('JSZip not found');
+    return;
+  }
+
+  showLoading?.('Preparing Peaks of Excellence report…', 0.10);
+  const zip = new JSZip();
+
+  const base = `peaks-of-excellence-${Date.now()}/`;
+
+  const reportData = computePeaksOfExcellenceData({
+    userTitle: opts.userTitle || 'Peaks of Excellence',
+    userText: opts.userText || ''
+  });
+
+  setLoadingProgress?.(0.65, 'Building Peaks of Excellence HTML…');
+  const html = buildPeaksOfExcellenceHtml(reportData);
+
+  zip.file(base + 'peaks.json', JSON.stringify(reportData, null, 2));
+  zip.file(base + 'peaks.html', html);
+
+  setLoadingProgress?.(0.90, 'Compressing Peaks of Excellence report…');
+  const blob = await zip.generateAsync({ type:'blob', compression:'DEFLATE' });
+
+  const fname = normaliseZipName(
+    opts.fileName,
+    `peaks-of-excellence-${Date.now()}`
+  );
+
+  triggerBlobDownload(blob, fname);
+  hideLoading?.();
+  showToast?.('Peaks of Excellence report exported.');
+}
+
 async function exportOverviewReportZip(opts = {}) {
   projectMeta = {
     title: (opts.userTitle || '').toString(),
@@ -19266,14 +19507,12 @@ async function exportViewerPackageZip(opts = {}) {
   const detailsDir = dataDir + 'details/';
   const aiDir      = dataDir + 'ai/';
 
-  // 1) Manifest
   const indexObj = buildViewerIndexObject({
     userTitle: opts.userTitle || '',
     userText: opts.userText || ''
   });
   zip.file(dataDir + 'index.json', JSON.stringify(indexObj, null, 2));
 
-  // 2) Details shards
   for (let i = 0; i < nodes.length; i++) {
     const d = buildViewerDetailsObject(i);
     zip.file(detailsDir + `${d.id}.json`, JSON.stringify(d, null, 2));
@@ -19286,11 +19525,10 @@ async function exportViewerPackageZip(opts = {}) {
     }
   }
 
-  // 3) AI shards
   const ai = (window.aiFootprints || []);
   for (let j = 0; j < ai.length; j++) {
     const f = ai[j] || {};
-    const id = `A${j + 1}`;
+    const id = `A${j+1}`;
     const shard = {
       id,
       title: f.aiTitle || f.title || `AI ${j + 1}`,
@@ -19307,7 +19545,6 @@ async function exportViewerPackageZip(opts = {}) {
     zip.file(aiDir + `${id}.json`, JSON.stringify(shard, null, 2));
   }
 
-  // 4) Pack + download
   setLoadingProgress?.(0.88, 'Compressing viewer package…');
   const blob = await zip.generateAsync({ type:'blob', compression:'DEFLATE' });
 
@@ -19474,16 +19711,29 @@ function normaliseZipName(name, fallbackBase) {
 }
 
 function openPublishDialog({
-  mode = 'viewer',          // 'viewer' | 'overview'
+  mode = 'viewer',   // 'viewer' | 'overview' | 'peaks'
   onSubmit = null
 } = {}) {
-  const isViewer = mode === 'viewer';
   const nowIso = new Date().toISOString().slice(0,19).replace(/[:T]/g,'-');
-  const defaultZip = isViewer
-    ? `viewer-data-${nowIso}.zip`
-    : `overview-report-${nowIso}.zip`;
 
-  // backdrop
+  const defaults = {
+    viewer:   `viewer-data-${nowIso}.zip`,
+    overview: `overview-report-${nowIso}.zip`,
+    peaks:    `peaks-of-excellence-${nowIso}.zip`
+  };
+
+  const titles = {
+    viewer: 'Publish JSON Package',
+    overview: 'Export Overview',
+    peaks: 'Export Peaks of Excellence'
+  };
+
+  const help = {
+    viewer: 'Viewer JSON package = index.json + details shards + AI shards',
+    overview: 'Overview report package = overview.html + overview.json + map PNG',
+    peaks: 'Peaks of Excellence = peaks.html + peaks.json'
+  };
+
   const bg = document.createElement('div');
   Object.assign(bg.style, {
     position:'fixed',
@@ -19493,7 +19743,6 @@ function openPublishDialog({
   });
   document.body.appendChild(bg);
 
-  // modal
   const box = document.createElement('div');
   Object.assign(box.style, {
     position:'fixed',
@@ -19511,35 +19760,26 @@ function openPublishDialog({
     font:'13px/1.4 system-ui, -apple-system, Segoe UI, Roboto'
   });
 
-  const titleText = isViewer ? 'Publish JSON Package' : 'Export Overview';
-  const fileLabel = isViewer
-    ? 'Viewer JSON package name (.zip)'
-    : 'Overview report package name (.zip)';
-  const helpText = isViewer
-    ? 'Viewer JSON package = index.json + details shards + AI shards'
-    : 'Overview report package = overview.html + overview.json + map PNG';
-  const actionText = isViewer ? 'Publish JSON Package' : 'Export Overview';
-
   box.innerHTML = `
-    <div style="font-weight:700; font-size:15px; margin-bottom:10px;">${titleText}</div>
+    <div style="font-weight:700;font-size:15px;margin-bottom:10px;">${titles[mode] || 'Publish'}</div>
 
-    <label style="display:block; margin:8px 0 4px;">${fileLabel}</label>
-    <input id="pub_name" value="${defaultZip}" style="width:100%; padding:8px; border-radius:8px; border:1px solid rgba(255,255,255,0.25); background:#000; color:#fff" />
+    <label style="display:block;margin:8px 0 4px;">Package name (.zip)</label>
+    <input id="pub_name" value="${defaults[mode] || defaults.viewer}" style="width:100%;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.25);background:#000;color:#fff" />
 
-    <label style="display:block; margin:10px 0 4px;">Title</label>
-    <input id="pub_title" placeholder="e.g. My Cluster Map" style="width:100%; padding:8px; border-radius:8px; border:1px solid rgba(255,255,255,0.25); background:#000; color:#fff" />
+    <label style="display:block;margin:10px 0 4px;">Title</label>
+    <input id="pub_title" placeholder="e.g. My Cluster Map" style="width:100%;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.25);background:#000;color:#fff" />
 
-    <label style="display:block; margin:10px 0 4px;">Text</label>
-    <textarea id="pub_text" rows="5" placeholder="Short description shown in exported output…" style="width:100%; padding:8px; border-radius:8px; border:1px solid rgba(255,255,255,0.25); background:#000; color:#fff; resize:vertical"></textarea>
+    <label style="display:block;margin:10px 0 4px;">Text</label>
+    <textarea id="pub_text" rows="5" placeholder="Short description shown in exported output…" style="width:100%;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.25);background:#000;color:#fff;resize:vertical"></textarea>
 
-    <div style="margin-top:12px; padding:10px 12px; border-radius:8px; border:1px solid rgba(255,255,255,0.14); background:rgba(255,255,255,0.03); color:rgba(255,255,255,0.82);">
-      <div style="font-weight:600; margin-bottom:6px;">Export contents</div>
-      <div>${helpText}</div>
+    <div style="margin-top:12px;padding:10px 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.14);background:rgba(255,255,255,0.03);color:rgba(255,255,255,0.82);">
+      <div style="font-weight:600;margin-bottom:6px;">Export contents</div>
+      <div>${help[mode] || ''}</div>
     </div>
 
-    <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:14px; flex-wrap:wrap;">
-      <button id="pub_cancel" style="padding:8px 12px; border-radius:8px; background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.2); color:#fff; cursor:pointer;">Cancel</button>
-      <button id="pub_submit" style="padding:8px 12px; border-radius:8px; background:${isViewer ? '#5b8def' : '#2a7'}; border:1px solid rgba(255,255,255,0.2); color:${isViewer ? '#fff' : '#000'}; cursor:pointer; font-weight:700;">${actionText}</button>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px;flex-wrap:wrap;">
+      <button id="pub_cancel" style="padding:8px 12px;border-radius:8px;background:rgba(255,255,255,0.08);border:1px solid rgba(255,255,255,0.2);color:#fff;cursor:pointer;">Cancel</button>
+      <button id="pub_submit" style="padding:8px 12px;border-radius:8px;background:#5b8def;border:1px solid rgba(255,255,255,0.2);color:#fff;cursor:pointer;font-weight:700;">Export</button>
     </div>
   `;
   document.body.appendChild(box);
@@ -19556,7 +19796,7 @@ function openPublishDialog({
     const payload = {
       name: normaliseZipName(
         box.querySelector('#pub_name')?.value,
-        defaultZip.replace(/\.zip$/i, '')
+        String((defaults[mode] || 'export').replace(/\.zip$/i, ''))
       ),
       title: String(box.querySelector('#pub_title')?.value || '').trim(),
       text:  String(box.querySelector('#pub_text')?.value || '').trim(),
