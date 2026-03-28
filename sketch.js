@@ -19291,10 +19291,18 @@ function computeClusterGrowthReportData(opts = {}) {
     a.clusterLabel.localeCompare(b.clusterLabel)
   );
 
-  const topClusters = clusterRows.slice(0, 100).map(row => ({
-    ...row,
-    series: years.map(y => row.byYear[y] || 0)
-  }));
+  const topClusters = clusterRows.slice(0, 100).map(row => {
+    let running = 0;
+    const cumulativeSeries = years.map(y => {
+      running += (row.byYear[y] || 0);
+      return running;
+    });
+
+    return {
+      ...row,
+      series: cumulativeSeries
+    };
+  });
 
   return {
     generatedAt: new Date().toISOString(),
