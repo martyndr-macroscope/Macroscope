@@ -48,6 +48,8 @@ const FT_STORE = 'fulltexts';
 
 let ftDbPromise = null;
 
+
+
 function getStableCacheKeyForIndex(i) {
   const it = itemsData?.[i] || {};
   const oa = it?.openalex || {};
@@ -1048,6 +1050,7 @@ let autoCacheTargetBtn = null;
 let jsonProjectFileInput = null;
 let pdfImportFileInput = null;
 let loadMenu = null;
+let publishMenu = null;
 // Track current project file name / handle so Save vs Save As behaves sensibly
 window.currentProjectName  = window.currentProjectName  || null;
 window.currentProjectHandle = window.currentProjectHandle || null;
@@ -2223,26 +2226,112 @@ if (BUG_MODE) {
 
 // After you create Save/Load buttons:
 // Export Viewer (using image instead of text)
-const exportViewerBtn = createImg('./Icons/Publish.png', 'Export Viewer');
+// After you create Save/Load buttons:
+// Export Viewer (using image instead of text)
+// After you create Save/Load buttons:
+// Publish (using image instead of text)
+const exportViewerBtn = createImg('./Icons/Publish.png', 'Publish');
 exportViewerBtn.parent(saveLoadBar);
 exportViewerBtn.size(40, 40);
 exportViewerBtn.style('display', 'block');
 exportViewerBtn.style('cursor', 'pointer');
 exportViewerBtn.attribute('draggable', 'false');
-exportViewerBtn.attribute('title', 'Export Viewer');
+exportViewerBtn.attribute('title', 'Publish');
 attachTooltip(exportViewerBtn, 'Publish');
 if (typeof captureUI === 'function') captureUI(exportViewerBtn.elt);
 
-exportViewerBtn.mousePressed(() => {
-  if (DEMO_MODE) return;
-openPublishDialog(({ name, title, text, reports }) => {
-  exportViewerPackageZip({
-    fileName: name,
-    userTitle: title,
-    userText: text,
-    reports: reports || { overview: true }
+// Publish menu
+publishMenu = createDiv('');
+publishMenu.parent(saveLoadBar);
+publishMenu.style('position', 'absolute');
+publishMenu.style('top', '52px');
+publishMenu.style('right', '0');
+publishMenu.style('display', 'none');
+publishMenu.style('min-width', '220px');
+publishMenu.style('padding', '8px');
+publishMenu.style('border-radius', '10px');
+publishMenu.style('background', 'rgba(20,20,20,0.96)');
+publishMenu.style('border', '1px solid rgba(255,255,255,0.10)');
+publishMenu.style('box-shadow', '0 10px 24px rgba(0,0,0,0.35)');
+publishMenu.style('z-index', '10050');
+publishMenu.style('display', 'none');
+captureUI?.(publishMenu.elt);
+
+function openPublishMenu() {
+  if (!publishMenu) return;
+  publishMenu.style('display', 'flex');
+  publishMenu.style('flex-direction', 'column');
+  publishMenu.style('gap', '8px');
+}
+
+function closePublishMenu() {
+  if (!publishMenu) return;
+  publishMenu.style('display', 'none');
+}
+
+const publishJsonBtn = createButton('Publish JSON Package');
+publishJsonBtn.parent(publishMenu);
+publishJsonBtn.style('text-align', 'left');
+publishJsonBtn.style('padding', '8px 10px');
+publishJsonBtn.style('background', 'rgba(255,255,255,0.06)');
+publishJsonBtn.style('color', '#f1f1f1');
+publishJsonBtn.style('border', '1px solid rgba(255,255,255,0.08)');
+publishJsonBtn.style('border-radius', '8px');
+publishJsonBtn.style('cursor', 'pointer');
+captureUI?.(publishJsonBtn.elt);
+
+publishJsonBtn.mousePressed(() => {
+  closePublishMenu();
+  openPublishDialog({
+    mode: 'viewer',
+    onSubmit: ({ name, title, text }) => {
+      exportViewerPackageZip({
+        fileName: name,
+        userTitle: title,
+        userText: text
+      });
+    }
   });
 });
+
+const publishOverviewBtn = createButton('Export Overview');
+publishOverviewBtn.parent(publishMenu);
+publishOverviewBtn.style('text-align', 'left');
+publishOverviewBtn.style('padding', '8px 10px');
+publishOverviewBtn.style('background', 'rgba(255,255,255,0.06)');
+publishOverviewBtn.style('color', '#f1f1f1');
+publishOverviewBtn.style('border', '1px solid rgba(255,255,255,0.08)');
+publishOverviewBtn.style('border-radius', '8px');
+publishOverviewBtn.style('cursor', 'pointer');
+captureUI?.(publishOverviewBtn.elt);
+
+publishOverviewBtn.mousePressed(() => {
+  closePublishMenu();
+  openPublishDialog({
+    mode: 'overview',
+    onSubmit: ({ name, title, text }) => {
+      exportOverviewReportZip({
+        fileName: name,
+        userTitle: title,
+        userText: text
+      });
+    }
+  });
+});
+
+exportViewerBtn.mousePressed(() => {
+  if (DEMO_MODE) return;
+  const isOpen = publishMenu && publishMenu.elt.style.display !== 'none';
+  if (isOpen) closePublishMenu();
+  else openPublishMenu();
+});
+
+// Click-away close
+document.addEventListener('pointerdown', (ev) => {
+  if (!publishMenu || publishMenu.elt.style.display === 'none') return;
+  const withinMenu = publishMenu.elt.contains(ev.target);
+  const withinBtn  = exportViewerBtn?.elt?.contains?.(ev.target);
+  if (!withinMenu && !withinBtn) closePublishMenu();
 });
 
 
@@ -4114,6 +4203,37 @@ function buildClusterDimensionInfoHTML(d) {
   `;
 }
 
+function buildRefProfileCardFromNodeIds(nodeIds, {
+  title = 'REF Profile',
+  width = 236,
+  height = 86,
+  showScoredOutputs = true,
+  showGpa = true,
+  emptyLabel = 'No REF scores available.'
+} = {}) {
+  const ids = Array.isArray(nodeIds) ? nodeIds : Array.from(nodeIds || []);
+  const refSum = collectClusterRefSummary(ids);
+  const gpaTxt = refSum.n ? refSum.gpa.toFixed(2) : 'n/a';
+
+  return `
+    <div style="margin-top:10px;">
+      <div style="font-weight:600;font-size:12px;margin-bottom:6px;">${esc(title)}</div>
+
+      <div style="display:grid;grid-template-columns:auto 1fr;gap:6px 10px;font-size:12px;margin-bottom:8px">
+        ${showScoredOutputs ? `<div style="opacity:.7">Scored outputs</div><div>${refSum.n}</div>` : ''}
+        ${showGpa ? `<div style="opacity:.7">GPA</div><div>${gpaTxt}</div>` : ''}
+      </div>
+
+      ${
+        refSum.n
+          ? svgClusterRefBars(refSum, width, height)
+          : `<div style="opacity:.65;font-size:12px">${esc(emptyLabel)}</div>`
+      }
+    </div>
+  `;
+}
+
+
 
 function findHoverNode(wx, wy) {
   if (!nodes.length) return -1;
@@ -4948,40 +5068,15 @@ const refScore = item?.ref_star ?? null;
   }
 
   const gpa = refN > 0 ? (refTotal / refN) : null;
-let refHtml = '';
 
-if (refN > 0) {
-  const maxCount = Math.max(...Object.values(refCounts), 1);
-
-  const bar = (score, color) => {
-    const v = refCounts[score] || 0;
-    const w = (v / maxCount) * 100;
-    return `
-      <div style="display:flex;align-items:center;margin-bottom:4px;">
-        <div style="width:16px;font-size:11px;opacity:.7">${score}★</div>
-        <div style="flex:1;height:8px;background:rgba(255,255,255,0.08);margin:0 6px;border-radius:4px;overflow:hidden;">
-          <div style="width:${w}%;height:100%;background:${color};"></div>
-        </div>
-        <div style="font-size:11px;opacity:.7;width:18px;text-align:right;">${v}</div>
-      </div>
-    `;
-  };
-
-  refHtml = `
-    <div style="margin-top:10px;">
-      <div style="font-weight:600;font-size:12px;margin-bottom:6px;">REF Assessment</div>
-      <div style="font-size:12px;margin-bottom:6px;">
-        ${refN} / ${matchedPaperCount} assessed
-        ${gpa != null ? ` · GPA: ${gpa.toFixed(2)}` : ''}
-      </div>
-
-      ${bar(4, '#ff4d4d')}
-      ${bar(3, '#ff9933')}
-      ${bar(2, '#ffd633')}
-      ${bar(1, '#66cc66')}
-    </div>
-  `;
-}
+refHtml = buildRefProfileCardFromNodeIds(matchedNodeIds, {
+  title: 'REF Assessment',
+  width: 236,
+  height: 86,
+  showScoredOutputs: true,
+  showGpa: true,
+  emptyLabel: 'No REF scores available for this author.'
+});
 
       const totalKnownPos = posCounts.first + posCounts.middle + posCounts.last + posCounts.unknown;
 
@@ -7691,11 +7786,11 @@ function getDomainRefSummary(fid) {
 
 function buildDomainSummaryPayload(fid) {
   const clusterIds = getDomainClusterIds(fid);
+  const nodeIds = getDomainNodeIds(fid);
   const fp = getDomainFingerprintSummary(fid, 12);
   const ref = getDomainRefSummary(fid);
 
   const childLabels = clusterIds.map(cid => {
-    const label = String(fieldLabels?.[fid] || '').trim();
     const cl = String(clusterLabels?.[cid] || '').trim() || `Cluster ${cid + 1}`;
     return { cid, label: cl, size: Number(clusterSizesTotal?.[cid] || 0) };
   });
@@ -7704,26 +7799,34 @@ function buildDomainSummaryPayload(fid) {
     ? fp.map(x => `${x.term} (${x.count})`).join(', ')
     : '—';
 
+  const html = `
+    <div style="font-weight:600;font-size:13px;margin:10px 0 4px;">Top Fingerprints</div>
+    <div style="font-size:12px;line-height:1.45;opacity:.95">${esc(fpText)}</div>
+
+    ${buildRefProfileCardFromNodeIds(nodeIds, {
+      title: 'REF Summary',
+      width: 236,
+      height: 86,
+      showScoredOutputs: true,
+      showGpa: true,
+      emptyLabel: 'No REF scores available for this domain.'
+    })}
+
+    <div style="font-weight:600;font-size:13px;margin:10px 0 4px;">Child Clusters</div>
+    <div style="font-size:12px;line-height:1.45;opacity:.95">
+      ${
+        childLabels.length
+          ? childLabels.map(x => `${esc(x.label)} (${x.size})`).join('<br/>')
+          : '<span style="opacity:.7">—</span>'
+      }
+    </div>
+  `;
+
   const refText = (ref.assessedCount > 0)
     ? `Assessed: ${ref.assessedCount} · Avg REF: ${(ref.avgStar || 0).toFixed(2)}*` +
       (Number.isFinite(ref.avgPercent) ? ` · Avg %: ${(ref.avgPercent).toFixed(1)}` : '') +
       ` · Distribution: 4* ${ref.byStar[4]}, 3* ${ref.byStar[3]}, 2* ${ref.byStar[2]}, 1* ${ref.byStar[1]}`
     : 'No REF assessments available';
-
-  const html = `
-    <div style="font-weight:600;font-size:13px;margin:10px 0 4px;">Top Fingerprints</div>
-    <div style="font-size:12px;line-height:1.45;opacity:.95">${esc(fpText)}</div>
-
-    <div style="font-weight:600;font-size:13px;margin:10px 0 4px;">REF Summary</div>
-    <div style="font-size:12px;line-height:1.45;opacity:.95">${esc(refText)}</div>
-
-    <div style="font-weight:600;font-size:13px;margin:10px 0 4px;">Child Clusters</div>
-    <div style="font-size:12px;line-height:1.45;opacity:.95">
-      ${childLabels.length
-        ? childLabels.map(x => `${esc(x.label)} (${x.size})`).join('<br/>')
-        : '<span style="opacity:.7">—</span>'}
-    </div>
-  `;
 
   const text =
     `Top Fingerprints\n` +
@@ -19145,34 +19248,39 @@ async function exportViewerPackageZip(opts = {}) {
     text:  (opts.userText  || '').toString(),
     created: new Date().toISOString()
   };
-  if (infoPanel?.setCanvasOverview) { infoPanel.setCanvasOverview(); infoPanel.show(); }
+  if (infoPanel?.setCanvasOverview) {
+    infoPanel.setCanvasOverview();
+    infoPanel.show();
+  }
 
-  if (typeof JSZip === 'undefined') { showToast?.('JSZip not found'); return; }
+  if (typeof JSZip === 'undefined') {
+    showToast?.('JSZip not found');
+    return;
+  }
 
-  showLoading?.('Preparing viewer package…', 0.05);
+  showLoading?.('Preparing viewer JSON package…', 0.05);
   const zip = new JSZip();
 
   const base = `macroscope-viewer-${Date.now()}/`;
-  const dataDir     = base + 'data/';
-  const detailsDir  = dataDir + 'details/';
-  const aiDir       = dataDir + 'ai/';
-  const reportsDir  = base + 'reports/';
-  const reportAssetsDir = reportsDir + 'assets/';
+  const dataDir    = base + 'data/';
+  const detailsDir = dataDir + 'details/';
+  const aiDir      = dataDir + 'ai/';
 
   // 1) Manifest
   const indexObj = buildViewerIndexObject({
     userTitle: opts.userTitle || '',
     userText: opts.userText || ''
   });
-  zip.file(dataDir + 'index.json', JSON.stringify(indexObj));
+  zip.file(dataDir + 'index.json', JSON.stringify(indexObj, null, 2));
 
   // 2) Details shards
   for (let i = 0; i < nodes.length; i++) {
     const d = buildViewerDetailsObject(i);
-    zip.file(detailsDir + `${d.id}.json`, JSON.stringify(d));
+    zip.file(detailsDir + `${d.id}.json`, JSON.stringify(d, null, 2));
+
     if ((i + 1) % 500 === 0) {
       setLoadingProgress?.(
-        0.05 + 0.40 * ((i + 1) / Math.max(1, nodes.length)),
+        0.05 + 0.65 * ((i + 1) / Math.max(1, nodes.length)),
         `Writing details… ${Math.round(100 * (i + 1) / Math.max(1, nodes.length))}%`
       );
     }
@@ -19182,56 +19290,35 @@ async function exportViewerPackageZip(opts = {}) {
   const ai = (window.aiFootprints || []);
   for (let j = 0; j < ai.length; j++) {
     const f = ai[j] || {};
-    const id = `A${j+1}`;
+    const id = `A${j + 1}`;
     const shard = {
       id,
       title: f.aiTitle || f.title || `AI ${j + 1}`,
       created: new Date(f.createdAt || Date.now()).toISOString(),
       body: String(f.aiContent || ''),
       sources: Array.isArray(f.nodeIds)
-        ? f.nodeIds.map(i => ({ idx:i, id: viewerNodeId(i), title: nodes?.[i]?.label || '' }))
+        ? f.nodeIds.map(i => ({
+            idx: i,
+            id: viewerNodeId(i),
+            title: nodes?.[i]?.label || ''
+          }))
         : []
     };
-    zip.file(aiDir + `${id}.json`, JSON.stringify(shard));
+    zip.file(aiDir + `${id}.json`, JSON.stringify(shard, null, 2));
   }
 
-  // 4) Reports
-  const wantOverview = !!(opts?.reports?.overview);
-
-  if (wantOverview) {
-    setLoadingProgress?.(0.72, 'Building overview report…');
-
-    const reportData = computeOverviewReportData({
-      userTitle: opts.userTitle || 'Overview Report',
-      userText: opts.userText || ''
-    });
-
-    const mapDataUrl = renderOverviewMapPNGDataUrl({ width: 1600, height: 900, bg: '#ffffff' });
-    const base64Png = String(mapDataUrl).split(',')[1] || '';
-
-    const overviewHtml = buildOverviewHtml(reportData, 'assets/overview-map.png');
-
-    zip.file(reportsDir + 'overview.json', JSON.stringify(reportData, null, 2));
-    zip.file(reportsDir + 'overview.html', overviewHtml);
-    zip.file(reportAssetsDir + 'overview-map.png', base64Png, { base64: true });
-  }
-
-  // 5) Pack + download
-  setLoadingProgress?.(0.90, 'Compressing…');
+  // 4) Pack + download
+  setLoadingProgress?.(0.88, 'Compressing viewer package…');
   const blob = await zip.generateAsync({ type:'blob', compression:'DEFLATE' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
 
-  const fname = String((opts && opts.fileName) ? opts.fileName : `viewer-package-${Date.now()}.zip`).trim()
-    || `viewer-package-${Date.now()}.zip`;
+  const fname = normaliseZipName(
+    opts.fileName,
+    `viewer-data-${Date.now()}`
+  );
 
-  a.href = url;
-  a.download = fname;
-  a.click();
-
-  setTimeout(() => URL.revokeObjectURL(url), 20000);
+  triggerBlobDownload(blob, fname);
   hideLoading?.();
-  showToast?.(wantOverview ? 'Viewer package + Overview report exported.' : 'Viewer package exported.');
+  showToast?.('Viewer JSON package exported.');
 }
 // Map labels across reclusterings by overlap rather than index
 
@@ -19386,94 +19473,101 @@ function normaliseZipName(name, fallbackBase) {
   return out;
 }
 
-function openPublishDialog(onSubmit) {
+function openPublishDialog({
+  mode = 'viewer',          // 'viewer' | 'overview'
+  onSubmit = null
+} = {}) {
+  const isViewer = mode === 'viewer';
+  const nowIso = new Date().toISOString().slice(0,19).replace(/[:T]/g,'-');
+  const defaultZip = isViewer
+    ? `viewer-data-${nowIso}.zip`
+    : `overview-report-${nowIso}.zip`;
+
   // backdrop
   const bg = document.createElement('div');
   Object.assign(bg.style, {
-    position:'fixed', inset:'0', background:'rgba(0,0,0,0.45)', zIndex: '10090'
+    position:'fixed',
+    inset:'0',
+    background:'rgba(0,0,0,0.45)',
+    zIndex:'10090'
   });
   document.body.appendChild(bg);
 
   // modal
   const box = document.createElement('div');
   Object.assign(box.style, {
-    position:'fixed', left:'50%', top:'14%', transform:'translate(-50%, 0)',
-    width:'min(620px, 94vw)', background:'#111', color:'#fff',
-    border:'1px solid rgba(255,255,255,0.2)', borderRadius:'12px',
-    boxShadow:'0 12px 40px rgba(0,0,0,0.5)', padding:'16px', zIndex:'10100',
+    position:'fixed',
+    left:'50%',
+    top:'14%',
+    transform:'translate(-50%, 0)',
+    width:'min(560px, 94vw)',
+    background:'#111',
+    color:'#fff',
+    border:'1px solid rgba(255,255,255,0.2)',
+    borderRadius:'12px',
+    boxShadow:'0 12px 40px rgba(0,0,0,0.5)',
+    padding:'16px',
+    zIndex:'10100',
     font:'13px/1.4 system-ui, -apple-system, Segoe UI, Roboto'
   });
 
-  const nowIso = new Date().toISOString().slice(0,19).replace(/[:T]/g,'-');
-  const defaultViewerZip = `viewer-data-${nowIso}.zip`;
-  const defaultReportZip = `overview-report-${nowIso}.zip`;
+  const titleText = isViewer ? 'Publish JSON Package' : 'Export Overview';
+  const fileLabel = isViewer
+    ? 'Viewer JSON package name (.zip)'
+    : 'Overview report package name (.zip)';
+  const helpText = isViewer
+    ? 'Viewer JSON package = index.json + details shards + AI shards'
+    : 'Overview report package = overview.html + overview.json + map PNG';
+  const actionText = isViewer ? 'Publish JSON Package' : 'Export Overview';
 
   box.innerHTML = `
-    <div style="font-weight:700; font-size:15px; margin-bottom:10px;">Publish</div>
+    <div style="font-weight:700; font-size:15px; margin-bottom:10px;">${titleText}</div>
 
-    <label style="display:block; margin:8px 0 4px;">Viewer JSON package name (.zip)</label>
-    <input id="pub_viewer_name" value="${defaultViewerZip}" style="width:100%; padding:8px; border-radius:8px; border:1px solid rgba(255,255,255,0.25); background:#000; color:#fff" />
-
-    <label style="display:block; margin:10px 0 4px;">Overview report package name (.zip)</label>
-    <input id="pub_report_name" value="${defaultReportZip}" style="width:100%; padding:8px; border-radius:8px; border:1px solid rgba(255,255,255,0.25); background:#000; color:#fff" />
+    <label style="display:block; margin:8px 0 4px;">${fileLabel}</label>
+    <input id="pub_name" value="${defaultZip}" style="width:100%; padding:8px; border-radius:8px; border:1px solid rgba(255,255,255,0.25); background:#000; color:#fff" />
 
     <label style="display:block; margin:10px 0 4px;">Title</label>
     <input id="pub_title" placeholder="e.g. My Cluster Map" style="width:100%; padding:8px; border-radius:8px; border:1px solid rgba(255,255,255,0.25); background:#000; color:#fff" />
 
     <label style="display:block; margin:10px 0 4px;">Text</label>
-    <textarea id="pub_text" rows="5" placeholder="Short description shown in exported outputs…" style="width:100%; padding:8px; border-radius:8px; border:1px solid rgba(255,255,255,0.25); background:#000; color:#fff; resize:vertical"></textarea>
+    <textarea id="pub_text" rows="5" placeholder="Short description shown in exported output…" style="width:100%; padding:8px; border-radius:8px; border:1px solid rgba(255,255,255,0.25); background:#000; color:#fff; resize:vertical"></textarea>
 
     <div style="margin-top:12px; padding:10px 12px; border-radius:8px; border:1px solid rgba(255,255,255,0.14); background:rgba(255,255,255,0.03); color:rgba(255,255,255,0.82);">
-      <div style="font-weight:600; margin-bottom:6px;">Export options</div>
-      <div>Viewer JSON package = index.json + details shards + AI shards</div>
-      <div>Overview report package = overview.html + overview.json + map PNG</div>
+      <div style="font-weight:600; margin-bottom:6px;">Export contents</div>
+      <div>${helpText}</div>
     </div>
 
     <div style="display:flex; gap:8px; justify-content:flex-end; margin-top:14px; flex-wrap:wrap;">
       <button id="pub_cancel" style="padding:8px 12px; border-radius:8px; background:rgba(255,255,255,0.08); border:1px solid rgba(255,255,255,0.2); color:#fff; cursor:pointer;">Cancel</button>
-      <button id="pub_export_viewer" style="padding:8px 12px; border-radius:8px; background:#5b8def; border:1px solid rgba(255,255,255,0.2); color:#fff; cursor:pointer; font-weight:700;">Export Viewer JSON</button>
-      <button id="pub_export_report" style="padding:8px 12px; border-radius:8px; background:#2a7; border:1px solid rgba(255,255,255,0.2); color:#000; cursor:pointer; font-weight:700;">Export Overview HTML</button>
+      <button id="pub_submit" style="padding:8px 12px; border-radius:8px; background:${isViewer ? '#5b8def' : '#2a7'}; border:1px solid rgba(255,255,255,0.2); color:${isViewer ? '#fff' : '#000'}; cursor:pointer; font-weight:700;">${actionText}</button>
     </div>
   `;
   document.body.appendChild(box);
 
-  const close = () => { box.remove(); bg.remove(); };
-  box.querySelector('#pub_cancel').addEventListener('click', close);
+  const close = () => {
+    box.remove();
+    bg.remove();
+  };
+
   bg.addEventListener('click', close);
+  box.querySelector('#pub_cancel').addEventListener('click', close);
 
-  const getPayload = () => ({
-    viewerName: normaliseZipName(
-      box.querySelector('#pub_viewer_name')?.value,
-      defaultViewerZip.replace(/\.zip$/i, '')
-    ),
-    reportName: normaliseZipName(
-      box.querySelector('#pub_report_name')?.value,
-      defaultReportZip.replace(/\.zip$/i, '')
-    ),
-    title: String(box.querySelector('#pub_title')?.value || '').trim(),
-    text:  String(box.querySelector('#pub_text')?.value || '').trim()
-  });
+  box.querySelector('#pub_submit').addEventListener('click', async () => {
+    const payload = {
+      name: normaliseZipName(
+        box.querySelector('#pub_name')?.value,
+        defaultZip.replace(/\.zip$/i, '')
+      ),
+      title: String(box.querySelector('#pub_title')?.value || '').trim(),
+      text:  String(box.querySelector('#pub_text')?.value || '').trim(),
+      mode
+    };
 
-  box.querySelector('#pub_export_viewer').addEventListener('click', () => {
-    const payload = getPayload();
     close();
-    onSubmit?.({
-      action: 'viewer-json',
-      fileName: payload.viewerName,
-      title: payload.title,
-      text: payload.text
-    });
-  });
 
-  box.querySelector('#pub_export_report').addEventListener('click', () => {
-    const payload = getPayload();
-    close();
-    onSubmit?.({
-      action: 'overview-html',
-      fileName: payload.reportName,
-      title: payload.title,
-      text: payload.text
-    });
+    if (typeof onSubmit === 'function') {
+      await onSubmit(payload);
+    }
   });
 }
 
