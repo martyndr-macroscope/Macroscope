@@ -19506,7 +19506,7 @@ function buildClusterGrowthHtml(data) {
   <div class="page">
     <h1>${escHtml(data?.title || 'Cluster Growth')}</h1>
     <div class="intro">
-      ${escHtml(data?.userText || 'This report shows the number of publications in each of the top 100 clusters over time, using the publication years available in the dataset.')}
+      ${escHtml(data?.userText || 'This report shows the cumulative growth in publications for each of the top 100 clusters over time, using the publication years available in the dataset.')}
     </div>
 
     <div class="cards">
@@ -19537,7 +19537,7 @@ function buildClusterGrowthHtml(data) {
         ${xLabels}
         ${linePaths}
         <text x="${chartW/2}" y="${chartH - 4}" text-anchor="middle" font-size="12" fill="#475467">Publication year</text>
-        <text x="18" y="${chartH/2}" text-anchor="middle" font-size="12" fill="#475467" transform="rotate(-90 18 ${chartH/2})">Publications per year</text>
+<text x="18" y="${chartH/2}" text-anchor="middle" font-size="12" fill="#475467" transform="rotate(-90 18 ${chartH/2})">Cumulative publications</text>
       </svg>
     </div>
 
