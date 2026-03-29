@@ -20295,7 +20295,7 @@ function buildClusterImportanceHtml(data) {
 </html>`;
 }
 
-function buildPeaksOfExcellenceHtml(data) {function buildPeaksOfExcellenceHtml(data) {
+function buildPeaksOfExcellenceHtml(data) {
   const escHtml = (s) => String(s ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
