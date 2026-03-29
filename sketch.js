@@ -19856,11 +19856,10 @@ function buildClusterCitationsHtml(data) {
 
 
 function computePeaksOfExcellenceData(opts = {}) {
-  const minAssessed = 11; // more than 10
-
+  const minAssessed = 11; // more than 10 REF-scored publications
   const rows = [];
-  const clusterIds = [];
 
+  const clusterIds = [];
   if (Array.isArray(clusterLabels) && clusterLabels.length) {
     for (let cid = 0; cid < clusterLabels.length; cid++) clusterIds.push(cid);
   } else {
@@ -19870,59 +19869,48 @@ function computePeaksOfExcellenceData(opts = {}) {
   }
 
   for (const cid of clusterIds) {
-    const nodeIds = [];
+    const allNodeIds = [];
     for (let i = 0; i < (clusterOf?.length || 0); i++) {
-      if (clusterOf[i] === cid) nodeIds.push(i);
+      if (clusterOf[i] === cid) allNodeIds.push(i);
     }
+    if (!allNodeIds.length) continue;
 
-    if (!nodeIds.length) continue;
+    // Only keep Northumbria first/last-author publications
+    const northNodeIds = allNodeIds.filter(i => {
+      const item = itemsData?.[i] || {};
+      return publicationMatchesNorthumbriaFirstOrLast(item);
+    });
 
-    const ref = collectClusterRefSummary(nodeIds);
+    if (!northNodeIds.length) continue;
+
+    const ref = collectClusterRefSummary(northNodeIds);
     if ((ref?.n || 0) < minAssessed) continue;
 
-    const dist = ref.dist || {};
+    let totalCitations = 0;
+    for (const i of northNodeIds) {
+      const item = itemsData?.[i] || {};
+      const c = Number(item?.cited_by_count || item?.openalex?.cited_by_count || 0);
+      totalCitations += Number.isFinite(c) ? Math.max(0, c) : 0;
+    }
 
-    const row = {
+    const avgCitations = northNodeIds.length ? (totalCitations / northNodeIds.length) : 0;
+
+    rows.push({
       clusterId: cid,
       clusterLabel: String(clusterLabels?.[cid] || '').trim() || `Cluster ${cid + 1}`,
-      totalPublications: nodeIds.length,
-      assessedPublications: ref.n || 0,
-      gpa: Number(ref.gpa || 0),
-
-      c4plus: Number(dist['4+'] || 0),
-      c4: Number(dist['4'] || 0),
-      c4minus: Number(dist['4-'] || 0),
-
-      c3plus: Number(dist['3+'] || 0),
-      c3: Number(dist['3'] || 0),
-      c3minus: Number(dist['3-'] || 0),
-
-      c2plus: Number(dist['2+'] || 0),
-      c2: Number(dist['2'] || 0),
-      c2minus: Number(dist['2-'] || 0),
-
-      c1plus: Number(dist['1+'] || 0),
-      c1: Number(dist['1'] || 0),
-      c1minus: Number(dist['1-'] || 0),
-
-      c0: Number(dist['0'] || 0)
-    };
-
-    row.fourStarTotal = row.c4plus + row.c4 + row.c4minus;
-    rows.push(row);
+      gpa: Number(ref.gpa || 0),                     // X axis: quality
+      avgCitations: Number(avgCitations || 0),      // Y axis: impact
+      northScale: northNodeIds.length,              // bubble size
+      assessedPublications: Number(ref.n || 0),     // REF-assessed Northumbria first/last pubs
+      totalCitations: Number(totalCitations || 0),
+      totalClusterPublications: allNodeIds.length
+    });
   }
 
-  const byGpa = rows.slice().sort((a, b) =>
+  rows.sort((a, b) =>
     (b.gpa - a.gpa) ||
-    (b.fourStarTotal - a.fourStarTotal) ||
-    (b.assessedPublications - a.assessedPublications) ||
-    a.clusterLabel.localeCompare(b.clusterLabel)
-  );
-
-  const byFourStar = rows.slice().sort((a, b) =>
-    (b.fourStarTotal - a.fourStarTotal) ||
-    (b.gpa - a.gpa) ||
-    (b.assessedPublications - a.assessedPublications) ||
+    (b.avgCitations - a.avgCitations) ||
+    (b.northScale - a.northScale) ||
     a.clusterLabel.localeCompare(b.clusterLabel)
   );
 
@@ -19932,10 +19920,7 @@ function computePeaksOfExcellenceData(opts = {}) {
     userText: opts.userText || '',
     minAssessed,
     eligibleClusterCount: rows.length,
-    rankings: {
-      byGpa,
-      byFourStar
-    }
+    rows
   };
 }
 function buildClusterImportanceHtml(data) {
@@ -20310,27 +20295,134 @@ function buildClusterImportanceHtml(data) {
 </html>`;
 }
 
-function buildPeaksOfExcellenceHtml(data) {
+function buildPeaksOfExcellenceHtml(data) {function buildPeaksOfExcellenceHtml(data) {
   const escHtml = (s) => String(s ?? '')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
 
-  const byGpa = data?.rankings?.byGpa || [];
-  const byFourStar = data?.rankings?.byFourStar || [];
+  const fmtInt = (n) => {
+    const v = Number(n || 0);
+    return Number.isFinite(v) ? v.toLocaleString() : '0';
+  };
 
-  const renderRows = (rows) => rows.map((r, i) => `
+  const fmtNum = (n, dp = 2) => {
+    const v = Number(n || 0);
+    return Number.isFinite(v) ? v.toFixed(dp) : '0.00';
+  };
+
+  const rows = Array.isArray(data?.rows) ? data.rows : [];
+
+  const plotW = 1080;
+  const plotH = 640;
+  const padL = 84;
+  const padR = 36;
+  const padT = 30;
+  const padB = 70;
+  const innerW = plotW - padL - padR;
+  const innerH = plotH - padT - padB;
+
+  const gpaVals = rows.map(r => Number(r.gpa || 0));
+  const impactVals = rows.map(r => Number(r.avgCitations || 0));
+  const sizeVals = rows.map(r => Number(r.northScale || 0));
+
+  const minGpa = Math.min(...gpaVals, 0);
+  const maxGpa = Math.max(...gpaVals, 1);
+  const minImpact = Math.min(...impactVals, 0);
+  const maxImpact = Math.max(...impactVals, 1);
+  const minSize = Math.min(...sizeVals, 1);
+  const maxSize = Math.max(...sizeVals, 1);
+
+  const safeNorm = (v, lo, hi) => {
+    if (!Number.isFinite(v)) return 0;
+    if (!(hi > lo)) return 0.5;
+    return (v - lo) / (hi - lo);
+  };
+
+  const xFor = (gpa) => padL + safeNorm(gpa, minGpa, maxGpa) * innerW;
+  const yFor = (impact) => padT + innerH - safeNorm(impact, minImpact, maxImpact) * innerH;
+  const rFor = (scale) => {
+    const t = safeNorm(scale, minSize, maxSize);
+    return 7 + t * 22;
+  };
+
+  const colorForBubble = (gpa) => {
+    const t = safeNorm(gpa, minGpa, maxGpa);
+    const hue = 220 - (220 * t); // blue -> red
+    return `hsl(${hue} 72% 52%)`;
+  };
+
+  const xTicks = 5;
+  const yTicks = 5;
+
+  const xTickVals = Array.from({ length: xTicks + 1 }, (_, i) =>
+    minGpa + (i / xTicks) * (maxGpa - minGpa)
+  );
+
+  const yTickVals = Array.from({ length: yTicks + 1 }, (_, i) =>
+    minImpact + (i / yTicks) * (maxImpact - minImpact)
+  );
+
+  const xGrid = xTickVals.map(v => {
+    const x = xFor(v);
+    return `
+      <g>
+        <line x1="${x}" y1="${padT}" x2="${x}" y2="${padT + innerH}" stroke="#e5e7eb" stroke-width="1"/>
+        <text x="${x}" y="${plotH - 18}" text-anchor="middle" font-size="11" fill="#667085">${fmtNum(v, 2)}</text>
+      </g>
+    `;
+  }).join('');
+
+  const yGrid = yTickVals.map(v => {
+    const y = yFor(v);
+    return `
+      <g>
+        <line x1="${padL}" y1="${y}" x2="${padL + innerW}" y2="${y}" stroke="#e5e7eb" stroke-width="1"/>
+        <text x="${padL - 10}" y="${y + 4}" text-anchor="end" font-size="11" fill="#667085">${fmtNum(v, 1)}</text>
+      </g>
+    `;
+  }).join('');
+
+  const meanX = rows.length
+    ? rows.reduce((a, r) => a + Number(r.gpa || 0), 0) / rows.length
+    : 0;
+
+  const meanY = rows.length
+    ? rows.reduce((a, r) => a + Number(r.avgCitations || 0), 0) / rows.length
+    : 0;
+
+  const crosshair = rows.length ? `
+    <line x1="${xFor(meanX)}" y1="${padT}" x2="${xFor(meanX)}" y2="${padT + innerH}" stroke="#94a3b8" stroke-width="1.2" stroke-dasharray="5 5"/>
+    <line x1="${padL}" y1="${yFor(meanY)}" x2="${padL + innerW}" y2="${yFor(meanY)}" stroke="#94a3b8" stroke-width="1.2" stroke-dasharray="5 5"/>
+  ` : '';
+
+  const bubbles = rows.map((r, i) => {
+    const x = xFor(Number(r.gpa || 0));
+    const y = yFor(Number(r.avgCitations || 0));
+    const rr = rFor(Number(r.northScale || 1));
+    const fill = colorForBubble(Number(r.gpa || 0));
+
+    return `
+      <g>
+        <circle cx="${x}" cy="${y}" r="${rr}" fill="${fill}" fill-opacity="0.72" stroke="#ffffff" stroke-width="1.4">
+          <title>${escHtml(r.clusterLabel)} | GPA ${fmtNum(r.gpa, 2)} | Avg citations ${fmtNum(r.avgCitations, 2)} | Northumbria first/last publications ${fmtInt(r.northScale)} | REF assessed ${fmtInt(r.assessedPublications)}</title>
+        </circle>
+        ${i < 18 ? `<text x="${x + rr + 4}" y="${y + 4}" font-size="10" fill="#334155">${escHtml(r.clusterLabel)}</text>` : ''}
+      </g>
+    `;
+  }).join('');
+
+  const rowsHtml = rows.map((r, i) => `
     <tr>
       <td>${i + 1}</td>
       <td>${escHtml(r.clusterLabel)}</td>
-      <td>${r.totalPublications}</td>
-      <td>${r.assessedPublications}</td>
-      <td>${Number(r.gpa || 0).toFixed(2)}</td>
-      <td>${r.fourStarTotal}</td>
-      <td>${r.c4plus}</td>
-      <td>${r.c4}</td>
-      <td>${r.c4minus}</td>
+      <td>${fmtNum(r.gpa, 2)}</td>
+      <td>${fmtNum(r.avgCitations, 2)}</td>
+      <td>${fmtInt(r.northScale)}</td>
+      <td>${fmtInt(r.assessedPublications)}</td>
+      <td>${fmtInt(r.totalCitations)}</td>
+      <td>${fmtInt(r.totalClusterPublications)}</td>
     </tr>
   `).join('');
 
@@ -20356,16 +20448,9 @@ function buildPeaksOfExcellenceHtml(data) {
     font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
   }
   .page{
-    max-width:1200px;
+    max-width:1240px;
     margin:0 auto;
     padding:40px 32px 56px;
-  }
-  .hero{
-    display:flex;
-    justify-content:space-between;
-    align-items:flex-start;
-    gap:16px;
-    margin-bottom:22px;
   }
   h1{
     font-size:34px;
@@ -20384,7 +20469,7 @@ function buildPeaksOfExcellenceHtml(data) {
   }
   .cards{
     display:grid;
-    grid-template-columns:repeat(3,minmax(0,1fr));
+    grid-template-columns:repeat(4,minmax(0,1fr));
     gap:14px;
     margin-bottom:26px;
   }
@@ -20438,82 +20523,80 @@ function buildPeaksOfExcellenceHtml(data) {
     margin-top:10px;
   }
   @media (max-width: 1000px){
-    .cards{grid-template-columns:1fr}
+    .cards{grid-template-columns:repeat(2,minmax(0,1fr))}
   }
 </style>
 </head>
 <body>
   <div class="page">
-    <div class="hero">
-      <div>
-        <h1>${escHtml(data?.title || 'Peaks of Excellence')}</h1>
-        <div class="meta">Generated ${escHtml(new Date(data.generatedAt).toLocaleString())}</div>
-      </div>
+    <div>
+      <h1>${escHtml(data?.title || 'Peaks of Excellence')}</h1>
+      <div class="meta">Generated ${escHtml(new Date(data.generatedAt).toLocaleString())}</div>
     </div>
 
     <div class="intro">
-      ${escHtml(data?.userText || 'This report identifies clusters with more than 10 REF-scored publications and ranks them by overall GPA and by the number of 4-star outputs.')}
+      ${escHtml(data?.userText || 'This report maps clusters with more than 10 REF-scored publications, using only publications where Northumbria academics are first or last author. The x-axis shows quality (GPA), the y-axis shows impact (average citations per publication), and bubble size shows the scale of the cluster based on the number of Northumbria first/last publications in that cluster.')}
     </div>
 
     <div class="cards">
       <div class="card">
         <div class="k">Eligible clusters</div>
-        <div class="v">${data?.eligibleClusterCount || 0}</div>
+        <div class="v">${fmtInt(data?.eligibleClusterCount || 0)}</div>
       </div>
       <div class="card">
         <div class="k">REF threshold</div>
         <div class="v">&gt; 10</div>
       </div>
       <div class="card">
-        <div class="k">Ranking basis</div>
-        <div class="v" style="font-size:20px">GPA + 4★ count</div>
+        <div class="k">X axis</div>
+        <div class="v" style="font-size:20px">GPA</div>
+      </div>
+      <div class="card">
+        <div class="k">Y axis</div>
+        <div class="v" style="font-size:20px">Avg citations</div>
       </div>
     </div>
 
-    <section class="panel">
-      <h2>Clusters ranked by overall GPA</h2>
-      <table>
-        <thead>
-          <tr>
-            <th>Rank</th>
-            <th>Cluster</th>
-            <th>Total pubs</th>
-            <th>REF assessed</th>
-            <th>GPA</th>
-            <th>4★ total</th>
-            <th>4+</th>
-            <th>4</th>
-            <th>4-</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${renderRows(byGpa)}
-        </tbody>
-      </table>
-    </section>
+    <div class="panel">
+      <h2>Peaks of Excellence landscape</h2>
+      <div class="note" style="margin-bottom:12px;">
+        Bubble size = number of publications in the cluster where Northumbria academics are first or last author. Bubble colour also tracks GPA. Dashed guide lines mark the mean GPA and mean impact across eligible clusters.
+      </div>
+      <div style="overflow:auto;">
+        <svg width="${plotW}" height="${plotH}" viewBox="0 0 ${plotW} ${plotH}" role="img" aria-label="Peaks of Excellence landscape">
+          <rect x="0" y="0" width="${plotW}" height="${plotH}" fill="#fff"/>
+          ${xGrid}
+          ${yGrid}
+          ${crosshair}
+          <line x1="${padL}" y1="${padT + innerH}" x2="${padL + innerW}" y2="${padT + innerH}" stroke="#101828" stroke-width="1.2"/>
+          <line x1="${padL}" y1="${padT}" x2="${padL}" y2="${padT + innerH}" stroke="#101828" stroke-width="1.2"/>
+          ${bubbles}
+          <text x="${plotW / 2}" y="${plotH - 8}" text-anchor="middle" font-size="12" fill="#475467">Quality: GPA (Northumbria first/last publications)</text>
+          <text x="20" y="${plotH / 2}" text-anchor="middle" font-size="12" fill="#475467" transform="rotate(-90 20 ${plotH / 2})">Impact: average citations per publication</text>
+        </svg>
+      </div>
+    </div>
 
-    <section class="panel">
-      <h2>Clusters ranked by number of 4★ publications</h2>
+    <div class="panel">
+      <h2>Eligible clusters</h2>
       <table>
         <thead>
           <tr>
             <th>Rank</th>
             <th>Cluster</th>
-            <th>Total pubs</th>
-            <th>REF assessed</th>
             <th>GPA</th>
-            <th>4★ total</th>
-            <th>4+</th>
-            <th>4</th>
-            <th>4-</th>
+            <th>Avg citations</th>
+            <th>Northumbria scale</th>
+            <th>REF assessed</th>
+            <th>Total citations</th>
+            <th>Total cluster pubs</th>
           </tr>
         </thead>
         <tbody>
-          ${renderRows(byFourStar)}
+          ${rowsHtml}
         </tbody>
       </table>
-      <div class="note">Only clusters with more than 10 REF-scored outputs are included.</div>
-    </section>
+    </div>
   </div>
 </body>
 </html>`;
