@@ -2448,6 +2448,35 @@ publishImportanceBtn.mousePressed(() => {
   });
 });
 
+const publishIntegratedBtn = createButton('Integrated Northumbria Report');
+publishIntegratedBtn.parent(publishMenu);
+publishIntegratedBtn.style('text-align', 'left');
+publishIntegratedBtn.style('padding', '8px 10px');
+publishIntegratedBtn.style('background', 'rgba(255,255,255,0.06)');
+publishIntegratedBtn.style('color', '#f1f1f1');
+publishIntegratedBtn.style('border', '1px solid rgba(255,255,255,0.08)');
+publishIntegratedBtn.style('border-radius', '8px');
+publishIntegratedBtn.style('cursor', 'pointer');
+captureUI?.(publishIntegratedBtn.elt);
+
+publishIntegratedBtn.mousePressed(() => {
+  closePublishMenu();
+  openPublishDialog({
+    mode: 'integrated',
+    onSubmit: ({ name, title, text }) => {
+      exportIntegratedNorthumbriaReportZip({
+        fileName: name,
+        userTitle: title,
+        userText: text
+      });
+    }
+  });
+});
+
+
+
+
+
 exportViewerBtn.mousePressed(() => {
   if (DEMO_MODE) return;
   const isOpen = publishMenu && publishMenu.elt.style.display !== 'none';
@@ -21017,7 +21046,8 @@ function openPublishDialog({
     peaks:      `peaks-of-excellence-${nowIso}.zip`,
     citations:  `cluster-citations-${nowIso}.zip`,
     growth:     `cluster-growth-${nowIso}.zip`,
-    importance: `cluster-importance-${nowIso}.zip`
+    importance: `cluster-importance-${nowIso}.zip`,
+    integrated: `integrated-northumbria-report-${nowIso}.zip`
   };
 
   const titles = {
@@ -21026,7 +21056,8 @@ function openPublishDialog({
     peaks: 'Export Peaks of Excellence',
     citations: 'Export Cluster Citations',
     growth: 'Export Cluster Growth',
-    importance: 'Export Cluster Importance'
+    importance: 'Export Cluster Importance',
+    integrated: 'Export Integrated Northumbria Report'
   };
 
   const help = {
@@ -21035,7 +21066,8 @@ function openPublishDialog({
     peaks: 'Peaks of Excellence = peaks.html + peaks.json',
     citations: 'Cluster Citations = citations.html + citations.json',
     growth: 'Cluster Growth = growth.html + growth.json',
-    importance: 'Cluster Importance = importance.html + importance.json'
+    importance: 'Cluster Importance = importance.html + importance.json',
+    integrated: 'Integrated Northumbria Report = integrated-report.html + integrated-report.json'
   };
 
   const bg = document.createElement('div');
@@ -21114,7 +21146,493 @@ function openPublishDialog({
     }
   });
 }
+function clusterLabelForId(cid) {
+  return String(clusterLabels?.[cid] || '').trim() || `Cluster ${cid + 1}`;
+}
 
+function allClusterIdsFromState() {
+  if (Array.isArray(clusterLabels) && clusterLabels.length) {
+    return clusterLabels.map((_, i) => i);
+  }
+  const seen = new Set((clusterOf || []).filter(v => Number.isFinite(v) && v >= 0));
+  return Array.from(seen).sort((a, b) => a - b);
+}
+
+function getNodeIdsForCluster(cid) {
+  const ids = [];
+  for (let i = 0; i < (clusterOf?.length || 0); i++) {
+    if (clusterOf[i] === cid) ids.push(i);
+  }
+  return ids;
+}
+
+function getNorthumbriaFilteredNodeIdsForCluster(cid) {
+  return getNodeIdsForCluster(cid).filter(i => {
+    const item = itemsData?.[i] || {};
+    return publicationMatchesNorthumbriaFirstOrLast(item);
+  });
+}
+
+function getCitationCountForNode(i) {
+  const item = itemsData?.[i] || {};
+  const oa = item?.openalex || {};
+  const c = Number(item?.cited_by_count || oa?.cited_by_count || nodes?.[i]?.cbc || 0);
+  return Number.isFinite(c) ? Math.max(0, c) : 0;
+}
+
+function getPublicationYearForNode(i) {
+  const item = itemsData?.[i] || {};
+  const oa = item?.openalex || {};
+  const y =
+    Number(item?.year) ||
+    Number(item?.publication_year) ||
+    Number(oa?.publication_year) ||
+    Number(oa?.year);
+  return (Number.isFinite(y) && y >= 1000 && y <= 3000) ? y : null;
+}
+
+function medianOf(values) {
+  const arr = (Array.isArray(values) ? values : []).filter(Number.isFinite).slice().sort((a, b) => a - b);
+  if (!arr.length) return 0;
+  const mid = Math.floor(arr.length / 2);
+  return (arr.length % 2)
+    ? arr[mid]
+    : (arr[mid - 1] + arr[mid]) / 2;
+}
+
+function getNorthumbriaAuthorNamesForNode(i) {
+  const item = itemsData?.[i] || {};
+  const w = item?.openalex || item?.openAlex || item || {};
+  const auths = Array.isArray(w?.authorships) ? w.authorships : [];
+  const out = [];
+
+  for (const auth of auths) {
+    if (!authorshipMatchesNorthumbriaFirstOrLast(auth)) continue;
+    const nm =
+      String(auth?.author?.display_name || auth?.display_name || auth?.name || '').trim();
+    if (nm) out.push(nm);
+  }
+  return out;
+}
+
+function countUniqueNorthumbriaAuthorsInCluster(cid) {
+  const ids = getNodeIdsForCluster(cid);
+  const names = new Set();
+  for (const i of ids) {
+    for (const nm of getNorthumbriaAuthorNamesForNode(i)) names.add(nm);
+  }
+  return names.size;
+}
+
+function coarseRefStarForNode(i) {
+  const item = itemsData?.[i] || {};
+  if (Number.isFinite(Number(item?.ref_star))) return Number(item.ref_star);
+
+  const band = String(item?.ref_score_band || '').trim();
+  if (!band) return null;
+  if (band.startsWith('4')) return 4;
+  if (band.startsWith('3')) return 3;
+  if (band.startsWith('2')) return 2;
+  if (band.startsWith('1')) return 1;
+  if (band.startsWith('0')) return 0;
+  return null;
+}
+
+function topNBy(rows, key, n = 20, minValue = null) {
+  let arr = rows.slice();
+  if (minValue != null) {
+    arr = arr.filter(r => Number(r[key] || 0) >= minValue);
+  }
+  arr.sort((a, b) =>
+    (Number(b[key] || 0) - Number(a[key] || 0)) ||
+    String(a.label || '').localeCompare(String(b.label || ''))
+  );
+  return arr.slice(0, n);
+}
+
+function computeIntegratedNorthumbriaReportData(opts = {}) {
+  const clusterIds = allClusterIdsFromState();
+
+  const totalPublications = itemsData?.length || 0;
+
+  const northumbriaFilteredNodeIdsAll = [];
+  for (let i = 0; i < (itemsData?.length || 0); i++) {
+    if (publicationMatchesNorthumbriaFirstOrLast(itemsData[i])) {
+      northumbriaFilteredNodeIdsAll.push(i);
+    }
+  }
+
+  const allRef = collectClusterRefSummary(
+    Array.from({ length: itemsData?.length || 0 }, (_, i) => i)
+  );
+
+  const northRef = collectClusterRefSummary(northumbriaFilteredNodeIdsAll);
+
+  const clusterRows = clusterIds.map(cid => {
+    const allNodeIds = getNodeIdsForCluster(cid);
+    const northNodeIds = getNorthumbriaFilteredNodeIdsForCluster(cid);
+
+    const totalCount = allNodeIds.length;
+    const northCount = northNodeIds.length;
+    const northAuthorCount = countUniqueNorthumbriaAuthorsInCluster(cid);
+
+    let totalCitationsAll = 0;
+    for (const i of allNodeIds) totalCitationsAll += getCitationCountForNode(i);
+
+    let totalCitationsNorth = 0;
+    const northCitationValues = [];
+    for (const i of northNodeIds) {
+      const c = getCitationCountForNode(i);
+      totalCitationsNorth += c;
+      northCitationValues.push(c);
+    }
+
+    const meanCitationsNorth = northCitationValues.length
+      ? totalCitationsNorth / northCitationValues.length
+      : 0;
+
+    const medianCitationsNorth = medianOf(northCitationValues);
+
+    let northFourStarCount = 0;
+    for (const i of northNodeIds) {
+      const s = coarseRefStarForNode(i);
+      if (s === 4) northFourStarCount++;
+    }
+
+    const northRefSummary = collectClusterRefSummary(northNodeIds);
+
+    return {
+      cid,
+      label: clusterLabelForId(cid),
+
+      total_publications: totalCount,
+      northumbria_publications: northCount,
+      northumbria_author_members: northAuthorCount,
+
+      northumbria_ref_assessed: Number(northRefSummary.n || 0),
+      northumbria_gpa: Number(northRefSummary.gpa || 0),
+      northumbria_four_star_count: northFourStarCount,
+
+      total_citations_all: totalCitationsAll,
+      total_citations_north: totalCitationsNorth,
+      mean_citations_north: meanCitationsNorth,
+      median_citations_north: medianCitationsNorth
+    };
+  });
+
+  const summary = {
+    total_publications_dataset: totalPublications,
+    total_publications_north_first_last: northumbriaFilteredNodeIdsAll.length,
+    total_publications_ref_north_first_last: Number(northRef.n || 0),
+    overall_ref_gpa_all_publications: Number(allRef.gpa || 0),
+    overall_ref_gpa_north_first_last: Number(northRef.gpa || 0)
+  };
+
+  return {
+    generatedAt: new Date().toISOString(),
+    title: opts.userTitle || 'Integrated Northumbria Report',
+    userText: opts.userText || '',
+    summary,
+    sections: {
+      largest_clusters_total: topNBy(clusterRows, 'total_publications', 20),
+      largest_clusters_north: topNBy(clusterRows, 'northumbria_publications', 20),
+      largest_clusters_authors: topNBy(clusterRows, 'northumbria_author_members', 20),
+
+      quality_four_star: topNBy(clusterRows, 'northumbria_four_star_count', 20),
+      quality_gpa: topNBy(
+        clusterRows.filter(r => Number(r.northumbria_ref_assessed || 0) > 10),
+        'northumbria_gpa',
+        20
+      ),
+
+      impact_total_citations_all: topNBy(clusterRows, 'total_citations_all', 20),
+      impact_total_citations_north: topNBy(clusterRows, 'total_citations_north', 20),
+      impact_mean_citations_north: topNBy(clusterRows, 'mean_citations_north', 20),
+      impact_median_citations_north: topNBy(clusterRows, 'median_citations_north', 20)
+    },
+    clusters: clusterRows
+  };
+}
+
+function buildHorizontalBarChartSvg(rows, {
+  title = '',
+  valueKey = 'value',
+  width = 1080,
+  barHeight = 22,
+  gap = 10,
+  leftLabelWidth = 360,
+  rightPad = 70,
+  topPad = 26,
+  bottomPad = 20,
+  valueFormatter = (v) => String(v),
+  color = '#4f46e5'
+} = {}) {
+  const data = Array.isArray(rows) ? rows : [];
+  const maxVal = Math.max(1, ...data.map(r => Number(r?.[valueKey] || 0)));
+
+  const chartW = width;
+  const innerW = chartW - leftLabelWidth - rightPad;
+  const chartH = topPad + bottomPad + Math.max(1, data.length) * (barHeight + gap);
+
+  const escHtml = (s) => String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+
+  const fmtIntLocal = (n) => {
+    const v = Number(n || 0);
+    return Number.isFinite(v) ? v.toLocaleString() : '0';
+  };
+
+  const bars = data.map((r, idx) => {
+    const v = Number(r?.[valueKey] || 0);
+    const y = topPad + idx * (barHeight + gap);
+    const bw = (v / maxVal) * innerW;
+
+    return `
+      <g>
+        <text x="0" y="${y + barHeight - 6}" font-size="12" fill="#111827">${idx + 1}. ${escHtml(r.label || '')}</text>
+        <rect x="${leftLabelWidth}" y="${y}" width="${innerW}" height="${barHeight}" rx="4" fill="#eef2ff"></rect>
+        <rect x="${leftLabelWidth}" y="${y}" width="${bw}" height="${barHeight}" rx="4" fill="${color}"></rect>
+        <text x="${leftLabelWidth + bw + 8}" y="${y + barHeight - 6}" font-size="12" fill="#374151">${escHtml(valueFormatter(v))}</text>
+      </g>
+    `;
+  }).join('');
+
+  return `
+    <svg width="${chartW}" height="${chartH}" viewBox="0 0 ${chartW} ${chartH}" role="img" aria-label="${escHtml(title)}">
+      ${bars}
+    </svg>
+  `;
+}
+
+function buildIntegratedNorthumbriaReportHtml(data) {
+  const escHtml = (s) => String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+
+  const fmtInt = (n) => {
+    const v = Number(n || 0);
+    return Number.isFinite(v) ? v.toLocaleString() : '0';
+  };
+
+  const fmtNum = (n, dp = 2) => {
+    const v = Number(n || 0);
+    return Number.isFinite(v) ? v.toFixed(dp) : '0.00';
+  };
+
+  const s = data?.summary || {};
+  const sec = data?.sections || {};
+
+  const chart1 = buildHorizontalBarChartSvg(sec.largest_clusters_total, {
+    title: 'Top 20 clusters by total publications',
+    valueKey: 'total_publications',
+    valueFormatter: fmtInt,
+    color: '#2563eb'
+  });
+
+  const chart2 = buildHorizontalBarChartSvg(sec.largest_clusters_north, {
+    title: 'Top 20 clusters by Northumbria first/last publications',
+    valueKey: 'northumbria_publications',
+    valueFormatter: fmtInt,
+    color: '#0f766e'
+  });
+
+  const chart3 = buildHorizontalBarChartSvg(sec.largest_clusters_authors, {
+    title: 'Top 20 clusters by number of Northumbria-affiliated authors',
+    valueKey: 'northumbria_author_members',
+    valueFormatter: fmtInt,
+    color: '#7c3aed'
+  });
+
+  const chart4 = buildHorizontalBarChartSvg(sec.quality_four_star, {
+    title: 'Top 20 clusters by number of 4★ publications',
+    valueKey: 'northumbria_four_star_count',
+    valueFormatter: fmtInt,
+    color: '#dc2626'
+  });
+
+  const chart5 = buildHorizontalBarChartSvg(sec.quality_gpa, {
+    title: 'Top 20 clusters by GPA (>10 REF-assessed Northumbria first/last publications)',
+    valueKey: 'northumbria_gpa',
+    valueFormatter: v => fmtNum(v, 2),
+    color: '#ea580c'
+  });
+
+  const chart6 = buildHorizontalBarChartSvg(sec.impact_total_citations_all, {
+    title: 'Top 20 clusters by total citations (all publications)',
+    valueKey: 'total_citations_all',
+    valueFormatter: fmtInt,
+    color: '#1d4ed8'
+  });
+
+  const chart7 = buildHorizontalBarChartSvg(sec.impact_total_citations_north, {
+    title: 'Top 20 clusters by total citations (Northumbria first/last publications)',
+    valueKey: 'total_citations_north',
+    valueFormatter: fmtInt,
+    color: '#047857'
+  });
+
+  const chart8 = buildHorizontalBarChartSvg(sec.impact_mean_citations_north, {
+    title: 'Top 20 clusters by mean citations (Northumbria first/last publications)',
+    valueKey: 'mean_citations_north',
+    valueFormatter: v => fmtNum(v, 2),
+    color: '#9333ea'
+  });
+
+  const chart9 = buildHorizontalBarChartSvg(sec.impact_median_citations_north, {
+    title: 'Top 20 clusters by median citations (Northumbria first/last publications)',
+    valueKey: 'median_citations_north',
+    valueFormatter: v => fmtNum(v, 2),
+    color: '#b45309'
+  });
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>${escHtml(data?.title || 'Integrated Northumbria Report')}</title>
+<style>
+  :root{
+    --bg:#f8fafc;
+    --panel:#ffffff;
+    --ink:#0f172a;
+    --muted:#64748b;
+    --line:#dbe2ea;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--ink);
+    font:14px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  .page{
+    max-width:1240px;
+    margin:0 auto;
+    padding:34px 24px 56px;
+  }
+  h1{
+    margin:0 0 8px;
+    font-size:34px;
+    line-height:1.1;
+  }
+  .intro{
+    color:var(--muted);
+    font-size:15px;
+    max-width:960px;
+    margin-bottom:24px;
+  }
+  h2{
+    margin:0 0 14px;
+    font-size:24px;
+  }
+  .section{
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:18px;
+    padding:20px;
+    margin:0 0 20px;
+  }
+  .summary-table{
+    width:100%;
+    border-collapse:collapse;
+  }
+  .summary-table th,
+  .summary-table td{
+    text-align:left;
+    padding:10px 12px;
+    border-top:1px solid var(--line);
+    font-size:14px;
+  }
+  .summary-table th{
+    width:65%;
+    color:#334155;
+    font-weight:600;
+    background:#fcfcfd;
+  }
+  .summary-table tr:first-child th,
+  .summary-table tr:first-child td{
+    border-top:none;
+  }
+  .chart-block{
+    margin:0 0 18px;
+  }
+  .chart-title{
+    font-size:16px;
+    font-weight:700;
+    margin:0 0 8px;
+  }
+  .chart-wrap{
+    overflow:auto;
+    border:1px solid var(--line);
+    border-radius:14px;
+    padding:12px;
+    background:#fff;
+  }
+</style>
+</head>
+<body>
+  <div class="page">
+    <h1>${escHtml(data?.title || 'Integrated Northumbria Report')}</h1>
+    <div class="intro">
+      ${escHtml(data?.userText || 'Integrated cluster report for the current map, combining overall dataset metrics, Northumbria first/last-author filtering, REF quality, cluster size, authorship presence, and citation impact.')}
+    </div>
+
+    <section class="section">
+      <h2>1. Summary Table</h2>
+      <table class="summary-table">
+        <tr>
+          <th>Total number of publications in the whole dataset</th>
+          <td>${fmtInt(s.total_publications_dataset)}</td>
+        </tr>
+        <tr>
+          <th>Total number of publications with a Northumbria Academic as first or last author</th>
+          <td>${fmtInt(s.total_publications_north_first_last)}</td>
+        </tr>
+        <tr>
+          <th>Total number of publications subject to REF assessment with Northumbria Academic as first or last author</th>
+          <td>${fmtInt(s.total_publications_ref_north_first_last)}</td>
+        </tr>
+        <tr>
+          <th>Overall REF GPA for all publications</th>
+          <td>${fmtNum(s.overall_ref_gpa_all_publications, 2)}</td>
+        </tr>
+        <tr>
+          <th>Overall REF GPA for all publications with Northumbria affiliation as first or last author</th>
+          <td>${fmtNum(s.overall_ref_gpa_north_first_last, 2)}</td>
+        </tr>
+      </table>
+    </section>
+
+    <section class="section">
+      <h2>2. Largest Clusters</h2>
+      <div class="chart-block"><div class="chart-title">Top 20 clusters by total publications</div><div class="chart-wrap">${chart1}</div></div>
+      <div class="chart-block"><div class="chart-title">Top 20 clusters by Northumbria first/last publications</div><div class="chart-wrap">${chart2}</div></div>
+      <div class="chart-block"><div class="chart-title">Top 20 clusters by number of Northumbria-affiliated authors who are members</div><div class="chart-wrap">${chart3}</div></div>
+    </section>
+
+    <section class="section">
+      <h2>3. Research Quality</h2>
+      <div class="chart-block"><div class="chart-title">Top 20 clusters by number of 4★ publications with Northumbria first/last authors</div><div class="chart-wrap">${chart4}</div></div>
+      <div class="chart-block"><div class="chart-title">Top 20 clusters by GPA, for clusters with more than 10 REF-assessed Northumbria first/last publications</div><div class="chart-wrap">${chart5}</div></div>
+    </section>
+
+    <section class="section">
+      <h2>4. Research Impact</h2>
+      <div class="chart-block"><div class="chart-title">Top 20 clusters by total citation counts (all publications)</div><div class="chart-wrap">${chart6}</div></div>
+      <div class="chart-block"><div class="chart-title">Top 20 clusters by total citation counts in Northumbria first/last publications</div><div class="chart-wrap">${chart7}</div></div>
+      <div class="chart-block"><div class="chart-title">Top 20 clusters by mean citations in Northumbria first/last publications</div><div class="chart-wrap">${chart8}</div></div>
+      <div class="chart-block"><div class="chart-title">Top 20 clusters by median citations in Northumbria first/last publications</div><div class="chart-wrap">${chart9}</div></div>
+    </section>
+  </div>
+</body>
+</html>`;
+}
 
 // Build the same stable key that toggleDimensionTool uses
 function dimKeyFor(type, rec){
@@ -21906,6 +22424,49 @@ function isCompactOpenAlex(w) {
                     && !(w.biblio && (w.biblio.reference_count != null || w.biblio.references_count != null));
   return noAuthors || noVenue || noRefs;
 }
+
+async function exportIntegratedNorthumbriaReportZip(opts = {}) {
+  projectMeta = {
+    title: (opts.userTitle || '').toString(),
+    text:  (opts.userText  || '').toString(),
+    created: new Date().toISOString()
+  };
+
+  if (typeof JSZip === 'undefined') {
+    showToast?.('JSZip not found');
+    return;
+  }
+
+  showLoading?.('Preparing integrated Northumbria report…', 0.10);
+  const zip = new JSZip();
+
+  const base = `integrated-northumbria-report-${Date.now()}/`;
+
+  const reportData = computeIntegratedNorthumbriaReportData({
+    userTitle: opts.userTitle || 'Integrated Northumbria Report',
+    userText: opts.userText || ''
+  });
+
+  setLoadingProgress?.(0.65, 'Building integrated report HTML…');
+  const html = buildIntegratedNorthumbriaReportHtml(reportData);
+
+  zip.file(base + 'integrated-report.json', JSON.stringify(reportData, null, 2));
+  zip.file(base + 'integrated-report.html', html);
+
+  setLoadingProgress?.(0.90, 'Compressing integrated report…');
+  const blob = await zip.generateAsync({ type:'blob', compression:'DEFLATE' });
+
+  const fname = normaliseZipName(
+    opts.fileName,
+    `integrated-northumbria-report-${Date.now()}`
+  );
+
+  triggerBlobDownload(blob, fname);
+  hideLoading?.();
+  showToast?.('Integrated Northumbria report exported.');
+}
+
+
 // === Full-Text Lit Review (v2) helpers ===
 
 // Tunables
