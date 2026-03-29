@@ -19927,127 +19927,151 @@ function buildClusterImportanceHtml(data) {
   };
 
   const rows = Array.isArray(data?.rows) ? data.rows : [];
-    // --- Scatter plot prep ---------------------------------------------------
-  const plotW = 980;
-  const plotH = 560;
-  const padL = 72;
-  const padR = 24;
-  const padT = 24;
-  const padB = 56;
-  const innerW = plotW - padL - padR;
-  const innerH = plotH - padT - padB;
 
-  const citationVals = rows.map(r => Math.max(0, Number(r.citations || 0)));
-  const growthVals   = rows.map(r => Math.max(0, Number(r.growth || 0)));
-  const sizeVals     = rows.map(r => Math.max(1, Number(r.size || 1)));
-  const gpaVals      = rows.map(r => Math.max(0, Number(r.gpa || 0)));
+  // --- Scatter plot helpers -------------------------------------------------
+  function buildScatterSvg({
+    xKey,
+    xLabel,
+    titlePrefix = ''
+  }) {
+    const plotW = 980;
+    const plotH = 560;
+    const padL = 72;
+    const padR = 24;
+    const padT = 24;
+    const padB = 56;
+    const innerW = plotW - padL - padR;
+    const innerH = plotH - padT - padB;
 
-  const minCitation = Math.min(...citationVals, 0);
-  const maxCitation = Math.max(...citationVals, 1);
-  const minGrowth   = Math.min(...growthVals, 0);
-  const maxGrowth   = Math.max(...growthVals, 1);
-  const minSize     = Math.min(...sizeVals, 1);
-  const maxSize     = Math.max(...sizeVals, 1);
-  const minGpa      = Math.min(...gpaVals, 0);
-  const maxGpa      = Math.max(...gpaVals, 4);
+    const xVals      = rows.map(r => Math.max(0, Number(r[xKey] || 0)));
+    const growthVals = rows.map(r => Math.max(0, Number(r.growth || 0)));
+    const sizeVals   = rows.map(r => Math.max(1, Number(r.size || 1)));
+    const gpaVals    = rows.map(r => Math.max(0, Number(r.gpa || 0)));
 
-  const safeNorm = (v, lo, hi) => {
-    if (!Number.isFinite(v)) return 0;
-    if (!(hi > lo)) return 0.5;
-    return (v - lo) / (hi - lo);
-  };
+    const minX = Math.min(...xVals, 0);
+    const maxX = Math.max(...xVals, 1);
+    const minGrowth = Math.min(...growthVals, 0);
+    const maxGrowth = Math.max(...growthVals, 1);
+    const minSize = Math.min(...sizeVals, 1);
+    const maxSize = Math.max(...sizeVals, 1);
+    const minGpa = Math.min(...gpaVals, 0);
+    const maxGpa = Math.max(...gpaVals, 4);
 
-  // Use log scale on citations for readability
-  const log1p = (x) => Math.log(1 + Math.max(0, x));
-  const minCitationLog = log1p(minCitation);
-  const maxCitationLog = log1p(maxCitation);
+    const safeNorm = (v, lo, hi) => {
+      if (!Number.isFinite(v)) return 0;
+      if (!(hi > lo)) return 0.5;
+      return (v - lo) / (hi - lo);
+    };
 
-  const xFor = (cit) => {
-    const t = safeNorm(log1p(cit), minCitationLog, maxCitationLog);
-    return padL + t * innerW;
-  };
+    const log1p = (x) => Math.log(1 + Math.max(0, x));
+    const minXLog = log1p(minX);
+    const maxXLog = log1p(maxX);
 
-  const yFor = (growth) => {
-    const t = safeNorm(growth, minGrowth, maxGrowth);
-    return padT + innerH - t * innerH;
-  };
+    const xFor = (xVal) => {
+      const t = safeNorm(log1p(xVal), minXLog, maxXLog);
+      return padL + t * innerW;
+    };
 
-  const rFor = (size) => {
-    const t = safeNorm(size, minSize, maxSize);
-    return 4 + t * 14;
-  };
+    const yFor = (growth) => {
+      const t = safeNorm(growth, minGrowth, maxGrowth);
+      return padT + innerH - t * innerH;
+    };
 
-  // GPA colour: low = cool blue, high = warm red
-  const colorForGpa = (gpa) => {
-    const t = safeNorm(gpa, minGpa, maxGpa);
-    const hue = 220 - (220 * t); // 220 -> 0
-    return `hsl(${hue} 75% 52%)`;
-  };
+    const rFor = (size) => {
+      const t = safeNorm(size, minSize, maxSize);
+      return 4 + t * 14;
+    };
 
-  const xTicks = 5;
-  const yTicks = 5;
+    const colorForGpa = (gpa) => {
+      const t = safeNorm(gpa, minGpa, maxGpa);
+      const hue = 220 - (220 * t); // blue -> red
+      return `hsl(${hue} 75% 52%)`;
+    };
 
-  const xTickVals = Array.from({ length: xTicks + 1 }, (_, i) => {
-    const t = i / xTicks;
-    const lv = minCitationLog + t * (maxCitationLog - minCitationLog);
-    const v = Math.round(Math.exp(lv) - 1);
-    return v;
+    const xTicks = 5;
+    const yTicks = 5;
+
+    const xTickVals = Array.from({ length: xTicks + 1 }, (_, i) => {
+      const t = i / xTicks;
+      const lv = minXLog + t * (maxXLog - minXLog);
+      const v = Math.round(Math.exp(lv) - 1);
+      return v;
+    });
+
+    const yTickVals = Array.from({ length: yTicks + 1 }, (_, i) => {
+      const t = i / yTicks;
+      return minGrowth + t * (maxGrowth - minGrowth);
+    });
+
+    const xGrid = xTickVals.map(v => {
+      const x = xFor(v);
+      return `
+        <g>
+          <line x1="${x}" y1="${padT}" x2="${x}" y2="${padT + innerH}" stroke="#e5e7eb" stroke-width="1"/>
+          <text x="${x}" y="${plotH - 18}" text-anchor="middle" font-size="11" fill="#667085">${fmtInt(v)}</text>
+        </g>
+      `;
+    }).join('');
+
+    const yGrid = yTickVals.map(v => {
+      const y = yFor(v);
+      return `
+        <g>
+          <line x1="${padL}" y1="${y}" x2="${padL + innerW}" y2="${y}" stroke="#e5e7eb" stroke-width="1"/>
+          <text x="${padL - 10}" y="${y + 4}" text-anchor="end" font-size="11" fill="#667085">${fmtNum(v, 1)}</text>
+        </g>
+      `;
+    }).join('');
+
+    const scatterDots = rows.map((r, i) => {
+      const xVal = Number(r[xKey] || 0);
+      const x = xFor(xVal);
+      const y = yFor(Number(r.growth || 0));
+      const rr = rFor(Number(r.size || 1));
+      const fill = colorForGpa(Number(r.gpa || 0));
+      const label = r.label || `Cluster ${Number(r.cid || 0) + 1}`;
+
+      return `
+        <g>
+          <circle cx="${x}" cy="${y}" r="${rr}" fill="${fill}" fill-opacity="0.72" stroke="#ffffff" stroke-width="1.2">
+            <title>${escHtml(label)} | Importance ${fmtNum(r.importance, 3)} | GPA ${fmtNum(r.gpa, 2)} | ${escHtml(titlePrefix || xLabel)} ${fmtNum(xVal, 2)} | Size ${fmtInt(r.size)} | Growth ${fmtNum(r.growth, 2)}</title>
+          </circle>
+          ${i < 20 ? `<text x="${x + rr + 4}" y="${y + 4}" font-size="10" fill="#344054">${escHtml(label)}</text>` : ''}
+        </g>
+      `;
+    }).join('');
+
+    return `
+      <svg width="${plotW}" height="${plotH}" viewBox="0 0 ${plotW} ${plotH}" role="img" aria-label="${escHtml(xLabel)} scatter plot">
+        <rect x="0" y="0" width="${plotW}" height="${plotH}" fill="#fff"/>
+        ${xGrid}
+        ${yGrid}
+        <line x1="${padL}" y1="${padT + innerH}" x2="${padL + innerW}" y2="${padT + innerH}" stroke="#101828" stroke-width="1.2"/>
+        <line x1="${padL}" y1="${padT}" x2="${padL}" y2="${padT + innerH}" stroke="#101828" stroke-width="1.2"/>
+        ${scatterDots}
+        <text x="${plotW / 2}" y="${plotH - 2}" text-anchor="middle" font-size="12" fill="#475467">${escHtml(xLabel)} (log scale)</text>
+        <text x="18" y="${plotH / 2}" text-anchor="middle" font-size="12" fill="#475467" transform="rotate(-90 18 ${plotH / 2})">Growth</text>
+      </svg>
+    `;
+  }
+
+  const scatterSvg = buildScatterSvg({
+    xKey: 'citations',
+    xLabel: 'Total citations',
+    titlePrefix: 'Total citations'
   });
 
-  const yTickVals = Array.from({ length: yTicks + 1 }, (_, i) => {
-    const t = i / yTicks;
-    return minGrowth + t * (maxGrowth - minGrowth);
+  const meanScatterSvg = buildScatterSvg({
+    xKey: 'mean_citations',
+    xLabel: 'Mean citations per included publication',
+    titlePrefix: 'Mean citations'
   });
 
-  const xGrid = xTickVals.map(v => {
-    const x = xFor(v);
-    return `
-      <g>
-        <line x1="${x}" y1="${padT}" x2="${x}" y2="${padT + innerH}" stroke="#e5e7eb" stroke-width="1"/>
-        <text x="${x}" y="${plotH - 18}" text-anchor="middle" font-size="11" fill="#667085">${fmtInt(v)}</text>
-      </g>
-    `;
-  }).join('');
-
-  const yGrid = yTickVals.map(v => {
-    const y = yFor(v);
-    return `
-      <g>
-        <line x1="${padL}" y1="${y}" x2="${padL + innerW}" y2="${y}" stroke="#e5e7eb" stroke-width="1"/>
-        <text x="${padL - 10}" y="${y + 4}" text-anchor="end" font-size="11" fill="#667085">${fmtNum(v, 1)}</text>
-      </g>
-    `;
-  }).join('');
-
-  const scatterDots = rows.map((r, i) => {
-    const x = xFor(Number(r.citations || 0));
-    const y = yFor(Number(r.growth || 0));
-    const rr = rFor(Number(r.size || 1));
-    const fill = colorForGpa(Number(r.gpa || 0));
-    const label = r.label || `Cluster ${Number(r.cid || 0) + 1}`;
-
-    return `
-      <g>
-        <circle cx="${x}" cy="${y}" r="${rr}" fill="${fill}" fill-opacity="0.72" stroke="#ffffff" stroke-width="1.2">
-          <title>${escHtml(label)} | Importance ${fmtNum(r.importance, 3)} | GPA ${fmtNum(r.gpa, 2)} | Citations ${fmtInt(r.citations)} | Size ${fmtInt(r.size)} | Growth ${fmtNum(r.growth, 2)}</title>
-        </circle>
-        ${i < 20 ? `<text x="${x + rr + 4}" y="${y + 4}" font-size="10" fill="#344054">${escHtml(label)}</text>` : ''}
-      </g>
-    `;
-  }).join('');
-
-  const scatterSvg = `
-    <svg width="${plotW}" height="${plotH}" viewBox="0 0 ${plotW} ${plotH}" role="img" aria-label="Cluster importance scatter plot">
-      <rect x="0" y="0" width="${plotW}" height="${plotH}" fill="#fff"/>
-      ${xGrid}
-      ${yGrid}
-      <line x1="${padL}" y1="${padT + innerH}" x2="${padL + innerW}" y2="${padT + innerH}" stroke="#101828" stroke-width="1.2"/>
-      <line x1="${padL}" y1="${padT}" x2="${padL}" y2="${padT + innerH}" stroke="#101828" stroke-width="1.2"/>
-      ${scatterDots}
-      <text x="${plotW / 2}" y="${plotH - 2}" text-anchor="middle" font-size="12" fill="#475467">Citations (log scale)</text>
-      <text x="18" y="${plotH / 2}" text-anchor="middle" font-size="12" fill="#475467" transform="rotate(-90 18 ${plotH / 2})">Growth</text>
-    </svg>
-  `;
+  const medianScatterSvg = buildScatterSvg({
+    xKey: 'median_citations',
+    xLabel: 'Median citations per included publication',
+    titlePrefix: 'Median citations'
+  });
 
   const rowsHtml = rows.map((r, i) => `
     <tr>
@@ -20056,6 +20080,8 @@ function buildClusterImportanceHtml(data) {
       <td>${fmtNum(r.importance, 3)}</td>
       <td>${fmtNum(r.gpa, 2)}</td>
       <td>${fmtInt(r.citations)}</td>
+      <td>${fmtNum(r.mean_citations, 2)}</td>
+      <td>${fmtNum(r.median_citations, 2)}</td>
       <td>${fmtInt(r.filtered_cluster_size ?? r.size)}</td>
       <td>${fmtInt(r.total_cluster_size ?? r.size)}</td>
       <td>${fmtNum(r.growth, 2)}</td>
@@ -20192,13 +20218,33 @@ function buildClusterImportanceHtml(data) {
       </div>
     </div>
 
-        <div class="panel" style="margin-bottom:18px;">
-      <h2 style="margin:0 0 12px;font-size:22px;">Importance landscape</h2>
+    <div class="panel" style="margin-bottom:18px;">
+      <h2 style="margin:0 0 12px;font-size:22px;">Importance landscape: total citations</h2>
       <div style="color:var(--muted);font-size:13px;margin-bottom:12px;">
-        X = citations, Y = growth, dot size = cluster size, dot colour = GPA.
+        X = total citations, Y = growth, dot size = filtered cluster size, dot colour = GPA. Uses only publications with Northumbria first or last authors.
       </div>
       <div style="overflow:auto;">
         ${scatterSvg}
+      </div>
+    </div>
+
+    <div class="panel" style="margin-bottom:18px;">
+      <h2 style="margin:0 0 12px;font-size:22px;">Importance landscape: mean citations</h2>
+      <div style="color:var(--muted);font-size:13px;margin-bottom:12px;">
+        X = mean citations per included publication, Y = growth, dot size = filtered cluster size, dot colour = GPA. This normalises for cluster size and reduces the effect of very large publication sets.
+      </div>
+      <div style="overflow:auto;">
+        ${meanScatterSvg}
+      </div>
+    </div>
+
+    <div class="panel" style="margin-bottom:18px;">
+      <h2 style="margin:0 0 12px;font-size:22px;">Importance landscape: median citations</h2>
+      <div style="color:var(--muted);font-size:13px;margin-bottom:12px;">
+        X = median citations per included publication, Y = growth, dot size = filtered cluster size, dot colour = GPA. This is the most robust view when a single highly cited paper would otherwise distort a cluster.
+      </div>
+      <div style="overflow:auto;">
+        ${medianScatterSvg}
       </div>
     </div>
 
@@ -21767,12 +21813,33 @@ function computeClusterImportanceScores() {
     const ref = collectClusterRefSummary(filteredNodeIds);
 
     // Total citations from the filtered subset only
+    // Citation stats from the filtered subset only
     let totalCitations = 0;
+    const citationValues = [];
+
     filteredNodeIds.forEach(i => {
       const item = itemsData?.[i] || {};
       const c = Number(item?.cited_by_count || item?.openalex?.cited_by_count || 0);
-      totalCitations += c;
+      const cleanC = Number.isFinite(c) ? Math.max(0, c) : 0;
+      totalCitations += cleanC;
+      citationValues.push(cleanC);
     });
+
+    citationValues.sort((a, b) => a - b);
+
+    const meanCitations = citationValues.length
+      ? (totalCitations / citationValues.length)
+      : 0;
+
+    const medianCitations = !citationValues.length
+      ? 0
+      : (citationValues.length % 2 === 1
+          ? citationValues[(citationValues.length - 1) / 2]
+          : (
+              citationValues[(citationValues.length / 2) - 1] +
+              citationValues[citationValues.length / 2]
+            ) / 2
+        );
 
     // Growth from the filtered subset only
     const growth = computeClusterGrowthSeries(filteredNodeIds);
@@ -21788,6 +21855,8 @@ function computeClusterImportanceScores() {
       // core filtered metrics
       gpa: Number(ref.gpa || 0),
       citations: totalCitations,
+      mean_citations: meanCitations,
+      median_citations: medianCitations,
       size: filteredNodeIds.length,
       growth: slope,
 
