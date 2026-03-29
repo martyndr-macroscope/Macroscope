@@ -20056,8 +20056,10 @@ function buildClusterImportanceHtml(data) {
       <td>${fmtNum(r.importance, 3)}</td>
       <td>${fmtNum(r.gpa, 2)}</td>
       <td>${fmtInt(r.citations)}</td>
-      <td>${fmtInt(r.size)}</td>
+      <td>${fmtInt(r.filtered_cluster_size ?? r.size)}</td>
+      <td>${fmtInt(r.total_cluster_size ?? r.size)}</td>
       <td>${fmtNum(r.growth, 2)}</td>
+      <td>${fmtInt(r.ref_n || 0)}</td>
       <td>${fmtNum(r.gpa_n, 3)}</td>
       <td>${fmtNum(r.citations_n, 3)}</td>
       <td>${fmtNum(r.size_n, 3)}</td>
@@ -20168,7 +20170,7 @@ function buildClusterImportanceHtml(data) {
   <div class="page">
     <h1>${escHtml(data?.title || 'Cluster Importance')}</h1>
     <div class="intro">
-      ${escHtml(data?.userText || 'This report ranks clusters using the composite importance score generated from REF performance, citations, growth, and cluster size.')}
+      ${escHtml(data?.userText || 'This report ranks clusters using a composite importance score generated from cluster GPA, citations, growth, and cluster size, using only publications where a Northumbria University affiliated author is first or last author.')}
     </div>
 
     <div class="cards">
@@ -20210,9 +20212,11 @@ function buildClusterImportanceHtml(data) {
             <th>Importance</th>
             <th>GPA</th>
             <th>Citations</th>
-            <th>Size</th>
+            <th>Filtered size</th>
+            <th>Total size</th>
             <th>Growth</th>
             <th>REF n</th>
+            <th>GPA n</th>
             <th>Citations n</th>
             <th>Size n</th>
             <th>Growth n</th>
@@ -21677,6 +21681,34 @@ function compactOA(work) {
     refsCount
   };
 }
+
+function authorshipMatchesNorthumbriaFirstOrLast(auth) {
+  if (!auth || typeof auth !== 'object') return false;
+
+  const pos = String(auth.author_position || '').trim().toLowerCase();
+  if (!(pos === 'first' || pos === 'last')) return false;
+
+  const insts = Array.isArray(auth.institutions) ? auth.institutions : [];
+  const instHit = insts.some(inst => {
+    const nm = String(inst?.display_name || inst?.name || '').trim().toLowerCase();
+    return nm === 'northumbria university';
+  });
+  if (instHit) return true;
+
+  const rawAff = String(auth.raw_affiliation_string || '').trim().toLowerCase();
+  if (rawAff.includes('northumbria university')) return true;
+
+  return false;
+}
+
+function publicationMatchesNorthumbriaFirstOrLast(item) {
+  const w = item?.openalex || item?.openAlex || item || null;
+  const auths = Array.isArray(w?.authorships) ? w.authorships : [];
+  if (!auths.length) return false;
+
+  return auths.some(auth => authorshipMatchesNorthumbriaFirstOrLast(auth));
+}
+
 function computeClusterGrowthSeries(nodeIds) {
   const ids = Array.isArray(nodeIds) ? nodeIds : Array.from(nodeIds || []);
   if (!ids.length) return [];
@@ -21714,47 +21746,68 @@ function computeClusterGrowthSeries(nodeIds) {
 function computeClusterImportanceScores() {
   const rows = [];
 
-  // loop clusters (same pattern as your other reports)
+  // loop clusters
   for (let cid = 0; cid < clusterLabels.length; cid++) {
-    const nodeIds = [];
+    const allNodeIds = [];
     for (let i = 0; i < clusterOf.length; i++) {
-      if (clusterOf[i] === cid) nodeIds.push(i);
+      if (clusterOf[i] === cid) allNodeIds.push(i);
     }
-    if (!nodeIds.length) continue;
+    if (!allNodeIds.length) continue;
 
-    const ref = collectClusterRefSummary(nodeIds);
+    // FILTER: only keep publications where a Northumbria-affiliated
+    // author is first or last author
+    const filteredNodeIds = allNodeIds.filter(i => {
+      const item = itemsData?.[i] || {};
+      return publicationMatchesNorthumbriaFirstOrLast(item);
+    });
 
+    if (!filteredNodeIds.length) continue;
+
+    // GPA from the filtered subset only
+    const ref = collectClusterRefSummary(filteredNodeIds);
+
+    // Total citations from the filtered subset only
     let totalCitations = 0;
-    nodeIds.forEach(i => {
+    filteredNodeIds.forEach(i => {
       const item = itemsData?.[i] || {};
       const c = Number(item?.cited_by_count || item?.openalex?.cited_by_count || 0);
       totalCitations += c;
     });
 
-    const growth = computeClusterGrowthSeries(nodeIds); // reuse your growth logic
-
+    // Growth from the filtered subset only
+    const growth = computeClusterGrowthSeries(filteredNodeIds);
     const slope =
       growth.length > 5
         ? growth[growth.length - 1] - growth[growth.length - 5]
-        : growth[growth.length - 1];
+        : (growth.length ? growth[growth.length - 1] : 0);
 
     rows.push({
       cid,
       label: clusterLabels[cid] || `Cluster ${cid + 1}`,
-      gpa: ref.gpa || 0,
+
+      // core filtered metrics
+      gpa: Number(ref.gpa || 0),
       citations: totalCitations,
-      size: nodeIds.length,
-      growth: slope
+      size: filteredNodeIds.length,
+      growth: slope,
+
+      // useful diagnostics for the report
+      ref_n: Number(ref.n || 0),
+      total_cluster_size: allNodeIds.length,
+      filtered_cluster_size: filteredNodeIds.length,
+      inclusion_rate: allNodeIds.length ? (filteredNodeIds.length / allNodeIds.length) : 0
     });
   }
 
+  if (!rows.length) return rows;
+
   // NORMALISE
   const norm = (arr, key) => {
-    const vals = arr.map(x => x[key]);
+    const vals = arr.map(x => Number(x[key] || 0));
     const min = Math.min(...vals);
     const max = Math.max(...vals);
     arr.forEach(x => {
-      x[key + '_n'] = max > min ? (x[key] - min) / (max - min) : 0;
+      x[key + '_n'] = max > min ? ((Number(x[key] || 0) - min) / (max - min)) : 0;
     });
   };
 
@@ -21763,6 +21816,7 @@ function computeClusterImportanceScores() {
   norm(rows, 'growth');
   norm(rows, 'size');
 
+  // composite score
   rows.forEach(r => {
     r.importance =
       0.35 * r.gpa_n +
@@ -21772,7 +21826,6 @@ function computeClusterImportanceScores() {
   });
 
   rows.sort((a, b) => b.importance - a.importance);
-
   return rows;
 }
 
