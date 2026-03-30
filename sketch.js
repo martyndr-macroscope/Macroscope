@@ -20327,8 +20327,8 @@ function buildPeaksOfExcellenceHtml(data) {
   const impactVals = rows.map(r => Number(r.avgCitations || 0));
   const sizeVals = rows.map(r => Number(r.northScale || 0));
 
-  const minGpa = Math.min(...gpaVals, 0);
-  const maxGpa = Math.max(...gpaVals, 1);
+const minGpa = 2; // fixed lower bound to spread the plot
+const maxGpa = Math.max(...gpaVals, 2.5); // keep dynamic upper bound
   const minImpact = Math.min(...impactVals, 0);
   const maxImpact = Math.max(...impactVals, 1);
   const minSize = Math.min(...sizeVals, 1);
@@ -20397,21 +20397,35 @@ function buildPeaksOfExcellenceHtml(data) {
     <line x1="${padL}" y1="${yFor(meanY)}" x2="${padL + innerW}" y2="${yFor(meanY)}" stroke="#94a3b8" stroke-width="1.2" stroke-dasharray="5 5"/>
   ` : '';
 
-  const bubbles = rows.map((r, i) => {
-    const x = xFor(Number(r.gpa || 0));
-    const y = yFor(Number(r.avgCitations || 0));
-    const rr = rFor(Number(r.northScale || 1));
-    const fill = colorForBubble(Number(r.gpa || 0));
+const bubbles = rows.map((r, i) => {
+  const x = xFor(Number(r.gpa || 0));
+  const y = yFor(Number(r.avgCitations || 0));
+  const rr = rFor(Number(r.northScale || 1));
+  const fill = colorForBubble(Number(r.gpa || 0));
 
-    return `
-      <g>
-        <circle cx="${x}" cy="${y}" r="${rr}" fill="${fill}" fill-opacity="0.72" stroke="#ffffff" stroke-width="1.4">
-          <title>${escHtml(r.clusterLabel)} | GPA ${fmtNum(r.gpa, 2)} | Avg citations ${fmtNum(r.avgCitations, 2)} | Northumbria first/last publications ${fmtInt(r.northScale)} | REF assessed ${fmtInt(r.assessedPublications)}</title>
-        </circle>
-        ${i < 18 ? `<text x="${x + rr + 4}" y="${y + 4}" font-size="10" fill="#334155">${escHtml(r.clusterLabel)}</text>` : ''}
-      </g>
-    `;
-  }).join('');
+  const rank = i + 1;
+
+  return `
+    <g>
+      <circle cx="${x}" cy="${y}" r="${rr}" fill="${fill}" fill-opacity="0.78" stroke="#ffffff" stroke-width="1.4">
+        <title>${escHtml(r.clusterLabel)} | Rank ${rank} | GPA ${fmtNum(r.gpa, 2)} | Avg citations ${fmtNum(r.avgCitations, 2)} | Northumbria publications ${fmtInt(r.northScale)} | REF assessed ${fmtInt(r.assessedPublications)}</title>
+      </circle>
+
+      <!-- Rank label in centre -->
+      <text
+        x="${x}"
+        y="${y}"
+        text-anchor="middle"
+        dominant-baseline="central"
+        font-size="${Math.max(10, rr * 0.9)}"
+        font-weight="700"
+        fill="#ffffff"
+      >
+        ${rank}
+      </text>
+    </g>
+  `;
+}).join('');
 
   const rowsHtml = rows.map((r, i) => `
     <tr>
