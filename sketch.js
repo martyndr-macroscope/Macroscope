@@ -36,6 +36,7 @@ function setClusterMin(v) {
   // keep the UI in sync:
   if (typeof clusterSizeThreshold !== 'undefined') clusterSizeThreshold = val;
   initClusterFilterUI?.();   // refresh slider/input/label bounds+value
+  initClusterRefGpaFilterUI();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2099,8 +2100,16 @@ let extCitesThreshold = 0;  // nodes must have cbc >= this
 // NEW: Cluster-size filter (UI + state)
 let clusterSizeSlider, clusterSizeLabel;
 let clusterSizeThreshold = 0;   // show only clusters with size >= this
+
+// NEW: Cluster REF GPA filter (cluster-level, based on REF-scored outputs only)
+let clusterRefGpaSlider, clusterRefGpaLabel;
+let clusterRefGpaThreshold = 0;     // show only clusters with GPA >= this
+let clusterRefGpaMin = 0;
+let clusterRefGpaMax = 4;
+let clusterRefGpaByCluster = [];    // per cluster id: GPA or null if unavailable
+
 // Inline numeric inputs (refs set in buildFiltersInto)
-let extCitesInput, degInput, clusterSizeInput, yearLoInput, yearHiInput;
+let extCitesInput, degInput, clusterSizeInput, clusterRefGpaInput, yearLoInput, yearHiInput;
 
 
 
@@ -4900,6 +4909,7 @@ clusterColors = normalizeClusterColors(clusterColors);
 
   // Any UI that depends on sizes/labels
   initClusterFilterUI?.();
+  initClusterRefGpaFilterUI();
   return clusterCount;
 }
 
@@ -6276,9 +6286,28 @@ function recomputeVisibility() {
     const passExt  = (nodes[i]?.cbc || 0) >= (extCitesThreshold || 0);
 
     // NEW: cluster-size filter (0 = off)
-  const cid = (Array.isArray(clusterOf) ? clusterOf[i] : -1);
-  const csz = (cid != null && cid >= 0 && Array.isArray(clusterSizesTotal)) ? (clusterSizesTotal[cid] || 0) : 0;
+    const cid = (Array.isArray(clusterOf) ? clusterOf[i] : -1);
+    const csz = (cid != null && cid >= 0 && Array.isArray(clusterSizesTotal)) ? (clusterSizesTotal[cid] || 0) : 0;
     const passCluster = (clusterSizeThreshold <= 0) ? true : (csz >= clusterSizeThreshold);
+
+    const cgpa = (cid != null && cid >= 0 && Array.isArray(clusterRefGpaByCluster))
+      ? clusterRefGpaByCluster[cid]
+      : null;
+
+    // If the REF GPA filter is active, only keep clusters that both:
+    // 1) have REF GPA data
+    // 2) meet the threshold
+    const refGpaFilterActive =
+      Number.isFinite(clusterRefGpaThreshold) &&
+      Number.isFinite(clusterRefGpaMin) &&
+      Number.isFinite(clusterRefGpaMax) &&
+      (clusterRefGpaThreshold > clusterRefGpaMin + 1e-9);
+
+    const passClusterRefGpa = !refGpaFilterActive
+      ? true
+      : (cgpa != null && Number.isFinite(cgpa) && cgpa >= clusterRefGpaThreshold);
+
+    // In Concept mode, only show nodes that belong to a qualifying concept cluster
 
     // In Concept mode, only show nodes that belong to a qualifying concept cluster
     const passConceptMode = (viewMode === 'concept')
@@ -6297,6 +6326,7 @@ function recomputeVisibility() {
       passExt &&
       passViab &&
       passCluster &&
+      passClusterRefGpa &&
       passConceptMode &&
       passFocus;
   }
@@ -11225,6 +11255,7 @@ function serializeState(opts = {}) {
     yearHi,
     extCitesThreshold,
     clusterSizeThreshold,
+    clusterRefGpaThreshold,
     persistentFieldThreshold
   };
 
@@ -11645,6 +11676,7 @@ async function restoreProjectState(save) {
     if (Number.isFinite(+save.filters.yearHi)) yearHi = +save.filters.yearHi;
     if (Number.isFinite(+save.filters.extCitesThreshold)) extCitesThreshold = +save.filters.extCitesThreshold;
     if (Number.isFinite(+save.filters.clusterSizeThreshold)) clusterSizeThreshold = +save.filters.clusterSizeThreshold;
+    if (Number.isFinite(+save.filters.clusterRefGpaThreshold)) clusterRefGpaThreshold = +save.filters.clusterRefGpaThreshold;
     if (Number.isFinite(+save.filters.persistentFieldThreshold)) {
       persistentFieldThreshold = +save.filters.persistentFieldThreshold;
     }
@@ -11815,12 +11847,16 @@ async function restoreProjectState(save) {
   if (degSlider?.elt && Number.isFinite(+degThreshold)) degSlider.elt.value = degThreshold;
   if (extCitesSlider?.elt && Number.isFinite(+extCitesThreshold)) extCitesSlider.elt.value = extCitesThreshold;
   if (clusterSizeSlider?.elt && Number.isFinite(+clusterSizeThreshold)) clusterSizeSlider.elt.value = clusterSizeThreshold;
+    if (clusterRefGpaSlider?.elt && Number.isFinite(+clusterRefGpaThreshold)) {
+    clusterRefGpaSlider.elt.value = Math.round(clusterRefGpaThreshold * 100);
+  }
   if (yearSliderMin?.elt && Number.isFinite(+yearLo)) yearSliderMin.elt.value = yearLo;
   if (yearSliderMax?.elt && Number.isFinite(+yearHi)) yearSliderMax.elt.value = yearHi;
 
   if (degInput) degInput.value(String(degThreshold ?? 0));
   if (extCitesInput) extCitesInput.value(String(extCitesThreshold ?? 0));
   if (clusterSizeInput) clusterSizeInput.value(String(clusterSizeThreshold ?? 0));
+    if (clusterRefGpaInput) clusterRefGpaInput.value(String(Number(clusterRefGpaThreshold ?? 0).toFixed(2)));
   if (yearLoInput) yearLoInput.value(String(yearLo ?? 0));
   if (yearHiInput) yearHiInput.value(String(yearHi ?? 0));
   if (persistentFieldInput && Number.isFinite(+persistentFieldThreshold)) {
@@ -17656,6 +17692,77 @@ function initClusterFilterUI() {
     clusterSizeInput.elt.value = String(clusterSizeThreshold|0);
   }
 }
+function rebuildClusterRefGpaInventory() {
+  const out = [];
+  const vals = [];
+
+  const nClusters = Array.isArray(clusterSizesTotal)
+    ? clusterSizesTotal.length
+    : (Array.isArray(clusterOf) && clusterOf.length ? (Math.max(...clusterOf) + 1) : 0);
+
+  for (let cid = 0; cid < nClusters; cid++) {
+    const nodeIds = [];
+    for (let i = 0; i < (clusterOf?.length || 0); i++) {
+      if ((clusterOf[i] | 0) === cid) nodeIds.push(i);
+    }
+
+    const ref = collectClusterRefSummary(nodeIds);
+    const gpa = (ref && ref.n > 0 && Number.isFinite(ref.gpa)) ? Number(ref.gpa) : null;
+
+    out[cid] = gpa;
+    if (gpa != null) vals.push(gpa);
+  }
+
+  clusterRefGpaByCluster = out;
+  clusterRefGpaMin = vals.length ? Math.min(...vals) : 0;
+  clusterRefGpaMax = vals.length ? Math.max(...vals) : 4;
+
+  if (!Number.isFinite(clusterRefGpaMin)) clusterRefGpaMin = 0;
+  if (!Number.isFinite(clusterRefGpaMax)) clusterRefGpaMax = 4;
+  if (clusterRefGpaMax < clusterRefGpaMin) clusterRefGpaMax = clusterRefGpaMin;
+
+  return {
+    byCluster: out,
+    min: clusterRefGpaMin,
+    max: clusterRefGpaMax,
+    count: vals.length
+  };
+}
+
+function initClusterRefGpaFilterUI() {
+  if (!clusterRefGpaSlider) return;
+
+  const inv = rebuildClusterRefGpaInventory();
+  const min = Number(inv.min || 0);
+  const max = Number(inv.max || 0);
+
+  const sliderMin = Math.round(min * 100);
+  const sliderMax = Math.round(max * 100);
+
+  clusterRefGpaSlider.elt.min = String(sliderMin);
+  clusterRefGpaSlider.elt.max = String(sliderMax);
+
+  if (!Number.isFinite(clusterRefGpaThreshold)) clusterRefGpaThreshold = min;
+  if (clusterRefGpaThreshold < min) clusterRefGpaThreshold = min;
+  if (clusterRefGpaThreshold > max) clusterRefGpaThreshold = max;
+
+  clusterRefGpaSlider.elt.value = String(Math.round(clusterRefGpaThreshold * 100));
+
+  if (clusterRefGpaInput) {
+    clusterRefGpaInput.attribute('min', String(min));
+    clusterRefGpaInput.attribute('max', String(max));
+    clusterRefGpaInput.attribute('step', '0.01');
+    clusterRefGpaInput.elt.value = String(Number(clusterRefGpaThreshold).toFixed(2));
+  }
+
+  if (clusterRefGpaLabel) {
+    clusterRefGpaLabel.html(
+      inv.count
+        ? `Cluster REF GPA ≥ ${Number(clusterRefGpaThreshold).toFixed(2)} (range ${min.toFixed(2)}–${max.toFixed(2)})`
+        : `Cluster REF GPA ≥ ${Number(clusterRefGpaThreshold).toFixed(2)} (no REF-scored clusters)`
+    );
+  }
+}
 
 
 function mixRGB(a, b, t){
@@ -17807,6 +17914,55 @@ function buildFiltersInto(containerBody) {
     clusterSizeThreshold = clamp(Number(clusterSizeSlider.value())|0, 0, max);
     clusterSizeLabel.html(`Show clusters ≥ ${clusterSizeThreshold} nodes`);
     if (clusterSizeInput) clusterSizeInput.elt.value = String(clusterSizeThreshold);
+    recomputeVisibility(); redraw();
+  });
+
+    // --- Cluster REF GPA ---
+  clusterRefGpaLabel = createDiv(`Cluster REF GPA ≥ ${Number(clusterRefGpaThreshold).toFixed(2)}`);
+  clusterRefGpaLabel.parent(containerBody);
+  clusterRefGpaLabel.style('color','#eaeaea');
+  clusterRefGpaLabel.style('font-size','12px');
+  clusterRefGpaLabel.style('margin','10px 0 6px');
+
+  // temp bounds; tightened by initClusterRefGpaFilterUI()
+  clusterRefGpaSlider = createSlider(0, 400, Math.round(clusterRefGpaThreshold * 100), 1);
+  clusterRefGpaSlider.parent(containerBody);
+  clusterRefGpaSlider.style('width','100%');
+  clusterRefGpaSlider.style('margin','0 0 6px');
+  captureUI?.(clusterRefGpaSlider.elt);
+
+  clusterRefGpaInput = createInput(String(Number(clusterRefGpaThreshold).toFixed(2)), 'number');
+  clusterRefGpaInput.parent(containerBody);
+  clusterRefGpaInput.attribute('min', '0');
+  clusterRefGpaInput.attribute('max', '4');
+  clusterRefGpaInput.attribute('step', '0.01');
+  clusterRefGpaInput.style('width','72px');
+  clusterRefGpaInput.style('margin','0 0 10px');
+  clusterRefGpaInput.style('padding','4px 6px');
+  clusterRefGpaInput.style('font-size','12px');
+  clusterRefGpaInput.style('color','#fff');
+  clusterRefGpaInput.style('background','#000');
+  clusterRefGpaInput.style('border','1px solid #333');
+  clusterRefGpaInput.style('border-radius','6px');
+  captureUI?.(clusterRefGpaInput.elt);
+
+  clusterRefGpaInput.changed(() => {
+    const min = Number(clusterRefGpaMin || 0);
+    const max = Number(clusterRefGpaMax || 0);
+    const raw = Number(clusterRefGpaInput.value());
+    clusterRefGpaThreshold = Math.max(min, Math.min(max, Number.isFinite(raw) ? raw : min));
+    clusterRefGpaSlider.elt.value = String(Math.round(clusterRefGpaThreshold * 100));
+    initClusterRefGpaFilterUI();
+    recomputeVisibility(); redraw();
+  });
+
+  clusterRefGpaSlider.input(() => {
+    const min = Number(clusterRefGpaMin || 0);
+    const max = Number(clusterRefGpaMax || 0);
+    const raw = Number(clusterRefGpaSlider.value()) / 100;
+    clusterRefGpaThreshold = Math.max(min, Math.min(max, Number.isFinite(raw) ? raw : min));
+    if (clusterRefGpaInput) clusterRefGpaInput.elt.value = String(Number(clusterRefGpaThreshold).toFixed(2));
+    initClusterRefGpaFilterUI();
     recomputeVisibility(); redraw();
   });
 
@@ -18351,7 +18507,7 @@ for (let i = 0; i < nodes.length; i++) {
 
 // Tighten the slider now that sizes are known
 initClusterFilterUI?.();
-
+initClusterRefGpaFilterUI();
 // If you want to (re)derive label text from abstracts, you *can* call:
 // computeClusterLabels?.();
 
