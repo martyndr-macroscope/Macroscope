@@ -5011,7 +5011,74 @@ function getAuthors(w){
 
 
 }
+function getAIDimensionContent(d) {
+  if (!d) return '';
 
+  // 1) direct content on the dimension
+  let txt = String(d.aiContent || '').trim();
+  if (txt) return txt;
+
+  // 2) try matching footprint already in memory
+  const fp = (window.aiFootprints || []).find(f =>
+    (d.aiSig && f.sig === d.aiSig) ||
+    (d.key && f.dimKey === d.key) ||
+    (d.aiTitle && String(f.title || f.aiTitle || '').trim() === String(d.aiTitle).trim())
+  );
+
+  txt = String(fp?.content || fp?.aiContent || '').trim();
+  if (txt) {
+    d.aiContent = txt; // cache back onto the dimension
+    if (!d.summaryRef && fp?.summaryRef) d.summaryRef = fp.summaryRef;
+    return txt;
+  }
+
+  return '';
+}
+
+function makeAIPreview(text, maxChars = 520) {
+  const s = String(text || '').trim().replace(/\r\n/g, '\n');
+  if (!s) return '';
+  if (s.length <= maxChars) return s;
+  return s.slice(0, maxChars).replace(/\s+\S*$/, '').trim() + '…';
+}
+
+async function openAIDimensionReport(d) {
+  if (!d) return;
+
+  let txt = getAIDimensionContent(d);
+
+  // optional lazy load for viewer/export packages
+  if (!txt && d.summaryRef && REMOTE_AI_BASE) {
+    try {
+      const url = String(REMOTE_AI_BASE).replace(/\/+$/, '') + '/' + String(d.summaryRef).replace(/^\/+/, '');
+      const r = await fetchWithTimeout(url, { headers: { accept: 'application/json,text/plain,*/*' } }, 15000);
+      if (r.ok) {
+        const obj = await r.json();
+        txt = String(
+          obj?.content ??
+          obj?.aiContent ??
+          obj?.bodyMd ??
+          obj?.text ??
+          obj?.markdown ??
+          ''
+        ).trim();
+
+        if (txt) d.aiContent = txt;
+      }
+    } catch (e) {
+      console.warn('Failed to lazy-load AI lens report:', e);
+    }
+  }
+
+  if (!txt) {
+    openSynthPanel?.('No AI lens report is available for this lens.');
+    return;
+  }
+
+  const title = String(d.aiTitle || d.label || 'AI Lens Report').trim();
+  openSynthPanel?.(title);
+  setSynthBodyText?.(txt, `${title.replace(/[^\w.-]+/g, '_')}.md`);
+}
 
 //================== InfoPanel (drop-in) ===================
 class InfoPanel {
@@ -5128,6 +5195,8 @@ _renderDimensionPanel(k) {
   const delLabel = (String(d.type).toLowerCase() === 'ai') ? 'Delete Lens' : 'Delete Dimension';
 
   let extraSummary = '';
+  let aiLensHtml = '';
+
   if (d.type === 'fields' && d.summaryHtml) {
     extraSummary = `<div style="margin:10px 0 12px 0">${d.summaryHtml}</div>`;
   } else if (String(d.type || '').toLowerCase() === 'clusters') {
@@ -5136,6 +5205,34 @@ _renderDimensionPanel(k) {
 
   // --- NEW: aggregated author summary card ----------------------------------
   let authorMetaHtml = '';
+
+
+    if (String(d.type || '').toLowerCase() === 'ai') {
+    const aiText = getAIDimensionContent(d);
+    const preview = makeAIPreview(aiText, 520);
+
+    const reportId = `dimReport_${k}_${Date.now()}`;
+
+    aiLensHtml = `
+      <div style="margin:10px 0 12px 0;padding:10px;border:1px solid rgba(255,255,255,0.14);border-radius:8px;background:rgba(255,255,255,0.04)">
+        <div style="font-weight:600;font-size:13px;margin-bottom:8px;">Lens Summary</div>
+
+        <div style="margin-bottom:10px">
+          <button id="${reportId}" style="background:rgba(255,255,255,0.08);
+            border:1px solid rgba(255,255,255,0.2);color:#fff;padding:6px 10px;
+            border-radius:6px;cursor:pointer;font-size:12px">
+            Open Lens Report
+          </button>
+        </div>
+
+        <div style="font-size:12px;line-height:1.4;opacity:.92;white-space:pre-wrap;">
+          ${preview ? safe(preview) : '<span style="opacity:.75">No summary preview available for this lens.</span>'}
+        </div>
+      </div>
+    `;
+
+    d.__reportBtnId = reportId;
+  }
 
   if (String(d.type || '').toLowerCase() === 'authors') {
     const dimLabelNorm = String(d.label || d.key || '')
@@ -5152,7 +5249,9 @@ _renderDimensionPanel(k) {
     const instCounts = new Map();      // inst name -> count
     const rawAffCounts = new Map();    // raw affiliation string -> count
     const sourcePapers = [];           // titles where author matched
+    const matchedNodeIds = [];         // <-- needed for REF card
     let matchedPaperCount = 0;
+    let refHtml = '';                  // <-- avoid leaking a global
 
     function bump(map, key, inc = 1) {
       const k = String(key || '').trim();
@@ -5183,6 +5282,7 @@ _renderDimensionPanel(k) {
       if (!hit) continue;
 
       matchedPaperCount++;
+      matchedNodeIds.push(ni);
 
       const pos = String(hit.author_position || '').trim().toLowerCase();
       if (pos === 'first' || pos === 'middle' || pos === 'last') {
@@ -5294,7 +5394,7 @@ refHtml = buildRefProfileCardFromNodeIds(matchedNodeIds, {
           <div style="font-size:12px;line-height:1.35;margin-bottom:10px;">
             ${affiliationHtml}
           </div>
-          ${refHtml}
+          ${refHtml ? refHtml : ''}
 
           ${samplePapersHtml ? `
             <div style="font-weight:600;font-size:12px;margin:8px 0 6px;">Example papers</div>
@@ -5327,6 +5427,7 @@ refHtml = buildRefProfileCardFromNodeIds(matchedNodeIds, {
     </div>
 
     ${extraSummary}
+    ${aiLensHtml}
     ${authorMetaHtml}
 
     <div style="font-weight:600;font-size:13px;margin:6px 0 4px;">Power</div>
@@ -5365,6 +5466,16 @@ refHtml = buildRefProfileCardFromNodeIds(matchedNodeIds, {
       deleteDimension?.(k);
     });
   }
+if (String(d.type || '').toLowerCase() === 'ai' && d.__reportBtnId) {
+  const reportEl = document.getElementById(d.__reportBtnId);
+  if (reportEl) {
+    captureUI?.(reportEl);
+    reportEl.addEventListener('click', async () => {
+      await openAIDimensionReport(d);
+    });
+  }
+  delete d.__reportBtnId;
+}
 }
 
 setDimensionIndex(k) {
