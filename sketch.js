@@ -13922,7 +13922,7 @@ function ensureViewMenuBuilt(parent) {
   };
 
   addItem('Citation graph (force layout)', () => switchToCitationGraphMode());
-  addItem('Show thematic manifold',        () => switchToThematicManifoldMode());
+  addItem('Thematic manifold…', () => switchToThematicManifoldMode());
 
   document.addEventListener('click', (ev) => {
     if (viewMenu?.elt?.style?.display === 'none') return;
@@ -14657,26 +14657,228 @@ function __applyView(mode) {
   redraw?.();
 }
 
-function __thematicSettingsPrompt() {
-  const thr = Math.max(1, Number(prompt('Topic overlap threshold (shared topics to link)?', '1') || 1) | 0);
-  const topK = Math.max(4, Number(prompt('Max thematic links per paper (top-K)?', '24') || 24) | 0);
-  const maxDfFrac = Math.max(0.02, Math.min(0.5, Number(prompt('Ignore ultra-common topics (max DF fraction)?', '0.20') || 0.20)));
+function __thematicInputStyle() {
+  return [
+    'width:100%',
+    'box-sizing:border-box',
+    'background:#1a1a1a',
+    'color:#f3f4f6',
+    'border:1px solid rgba(255,255,255,0.12)',
+    'border-radius:8px',
+    'padding:8px 10px',
+    'font:12px/1.2 system-ui, -apple-system, Segoe UI, Roboto, sans-serif',
+    'outline:none'
+  ].join(';');
+}
 
-  const incAuth = String(prompt('Include author boost? (y/n)', 'y') || 'y').trim().toLowerCase().startsWith('y');
-  const allowAuthOnly = incAuth
-    ? String(prompt('Allow author-only links (ignore topic threshold)? (y/n)', 'n') || 'n').trim().toLowerCase().startsWith('y')
-    : false;
+function __thematicHelpStyle() {
+  return [
+    'margin-top:5px',
+    'font-size:12px',
+    'line-height:1.4',
+    'color:#aeb7c2'
+  ].join(';');
+}
 
-  const authThr = incAuth ? Math.max(1, Number(prompt('Author overlap threshold (shared authors)?', '1') || 1) | 0) : 1;
+function __thematicButtonStyle(primary = false) {
+  return [
+    'border:none',
+    'border-radius:8px',
+    'padding:9px 12px',
+    'font:12px/1 system-ui, -apple-system, Segoe UI, Roboto, sans-serif',
+    'cursor:pointer',
+    primary
+      ? 'background:#e9edf2;color:#111;font-weight:600'
+      : 'background:#2a2f36;color:#f0f3f6'
+  ].join(';');
+}
 
-  return {
-    topicThreshold: thr,
-    topKPerNode: topK,
-    maxTopicDfFrac: maxDfFrac,
-    includeAuthors: incAuth,
-    allowAuthorOnlyLinks: allowAuthOnly,
-    authorThreshold: authThr
+async function __thematicSettingsPrompt(existing = null) {
+  const defaults = {
+    topicThreshold: 1,
+    topKPerNode: 24,
+    maxTopicDfFrac: 0.20,
+    includeAuthors: true,
+    allowAuthorOnlyLinks: false,
+    authorThreshold: 1
   };
+
+  const current = Object.assign({}, defaults, existing || {});
+
+  return await new Promise((resolve) => {
+    const old = document.getElementById('thematicSettingsModalBackdrop');
+    if (old) old.remove();
+
+    const backdrop = document.createElement('div');
+    backdrop.id = 'thematicSettingsModalBackdrop';
+    Object.assign(backdrop.style, {
+      position: 'fixed',
+      inset: '0',
+      background: 'rgba(0,0,0,0.55)',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      zIndex: '10095'
+    });
+
+    const modal = document.createElement('div');
+    Object.assign(modal.style, {
+      width: 'min(680px, calc(100vw - 40px))',
+      maxHeight: 'calc(100vh - 60px)',
+      overflowY: 'auto',
+      background: '#111',
+      color: '#f3f4f6',
+      borderRadius: '12px',
+      boxShadow: '0 18px 50px rgba(0,0,0,0.45)',
+      padding: '18px 18px 16px 18px',
+      font: '13px/1.45 system-ui, -apple-system, Segoe UI, Roboto, sans-serif'
+    });
+
+    modal.innerHTML = `
+      <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin-bottom:14px;">
+        <div>
+          <div style="font-size:18px; font-weight:600; margin-bottom:4px;">Thematic manifold settings</div>
+          <div style="font-size:12px; color:#b9c0c8;">
+            These settings control how papers are linked by shared topics and, optionally, by shared authors.
+          </div>
+        </div>
+        <button id="thematicModalCloseX" type="button" style="
+          background:transparent; color:#cfd6dd; border:none; font-size:22px; line-height:1;
+          cursor:pointer; padding:0 4px;">×</button>
+      </div>
+
+      <div style="display:grid; grid-template-columns: 1fr; gap:14px;">
+        <div>
+          <label style="display:block; font-weight:600; margin-bottom:4px;">Topic overlap threshold</label>
+          <input id="tm_topicThreshold" type="number" min="1" step="1" value="${current.topicThreshold}" style="${__thematicInputStyle()}">
+          <div style="${__thematicHelpStyle()}">
+            Minimum number of shared topics required before two papers can be linked.
+            Higher values make the manifold stricter and usually produce fewer, cleaner links.
+          </div>
+        </div>
+
+        <div>
+          <label style="display:block; font-weight:600; margin-bottom:4px;">Maximum thematic links per paper</label>
+          <input id="tm_topKPerNode" type="number" min="4" step="1" value="${current.topKPerNode}" style="${__thematicInputStyle()}">
+          <div style="${__thematicHelpStyle()}">
+            Keeps only the strongest links for each paper.
+            Lower values simplify the graph. Higher values make the network denser.
+          </div>
+        </div>
+
+        <div>
+          <label style="display:block; font-weight:600; margin-bottom:4px;">Ignore ultra-common topics</label>
+          <input id="tm_maxTopicDfFrac" type="number" min="0.02" max="0.5" step="0.01" value="${current.maxTopicDfFrac}" style="${__thematicInputStyle()}">
+          <div style="${__thematicHelpStyle()}">
+            Fraction of papers a topic is allowed to appear in before it is treated as too general and ignored.
+            Lower values remove broad topics more aggressively.
+          </div>
+        </div>
+
+        <div style="padding:10px 12px; border:1px solid rgba(255,255,255,0.08); border-radius:10px; background:rgba(255,255,255,0.03);">
+          <label style="display:flex; align-items:center; gap:8px; font-weight:600; margin-bottom:4px;">
+            <input id="tm_includeAuthors" type="checkbox" ${current.includeAuthors ? 'checked' : ''}>
+            Include author overlap
+          </label>
+          <div style="${__thematicHelpStyle()}">
+            Gives extra weight to papers that share authors. This can help recover relations missed by topics alone,
+            but it can also pull together papers because of authorship rather than subject matter.
+          </div>
+
+          <div id="tm_authorOptions" style="margin-top:12px; padding-left:22px;">
+            <label style="display:flex; align-items:center; gap:8px; font-weight:600; margin-bottom:4px;">
+              <input id="tm_allowAuthorOnlyLinks" type="checkbox" ${current.allowAuthorOnlyLinks ? 'checked' : ''}>
+              Allow author-only links
+            </label>
+            <div style="${__thematicHelpStyle()} margin-bottom:10px;">
+              Allows a link to be created from shared authors even if the papers do not meet the topic threshold.
+              Usually best left off unless you explicitly want authorship to shape the manifold.
+            </div>
+
+            <label style="display:block; font-weight:600; margin-bottom:4px;">Author overlap threshold</label>
+            <input id="tm_authorThreshold" type="number" min="1" step="1" value="${current.authorThreshold}" style="${__thematicInputStyle()}">
+            <div style="${__thematicHelpStyle()}">
+              Minimum number of shared authors required before authorship contributes to a link.
+              In most cases, 1 is enough.
+            </div>
+          </div>
+        </div>
+
+        <div style="padding:10px 12px; border-radius:10px; background:rgba(120,160,255,0.08); color:#d9e4ff; font-size:12px;">
+          <strong>Typical starting point:</strong>
+          Topic threshold = 1, Top-K = 24, Max topic DF fraction = 0.20,
+          Include author overlap = on, Author-only links = off.
+        </div>
+      </div>
+
+      <div style="display:flex; justify-content:flex-end; gap:10px; margin-top:18px;">
+        <button id="thematicModalCancel" type="button" style="${__thematicButtonStyle(false)}">Cancel</button>
+        <button id="thematicModalApply" type="button" style="${__thematicButtonStyle(true)}">Apply settings</button>
+      </div>
+    `;
+
+    backdrop.appendChild(modal);
+    document.body.appendChild(backdrop);
+
+    const elTopic = modal.querySelector('#tm_topicThreshold');
+    const elTopK = modal.querySelector('#tm_topKPerNode');
+    const elDf = modal.querySelector('#tm_maxTopicDfFrac');
+    const elIncAuth = modal.querySelector('#tm_includeAuthors');
+    const elAllowAuthOnly = modal.querySelector('#tm_allowAuthorOnlyLinks');
+    const elAuthThr = modal.querySelector('#tm_authorThreshold');
+    const authorOptions = modal.querySelector('#tm_authorOptions');
+
+    const syncAuthorUi = () => {
+      const enabled = !!elIncAuth.checked;
+      authorOptions.style.opacity = enabled ? '1' : '0.45';
+      elAllowAuthOnly.disabled = !enabled;
+      elAuthThr.disabled = !enabled;
+    };
+
+    syncAuthorUi();
+    elIncAuth.addEventListener('change', syncAuthorUi);
+
+    const close = (result) => {
+      backdrop.remove();
+      resolve(result);
+    };
+
+    const readValues = () => ({
+      topicThreshold: Math.max(1, Number(elTopic.value || 1) | 0),
+      topKPerNode: Math.max(4, Number(elTopK.value || 24) | 0),
+      maxTopicDfFrac: Math.max(0.02, Math.min(0.5, Number(elDf.value || 0.20))),
+      includeAuthors: !!elIncAuth.checked,
+      allowAuthorOnlyLinks: !!elIncAuth.checked && !!elAllowAuthOnly.checked,
+      authorThreshold: !!elIncAuth.checked ? Math.max(1, Number(elAuthThr.value || 1) | 0) : 1
+    });
+
+    modal.querySelector('#thematicModalApply').addEventListener('click', () => {
+      close(readValues());
+    });
+
+    modal.querySelector('#thematicModalCancel').addEventListener('click', () => {
+      close(null);
+    });
+
+    modal.querySelector('#thematicModalCloseX').addEventListener('click', () => {
+      close(null);
+    });
+
+    backdrop.addEventListener('click', (ev) => {
+      if (ev.target === backdrop) close(null);
+    });
+
+    const onKey = (ev) => {
+      if (ev.key === 'Escape') {
+        ev.preventDefault();
+        document.removeEventListener('keydown', onKey, true);
+        close(null);
+      }
+    };
+    document.addEventListener('keydown', onKey, true);
+
+    setTimeout(() => elTopic?.focus(), 0);
+  });
 }
 
 function __makeThematicBuildKey(settings) {
@@ -14685,13 +14887,36 @@ function __makeThematicBuildKey(settings) {
        + `|incAuth:${settings.includeAuthors?1:0}|authOnly:${settings.allowAuthorOnlyLinks?1:0}|authThr:${settings.authorThreshold||1}`;
 }
 
-function __buildThematicGraphIfNeeded({ forcePrompt = false } = {}) {
+function __resetThematicViewCache({ clearSettings = true, clearPositions = true } = {}) {
+  const tc = __viewCache?.thematic;
+  if (!tc) return;
+
+  tc.builtKey = null;
+  tc.edges = null;
+  tc.clusterOf = null;
+  tc.clusterSizesTotal = null;
+  tc.clusterColors = null;
+  tc.clusterLabels = null;
+  tc.clusterNames = null;
+  tc.lensesShowEdges = null;
+
+  if (clearSettings) tc.settings = null;
+  if (clearPositions) tc.pos = null;
+
+  if (typeof thematicState === 'object' && thematicState) {
+    thematicState.clusterNames = {};
+  }
+}
+
+async function __buildThematicGraphIfNeeded({ forcePrompt = false } = {}) {
   if (!nodes?.length) return;
 
   const tc = __viewCache.thematic;
 
   if (!tc.settings || forcePrompt) {
-    tc.settings = __thematicSettingsPrompt();
+    const chosen = await __thematicSettingsPrompt(tc.settings || null);
+    if (!chosen) return false; // cancelled
+    tc.settings = chosen;
   }
 
   const key = __makeThematicBuildKey(tc.settings);
@@ -14750,28 +14975,93 @@ const built = buildThematicEdgesFromTopics?.({
   msg = `Thematic manifold: ${nodes.length} docs, ${edges.length} thematic links.`;
   updateInfo?.();
   redraw?.();
+
+    return true;
 }
 
 // Public entry points used by the View/Layout menu
-async function switchToThematicManifoldMode() {
+async function switchToThematicManifoldMode({ forceReset = false, forcePrompt = false } = {}) {
   if (!nodes?.length) return;
 
-  // save current view state first
+  const alreadyInThematic = (viewMode === 'thematic');
+
+  // If user clicks thematic again while already in thematic, offer choices.
+  if (alreadyInThematic && !forceReset && !forcePrompt) {
+const choice = window.prompt(
+  [
+    'The thematic manifold is already active.',
+    '',
+    'Type one of the following:',
+    '  keep   = leave the current thematic view unchanged',
+    '  prompt = change settings and rebuild, but keep current node positions as the starting layout',
+    '  rerun  = change settings and rebuild from a clean reset',
+    '',
+    'Anything else cancels.'
+  ].join('\n'),
+  'rerun'
+);
+
+    const c = String(choice || '').trim().toLowerCase();
+
+    if (!c) return;
+    if (c === 'keep') return;
+
+    if (c === 'rerun') {
+      forceReset = true;
+      forcePrompt = true;
+    } else if (c === 'prompt') {
+      forcePrompt = true;
+    } else {
+      return;
+    }
+  }
+
+  // Save current state before any switching/rebuild
   __snapshotView(viewMode || 'citation');
 
-  // build thematic graph (prompts only the first time per dataset/settings)
-  __buildThematicGraphIfNeeded({ forcePrompt: !__viewCache.thematic.settings });
+  // Full reset: drop cached thematic graph, labels, settings, and positions
+  if (forceReset) {
+    __resetThematicViewCache({ clearSettings: true, clearPositions: true });
 
-  // move into thematic mode
+    // If citation positions exist, use those as the fresh starting positions
+    if (__viewCache?.citation?.pos?.length === nodes.length) {
+      for (let i = 0; i < nodes.length; i++) {
+        if (__viewCache.citation.pos[i]) {
+          nodes[i].x = __viewCache.citation.pos[i].x;
+          nodes[i].y = __viewCache.citation.pos[i].y;
+        }
+      }
+    }
+
+    stopLayoutCompletely?.();
+  }
+
+  // Prompt for settings either on first run or when explicitly requested
+  const ok = await __buildThematicGraphIfNeeded({
+    forcePrompt: forcePrompt || !__viewCache.thematic.settings
+  });
+
+  if (ok === false) {
+    msg = 'Thematic manifold build cancelled.';
+    updateInfo?.();
+    redraw?.();
+    return;
+  }
+
   setActiveViewMode('thematic');
 
-  // If this is the first time and there is no saved thematic pos, keep current positions
-  // and let the user run the layout from the separate toggle button.
+  // If there is still no saved thematic position, initialise from current node positions
   if (!__viewCache.thematic.pos) {
     __viewCache.thematic.pos = nodes.map(n => ({ x: n.x, y: n.y }));
   }
 
   __applyView('thematic');
+
+  msg = forceReset || forcePrompt
+    ? 'Thematic manifold rebuilt with updated settings.'
+    : 'Thematic manifold restored.';
+  updateInfo?.();
+  redraw?.();
 }
 
 function __ensureCitationCacheInitialised() {
