@@ -37,6 +37,7 @@ function setClusterMin(v) {
   if (typeof clusterSizeThreshold !== 'undefined') clusterSizeThreshold = val;
   initClusterFilterUI?.();   // refresh slider/input/label bounds+value
   initClusterRefGpaFilterUI();
+  initClusterRefCountFilterUI();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2100,6 +2101,13 @@ let extCitesThreshold = 0;  // nodes must have cbc >= this
 // NEW: Cluster-size filter (UI + state)
 let clusterSizeSlider, clusterSizeLabel;
 let clusterSizeThreshold = 0;   // show only clusters with size >= this
+
+// NEW: Cluster REF-reviewed-doc-count filter
+let clusterRefCountSlider, clusterRefCountLabel;
+let clusterRefCountThreshold = 0;   // show only clusters with >= this many REF-reviewed docs
+let clusterRefCountMax = 0;
+let clusterRefCountByCluster = [];  // per cluster id: count of REF-reviewed docs
+
 
 // NEW: Cluster REF GPA filter (cluster-level, based on REF-scored outputs only)
 let clusterRefGpaSlider, clusterRefGpaLabel;
@@ -4910,6 +4918,7 @@ clusterColors = normalizeClusterColors(clusterColors);
   // Any UI that depends on sizes/labels
   initClusterFilterUI?.();
   initClusterRefGpaFilterUI();
+  initClusterRefCountFilterUI();
   return clusterCount;
 }
 
@@ -6287,8 +6296,15 @@ function recomputeVisibility() {
 
     // NEW: cluster-size filter (0 = off)
     const cid = (Array.isArray(clusterOf) ? clusterOf[i] : -1);
-    const csz = (cid != null && cid >= 0 && Array.isArray(clusterSizesTotal)) ? (clusterSizesTotal[cid] || 0) : 0;
-    const passCluster = (clusterSizeThreshold <= 0) ? true : (csz >= clusterSizeThreshold);
+const csz = (cid != null && cid >= 0 && Array.isArray(clusterSizesTotal)) ? (clusterSizesTotal[cid] || 0) : 0;
+const passCluster = (clusterSizeThreshold <= 0) ? true : (csz >= clusterSizeThreshold);
+
+const cref = (cid != null && cid >= 0 && Array.isArray(clusterRefCountByCluster))
+  ? (clusterRefCountByCluster[cid] || 0)
+  : 0;
+const passClusterRefCount = (clusterRefCountThreshold <= 0) ? true : (cref >= clusterRefCountThreshold);
+
+// In Concept mode, only show nodes that belong to a qualifying concept cluster
 
     const cgpa = (cid != null && cid >= 0 && Array.isArray(clusterRefGpaByCluster))
       ? clusterRefGpaByCluster[cid]
@@ -6326,6 +6342,7 @@ function recomputeVisibility() {
       passExt &&
       passViab &&
       passCluster &&
+      passClusterRefCount &&
       passClusterRefGpa &&
       passConceptMode &&
       passFocus;
@@ -11249,15 +11266,15 @@ function serializeState(opts = {}) {
     sizesTotal: Array.isArray(clusterSizesTotal) ? Array.from(clusterSizesTotal) : null
   };
 
-  const filt = {
-    degThreshold,
-    yearLo,
-    yearHi,
-    extCitesThreshold,
-    clusterSizeThreshold,
-    clusterRefGpaThreshold,
-    persistentFieldThreshold
-  };
+const filt = {
+  degThreshold,
+  yearLo,
+  yearHi,
+  extCitesThreshold,
+  clusterSizeThreshold,
+  clusterRefCountThreshold,
+  persistentFieldThreshold
+};
 
   const camState = { x: cam.x, y: cam.y, scale: cam.scale };
 
@@ -11676,6 +11693,7 @@ async function restoreProjectState(save) {
     if (Number.isFinite(+save.filters.yearHi)) yearHi = +save.filters.yearHi;
     if (Number.isFinite(+save.filters.extCitesThreshold)) extCitesThreshold = +save.filters.extCitesThreshold;
     if (Number.isFinite(+save.filters.clusterSizeThreshold)) clusterSizeThreshold = +save.filters.clusterSizeThreshold;
+    if (Number.isFinite(+save.filters.clusterRefCountThreshold)) clusterRefCountThreshold = +save.filters.clusterRefCountThreshold;
     if (Number.isFinite(+save.filters.clusterRefGpaThreshold)) clusterRefGpaThreshold = +save.filters.clusterRefGpaThreshold;
     if (Number.isFinite(+save.filters.persistentFieldThreshold)) {
       persistentFieldThreshold = +save.filters.persistentFieldThreshold;
@@ -11847,7 +11865,10 @@ async function restoreProjectState(save) {
   if (degSlider?.elt && Number.isFinite(+degThreshold)) degSlider.elt.value = degThreshold;
   if (extCitesSlider?.elt && Number.isFinite(+extCitesThreshold)) extCitesSlider.elt.value = extCitesThreshold;
   if (clusterSizeSlider?.elt && Number.isFinite(+clusterSizeThreshold)) clusterSizeSlider.elt.value = clusterSizeThreshold;
-    if (clusterRefGpaSlider?.elt && Number.isFinite(+clusterRefGpaThreshold)) {
+   if (clusterRefCountSlider?.elt && Number.isFinite(+clusterRefCountThreshold)) {
+  clusterRefCountSlider.elt.value = String(clusterRefCountThreshold);
+} 
+  if (clusterRefGpaSlider?.elt && Number.isFinite(+clusterRefGpaThreshold)) {
     clusterRefGpaSlider.elt.value = Math.round(clusterRefGpaThreshold * 100);
   }
   if (yearSliderMin?.elt && Number.isFinite(+yearLo)) yearSliderMin.elt.value = yearLo;
@@ -11856,7 +11877,8 @@ async function restoreProjectState(save) {
   if (degInput) degInput.value(String(degThreshold ?? 0));
   if (extCitesInput) extCitesInput.value(String(extCitesThreshold ?? 0));
   if (clusterSizeInput) clusterSizeInput.value(String(clusterSizeThreshold ?? 0));
-    if (clusterRefGpaInput) clusterRefGpaInput.value(String(Number(clusterRefGpaThreshold ?? 0).toFixed(2)));
+  if (clusterRefCountInput) clusterRefCountInput.value(String(clusterRefCountThreshold ?? 0));  
+  if (clusterRefGpaInput) clusterRefGpaInput.value(String(Number(clusterRefGpaThreshold ?? 0).toFixed(2)));
   if (yearLoInput) yearLoInput.value(String(yearLo ?? 0));
   if (yearHiInput) yearHiInput.value(String(yearHi ?? 0));
   if (persistentFieldInput && Number.isFinite(+persistentFieldThreshold)) {
@@ -17692,6 +17714,69 @@ function initClusterFilterUI() {
     clusterSizeInput.elt.value = String(clusterSizeThreshold|0);
   }
 }
+
+function rebuildClusterRefCountInventory() {
+  const out = [];
+  let maxv = 0;
+
+  const nClusters = Array.isArray(clusterSizesTotal)
+    ? clusterSizesTotal.length
+    : (Array.isArray(clusterOf) && clusterOf.length ? (Math.max(...clusterOf) + 1) : 0);
+
+  for (let cid = 0; cid < nClusters; cid++) {
+    const nodeIds = [];
+    for (let i = 0; i < (clusterOf?.length || 0); i++) {
+      if ((clusterOf[i] | 0) === cid) nodeIds.push(i);
+    }
+
+    const ref = collectClusterRefSummary(nodeIds);
+    const n = (ref && Number.isFinite(ref.n)) ? (ref.n | 0) : 0;
+
+    out[cid] = n;
+    if (n > maxv) maxv = n;
+  }
+
+  clusterRefCountByCluster = out;
+  clusterRefCountMax = maxv;
+
+  if (!Number.isFinite(clusterRefCountThreshold) || clusterRefCountThreshold < 0) {
+    clusterRefCountThreshold = 0;
+  }
+  if (clusterRefCountThreshold > clusterRefCountMax) {
+    clusterRefCountThreshold = clusterRefCountMax;
+  }
+
+  return {
+    byCluster: out,
+    max: maxv
+  };
+}
+
+function initClusterRefCountFilterUI() {
+  if (!clusterRefCountSlider) return;
+
+  const inv = rebuildClusterRefCountInventory();
+  const max = Number(inv.max || 0);
+
+  clusterRefCountSlider.elt.min = '0';
+  clusterRefCountSlider.elt.max = String(max);
+  clusterRefCountSlider.elt.value = String(
+    Math.max(0, Math.min(max, Number(clusterRefCountThreshold || 0) | 0))
+  );
+
+  if (clusterRefCountInput) {
+    clusterRefCountInput.attribute('min', '0');
+    clusterRefCountInput.attribute('max', String(max));
+    clusterRefCountInput.attribute('step', '1');
+    clusterRefCountInput.elt.value = String(
+      Math.max(0, Math.min(max, Number(clusterRefCountThreshold || 0) | 0))
+    );
+  }
+
+  if (clusterRefCountLabel) {
+    clusterRefCountLabel.html(`Cluster REF-reviewed docs ≥ ${clusterRefCountThreshold} (max ${max})`);
+  }
+}
 function rebuildClusterRefGpaInventory() {
   const out = [];
   const vals = [];
@@ -17916,6 +18001,52 @@ function buildFiltersInto(containerBody) {
     if (clusterSizeInput) clusterSizeInput.elt.value = String(clusterSizeThreshold);
     recomputeVisibility(); redraw();
   });
+
+  // --- Cluster REF-reviewed document count ---
+clusterRefCountLabel = createDiv(`Cluster REF-reviewed docs ≥ ${clusterRefCountThreshold}`);
+clusterRefCountLabel.parent(containerBody);
+clusterRefCountLabel.style('color','#eaeaea');
+clusterRefCountLabel.style('font-size','12px');
+clusterRefCountLabel.style('margin','10px 0 6px');
+
+clusterRefCountSlider = createSlider(0, 0, clusterRefCountThreshold, 1);
+clusterRefCountSlider.parent(containerBody);
+clusterRefCountSlider.style('width','100%');
+clusterRefCountSlider.style('margin','0 0 6px');
+captureUI?.(clusterRefCountSlider.elt);
+
+clusterRefCountInput = createInput(String(clusterRefCountThreshold), 'number');
+clusterRefCountInput.parent(containerBody);
+clusterRefCountInput.attribute('min', '0');
+clusterRefCountInput.attribute('max', '0');
+clusterRefCountInput.attribute('step', '1');
+clusterRefCountInput.style('width','72px');
+clusterRefCountInput.style('margin','0 0 10px');
+clusterRefCountInput.style('padding','4px 6px');
+clusterRefCountInput.style('font-size','12px');
+clusterRefCountInput.style('color','#fff');
+clusterRefCountInput.style('background','#000');
+clusterRefCountInput.style('border','1px solid #333');
+clusterRefCountInput.style('border-radius','6px');
+captureUI?.(clusterRefCountInput.elt);
+
+clusterRefCountInput.changed(() => {
+  const max = Number(clusterRefCountMax || 0);
+  const raw = Number(clusterRefCountInput.value());
+  clusterRefCountThreshold = Math.max(0, Math.min(max, Number.isFinite(raw) ? (raw | 0) : 0));
+  clusterRefCountSlider.elt.value = String(clusterRefCountThreshold);
+  initClusterRefCountFilterUI();
+  recomputeVisibility(); redraw();
+});
+
+clusterRefCountSlider.input(() => {
+  const max = Number(clusterRefCountMax || 0);
+  const raw = Number(clusterRefCountSlider.value());
+  clusterRefCountThreshold = Math.max(0, Math.min(max, Number.isFinite(raw) ? (raw | 0) : 0));
+  if (clusterRefCountInput) clusterRefCountInput.elt.value = String(clusterRefCountThreshold);
+  initClusterRefCountFilterUI();
+  recomputeVisibility(); redraw();
+});
 
     // --- Cluster REF GPA ---
   clusterRefGpaLabel = createDiv(`Cluster REF GPA ≥ ${Number(clusterRefGpaThreshold).toFixed(2)}`);
@@ -18508,6 +18639,7 @@ for (let i = 0; i < nodes.length; i++) {
 // Tighten the slider now that sizes are known
 initClusterFilterUI?.();
 initClusterRefGpaFilterUI();
+initClusterRefCountFilterUI();
 // If you want to (re)derive label text from abstracts, you *can* call:
 // computeClusterLabels?.();
 
