@@ -715,6 +715,471 @@ async function fetchFulltextResponse(fullUrl, timeoutMs = 25000) {
   throw lastErr || new Error('Fulltext request failed.');
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// UKRI Gateway to Research (GtR) enrichment
+// ─────────────────────────────────────────────────────────────────────────────
+
+const GTR_JSON_ACCEPT = 'application/vnd.rcuk.gtr.json-v7, application/json;q=0.9';
+const GTR_SEARCH_BASE = 'https://gtr.ukri.org/api/search';
+const GTR_API_BASE    = 'https://gtr.ukri.org/gtr/api';
+
+// Be polite to GtR – avoid hammering the service.
+const UKRI_GRANTS_DELAY_MS = 180;
+const UKRI_GRANTS_MAX_CANDIDATES = 8;
+
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function normaliseGtrUrl(url) {
+  let u = String(url || '').trim();
+  if (!u) return '';
+
+  u = u.replace(/^http:\/\//i, 'https://');
+  u = u.replace(/^https:\/\/gtruat\.ukri\.org/i, 'https://gtr.ukri.org');
+  u = u.replace(/^https:\/\/gtr\.rcuk\.ac\.uk/i, 'https://gtr.ukri.org');
+
+  // Search docs use /api/search/* ; API2 resource docs use /gtr/api/*
+  // For resource URLs, normalise onto /gtr/api/*
+  u = u.replace(/^https:\/\/gtr\.ukri\.org\/api\/(projects|funds|organisations|persons|outcomes)\b/i,
+                'https://gtr.ukri.org/gtr/api/$1');
+
+  return u;
+}
+
+async function fetchGtrJson(url, timeoutMs = 25000) {
+  const fullUrl = normaliseGtrUrl(url);
+  if (!fullUrl) throw new Error('Empty GtR URL');
+
+  const attempts = FETCH_PROXY ? [viaProxy(fullUrl), fullUrl] : [fullUrl];
+  let lastErr = null;
+
+  for (const u of attempts) {
+    try {
+      const r = await fetchWithTimeout(u, {
+        headers: { accept: GTR_JSON_ACCEPT },
+        mode: 'cors',
+        redirect: 'follow'
+      }, timeoutMs);
+
+      if (!r.ok) {
+        lastErr = new Error(`GtR HTTP ${r.status}`);
+        continue;
+      }
+
+      const text = await r.text();
+      try {
+        return JSON.parse(text);
+      } catch (e) {
+        lastErr = new Error(`GtR returned non-JSON for ${fullUrl}`);
+      }
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+
+  throw lastErr || new Error(`GtR request failed for ${fullUrl}`);
+}
+
+function getVisiblePublicationIndices() {
+  const out = [];
+  for (let i = 0; i < (nodes?.length || 0); i++) {
+    if (!nodes[i]) continue;
+    if (Array.isArray(visibleMask) && !visibleMask[i]) continue;
+    out.push(i);
+  }
+  return out;
+}
+
+function normLooseTitle(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[^\w\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function compactDateStr(v) {
+  const s = String(v || '').trim();
+  if (!s) return '';
+  const m = s.match(/^(\d{4})(-\d{2})?(-\d{2})?/);
+  return m ? m[0] : s;
+}
+
+function yearFromAny(v) {
+  const s = String(v || '').trim();
+  const m = s.match(/\b(19|20)\d{2}\b/);
+  return m ? Number(m[0]) : NaN;
+}
+
+function uniqueBy(arr, keyFn) {
+  const seen = new Set();
+  const out = [];
+  for (const x of (arr || [])) {
+    const k = keyFn(x);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(x);
+  }
+  return out;
+}
+
+function deepCollectStrings(obj, predicate, out = []) {
+  if (obj == null) return out;
+
+  if (typeof obj === 'string') {
+    if (predicate(obj)) out.push(obj);
+    return out;
+  }
+
+  if (Array.isArray(obj)) {
+    for (const v of obj) deepCollectStrings(v, predicate, out);
+    return out;
+  }
+
+  if (typeof obj === 'object') {
+    for (const v of Object.values(obj)) deepCollectStrings(v, predicate, out);
+  }
+
+  return out;
+}
+
+function extractGtrResourceUrls(obj, kind) {
+  const rx = kind === 'publication'
+    ? /\/(?:gtr\/)?api\/outcomes\/publications\/[A-Z0-9-]+/i
+    : kind === 'project'
+      ? /\/(?:gtr\/)?api\/projects\/[A-Z0-9-]+/i
+      : kind === 'fund'
+        ? /\/(?:gtr\/)?api\/funds\/[A-Z0-9-]+/i
+        : kind === 'organisation'
+          ? /\/(?:gtr\/)?api\/organisations\/[A-Z0-9-]+/i
+          : /.^/;
+
+  return uniqueBy(
+    deepCollectStrings(obj, s => rx.test(String(s || ''))).map(normaliseGtrUrl),
+    s => s
+  );
+}
+
+function getLinksArray(obj) {
+  if (!obj) return [];
+  if (Array.isArray(obj?.links?.link)) return obj.links.link;
+  if (Array.isArray(obj?.link)) return obj.link;
+  if (Array.isArray(obj?.links)) return obj.links;
+  return [];
+}
+
+function extractLinkedUrlsByRel(obj, rel) {
+  const wanted = String(rel || '').trim().toUpperCase();
+  const links = getLinksArray(obj);
+  const out = [];
+
+  for (const l of links) {
+    const r = String(l?.rel || l?.type || '').trim().toUpperCase();
+    const href = normaliseGtrUrl(l?.href || l?.url || '');
+    if (r === wanted && href) out.push(href);
+  }
+
+  return uniqueBy(out, s => s);
+}
+
+function extractLinkedDateRangeByRel(obj, rel) {
+  const wanted = String(rel || '').trim().toUpperCase();
+  const links = getLinksArray(obj);
+
+  for (const l of links) {
+    const r = String(l?.rel || l?.type || '').trim().toUpperCase();
+    if (r !== wanted) continue;
+
+    const start = compactDateStr(l?.start || l?.startDate || '');
+    const end   = compactDateStr(l?.end || l?.endDate || '');
+    if (start || end) return { start, end };
+  }
+
+  return { start: '', end: '' };
+}
+
+function extractBestTextField(obj, candidates) {
+  for (const k of (candidates || [])) {
+    const v = obj?.[k];
+    if (typeof v === 'string' && v.trim()) return v.trim();
+  }
+  return '';
+}
+
+function extractPublicationCore(pubObj) {
+  const title = extractBestTextField(pubObj, [
+    'title', 'name', 'description', 'publicationTitle'
+  ]);
+
+  const doiRaw = extractBestTextField(pubObj, [
+    'doi', 'DOI'
+  ]);
+
+  const doi = (typeof cleanDOI === 'function')
+    ? cleanDOI(doiRaw)
+    : String(doiRaw || '').replace(/^https?:\/\/doi\.org\//i, '').trim();
+
+  const year =
+    yearFromAny(pubObj?.publishedDate) ||
+    yearFromAny(pubObj?.date) ||
+    yearFromAny(pubObj?.publicationDate) ||
+    yearFromAny(pubObj?.year);
+
+  return { title, doi, year: Number.isFinite(year) ? year : NaN };
+}
+
+function scoreGtrPublicationCandidate(localItem, pubObj) {
+  const localTitle = normLooseTitle(
+    localItem?.openalex?.display_name ||
+    localItem?.openalex?.title ||
+    localItem?.label || ''
+  );
+
+  const localDoi = (typeof cleanDOI === 'function')
+    ? cleanDOI(localItem?.openalex?.doi || localItem?.doi || '')
+    : String(localItem?.openalex?.doi || localItem?.doi || '').replace(/^https?:\/\/doi\.org\//i, '').trim();
+
+  const localYear =
+    Number(localItem?.openalex?.publication_year) ||
+    Number(localItem?.publication_year) ||
+    Number(localItem?.year) ||
+    NaN;
+
+  const core = extractPublicationCore(pubObj);
+
+  let score = 0;
+
+  if (localDoi && core.doi && localDoi.toLowerCase() === core.doi.toLowerCase()) score += 100;
+  if (localTitle && core.title && localTitle === normLooseTitle(core.title)) score += 40;
+  if (Number.isFinite(localYear) && Number.isFinite(core.year) && localYear === core.year) score += 10;
+
+  return score;
+}
+
+async function searchGtrPublicationCandidatesForItem(item) {
+  const title = String(item?.openalex?.display_name || item?.openalex?.title || item?.label || '').trim();
+  const doi = (typeof cleanDOI === 'function')
+    ? cleanDOI(item?.openalex?.doi || item?.doi || '')
+    : String(item?.openalex?.doi || item?.doi || '').replace(/^https?:\/\/doi\.org\//i, '').trim();
+
+  const queries = [];
+  if (doi) queries.push(`"${doi}"`);
+  if (title) queries.push(`"${title}"`);
+
+  const pubUrls = [];
+
+  for (const q of queries) {
+    const url = `${GTR_SEARCH_BASE}/publication?term=${encodeURIComponent(q)}&page=1&fetchSize=10`;
+    try {
+      const res = await fetchGtrJson(url, 25000);
+      const urls = extractGtrResourceUrls(res, 'publication');
+      for (const u of urls) pubUrls.push(u);
+      await delay(UKRI_GRANTS_DELAY_MS);
+    } catch (e) {
+      console.warn('GtR publication search failed for query:', q, e);
+    }
+  }
+
+  return uniqueBy(pubUrls, s => s).slice(0, UKRI_GRANTS_MAX_CANDIDATES);
+}
+
+async function resolveAwardingBodyFromProject(projectObj) {
+  // Try direct text fields first
+  const direct = extractBestTextField(projectObj, [
+    'funder', 'funderName', 'leadFunder', 'leadFunderName', 'organisation', 'organization'
+  ]);
+  if (direct) return direct;
+
+  // Try linked FUNDER organisations on the project itself
+  const orgLinks = extractLinkedUrlsByRel(projectObj, 'FUNDER');
+  for (const href of orgLinks) {
+    try {
+      const orgObj = await fetchGtrJson(href, 25000);
+      const name = extractBestTextField(orgObj, ['name', 'title', 'organisationName']);
+      if (name) return name;
+      await delay(UKRI_GRANTS_DELAY_MS);
+    } catch (e) {
+      console.warn('GtR funder organisation lookup failed:', href, e);
+    }
+  }
+
+  // Try linked fund records, then funder orgs from those
+  const fundLinks = extractLinkedUrlsByRel(projectObj, 'FUND');
+  for (const href of fundLinks) {
+    try {
+      const fundObj = await fetchGtrJson(href, 25000);
+
+      const directFundName = extractBestTextField(fundObj, [
+        'funder', 'funderName', 'name', 'title'
+      ]);
+      if (directFundName) return directFundName;
+
+      const funderOrgLinks = extractLinkedUrlsByRel(fundObj, 'FUNDER');
+      for (const orgHref of funderOrgLinks) {
+        try {
+          const orgObj = await fetchGtrJson(orgHref, 25000);
+          const name = extractBestTextField(orgObj, ['name', 'title', 'organisationName']);
+          if (name) return name;
+          await delay(UKRI_GRANTS_DELAY_MS);
+        } catch (e) {
+          console.warn('GtR funder org lookup from fund failed:', orgHref, e);
+        }
+      }
+
+      await delay(UKRI_GRANTS_DELAY_MS);
+    } catch (e) {
+      console.warn('GtR fund lookup failed:', href, e);
+    }
+  }
+
+  return '';
+}
+
+function formatGrantDateRange(start, end) {
+  const s = compactDateStr(start);
+  const e = compactDateStr(end);
+  if (s && e) return `${s} → ${e}`;
+  return s || e || '';
+}
+
+async function buildUkriGrantRecordsForItem(i) {
+  const item = itemsData?.[i];
+  if (!item) return [];
+
+  const publicationCandidates = await searchGtrPublicationCandidatesForItem(item);
+  if (!publicationCandidates.length) return [];
+
+  const pubDetails = [];
+
+  for (const pubUrl of publicationCandidates) {
+    try {
+      const pubObj = await fetchGtrJson(pubUrl, 25000);
+      pubDetails.push({ url: pubUrl, obj: pubObj, score: scoreGtrPublicationCandidate(item, pubObj) });
+      await delay(UKRI_GRANTS_DELAY_MS);
+    } catch (e) {
+      console.warn('GtR publication detail lookup failed:', pubUrl, e);
+    }
+  }
+
+  pubDetails.sort((a, b) => b.score - a.score);
+
+  const keptPubs = pubDetails.filter(x => x.score >= 40 || x.score >= 100);
+  const projectUrls = uniqueBy(
+    keptPubs.flatMap(p => extractLinkedUrlsByRel(p.obj, 'PROJECT')),
+    s => s
+  );
+
+  if (!projectUrls.length) return [];
+
+  const grants = [];
+
+  for (const projUrl of projectUrls) {
+    try {
+      const projObj = await fetchGtrJson(projUrl, 25000);
+
+      const title = extractBestTextField(projObj, ['title', 'name', 'projectTitle']);
+      const directStart = extractBestTextField(projObj, ['start', 'startDate', 'fundStart', 'plannedStartDate']);
+      const directEnd   = extractBestTextField(projObj, ['end', 'endDate', 'fundEnd', 'plannedEndDate']);
+
+      const linkDates = extractLinkedDateRangeByRel(projObj, 'FUND');
+      const start = compactDateStr(directStart || linkDates.start || '');
+      const end   = compactDateStr(directEnd   || linkDates.end   || '');
+
+      const awardingBody = await resolveAwardingBodyFromProject(projObj);
+
+      const projectId = String(projUrl).split('/').pop() || '';
+      const projectHref = normaliseGtrUrl(projUrl);
+
+      if (title) {
+        grants.push({
+          grant_title: title,
+          dates: formatGrantDateRange(start, end),
+          start_date: start || '',
+          end_date: end || '',
+          awarding_body: awardingBody || '',
+          project_id: projectId,
+          project_url: projectHref,
+          source: 'UKRI Gateway to Research'
+        });
+      }
+
+      await delay(UKRI_GRANTS_DELAY_MS);
+    } catch (e) {
+      console.warn('GtR project lookup failed:', projUrl, e);
+    }
+  }
+
+  return uniqueBy(
+    grants,
+    g => [
+      normLooseTitle(g.grant_title),
+      g.start_date || '',
+      g.end_date || '',
+      normLooseTitle(g.awarding_body || '')
+    ].join('|')
+  );
+}
+
+function setUkriGrantsOnItem(i, grants) {
+  const item = itemsData?.[i];
+  if (!item) return;
+
+  const clean = Array.isArray(grants) ? grants.filter(g => g && g.grant_title) : [];
+
+  if (clean.length) {
+    item.ukri_grants = clean;
+    item['UKRI Grants'] = clean;
+  } else {
+    delete item.ukri_grants;
+    delete item['UKRI Grants'];
+  }
+
+  item.ukri_grants_checked_at = new Date().toISOString();
+  item.ukri_grants_source = 'UKRI Gateway to Research';
+
+  if (selectedIndex === i && infoPanel?.setItemIndex) {
+    infoPanel.setItemIndex(i);
+  }
+}
+
+async function retrieveUkriGrantsForVisible() {
+  const ids = getVisiblePublicationIndices();
+  if (!ids.length) {
+    msg = 'No visible publications to check for UKRI grants.';
+    updateInfo?.();
+    redraw?.();
+    return;
+  }
+
+  let hits = 0;
+
+  for (let k = 0; k < ids.length; k++) {
+    const i = ids[k];
+    const item = itemsData?.[i] || {};
+    const title = String(item?.openalex?.display_name || item?.openalex?.title || item?.label || `Item ${i + 1}`);
+
+    msg = `Retrieve UKRI Grants: ${k + 1}/${ids.length} — ${title}`;
+    updateInfo?.();
+    redraw?.();
+
+    try {
+      const grants = await buildUkriGrantRecordsForItem(i);
+      setUkriGrantsOnItem(i, grants);
+      if (grants.length) hits++;
+    } catch (e) {
+      console.warn('UKRI grants lookup failed for item', i, e);
+      setUkriGrantsOnItem(i, []);
+    }
+
+    await delay(UKRI_GRANTS_DELAY_MS);
+  }
+
+  msg = `Retrieve UKRI Grants complete: ${hits} / ${ids.length} visible publications matched to UKRI grants.`;
+  updateInfo?.();
+  redraw?.();
+}
+
 
 
 probeProxyOnce();
@@ -5600,6 +6065,31 @@ const refsTotal = Array.isArray(w.referenced_works)
       ? item.invisibleUniTopics.map(s => String(s || '').trim()).filter(Boolean)
       : [];
 
+          const ukriGrants =
+      (Array.isArray(item?.ukri_grants) ? item.ukri_grants : null) ||
+      (Array.isArray(item?.['UKRI Grants']) ? item['UKRI Grants'] : []);
+
+    const ukriGrantsHtml = ukriGrants.length
+      ? `
+          <div style="font-weight:600;font-size:13px;margin:10px 0 4px;">UKRI Grants</div>
+          <div style="font-size:12px;line-height:1.4;">
+            ${ukriGrants.map(g => `
+              <div style="
+                margin:0 0 8px 0;
+                padding:8px 10px;
+                background:rgba(255,255,255,0.05);
+                border:1px solid rgba(255,255,255,0.10);
+                border-radius:8px;
+              ">
+                <div style="font-weight:600">${safe(g?.grant_title || '-')}</div>
+                <div style="opacity:.8;margin-top:3px">Dates: ${safe(g?.dates || '-')}</div>
+                <div style="opacity:.8">Awarding body: ${safe(g?.awarding_body || '-')}</div>
+              </div>
+            `).join('')}
+          </div>
+        `
+      : '';
+
     const oaObj = w.open_access || {};
     const isOA = !!oaObj.is_oa;
     const oaStatus = isOA ? (oaObj.oa_status ? ` (${oaObj.oa_status})` : '') : '';
@@ -5747,7 +6237,7 @@ const hasFullText = !!(
           `
           : ''
       }
-
+${ukriGrantsHtml}
       <div style="font-weight:600;font-size:13px;margin:10px 0 4px;">Full text</div>
       ${
         hasFullText
@@ -5853,6 +6343,33 @@ async _renderRemoteNode(i) {
     const resp = await fetch(url);
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const d = await resp.json();
+    
+    const ukriGrants =
+      (Array.isArray(d?.ukri_grants) ? d.ukri_grants : null) ||
+      (Array.isArray(item?.ukri_grants) ? item.ukri_grants : null) ||
+      (Array.isArray(item?.['UKRI Grants']) ? item['UKRI Grants'] : []);
+
+    const ukriGrantsHtml = ukriGrants.length
+      ? `
+          <div style="font-weight:600;font-size:13px;margin:10px 0 4px;">UKRI Grants</div>
+          <div style="font-size:12px;line-height:1.4;">
+            ${ukriGrants.map(g => `
+              <div style="
+                margin:0 0 8px 0;
+                padding:8px 10px;
+                background:rgba(255,255,255,0.05);
+                border:1px solid rgba(255,255,255,0.10);
+                border-radius:8px;
+              ">
+                <div style="font-weight:600">${safe(g?.grant_title || '-')}</div>
+                <div style="opacity:.8;margin-top:3px">Dates: ${safe(g?.dates || '-')}</div>
+                <div style="opacity:.8">Awarding body: ${safe(g?.awarding_body || '-')}</div>
+              </div>
+            `).join('')}
+          </div>
+        `
+      : '';
+
 
 // --- push numeric counts into itemsData so node pills update ---
 const it = (itemsData[i] ||= {});
@@ -13796,6 +14313,15 @@ addItem('Retrieve Full Texts', () => {
   }
 });
 
+addItem('Retrieve UKRI Grants', () => {
+  retrieveUkriGrantsForVisible().catch(err => {
+    console.error('Retrieve UKRI Grants failed:', err);
+    msg = 'Retrieve UKRI Grants failed. See console for details.';
+    updateInfo?.();
+    redraw?.();
+  });
+});
+
 
    addItem('Retrieve by DOI…', () => openIdRetrievalDialog('doi'));
   addItem('Retrieve by OpenAlex ID…', () => openIdRetrievalDialog('wid'));
@@ -14889,72 +15415,121 @@ function __makeThematicBuildKey(settings) {
 
 function __resetThematicViewCache({ clearSettings = true, clearPositions = true } = {}) {
   const tc = __viewCache?.thematic;
-  if (!tc) return;
+  if (tc) {
+    tc.builtKey = null;
+    tc.edges = null;
+    tc.clusterOf = null;
+    tc.clusterSizesTotal = null;
+    tc.clusterColors = null;
+    tc.clusterLabels = null;
+    tc.clusterNames = null;
+    tc.lensesShowEdges = null;
 
-  tc.builtKey = null;
-  tc.edges = null;
-  tc.clusterOf = null;
-  tc.clusterSizesTotal = null;
-  tc.clusterColors = null;
-  tc.clusterLabels = null;
-  tc.clusterNames = null;
-  tc.lensesShowEdges = null;
-
-  if (clearSettings) tc.settings = null;
-  if (clearPositions) tc.pos = null;
-
-  if (typeof thematicState === 'object' && thematicState) {
-    thematicState.clusterNames = {};
+    if (clearSettings) tc.settings = null;
+    if (clearPositions) tc.pos = null;
   }
+
+  __clearCurrentThematicClusterState({ clearEdges: true });
+}
+
+function __clearCurrentThematicClusterState({ clearEdges = true } = {}) {
+  // Clear live graph state used by the thematic manifold
+  if (clearEdges) edges = [];
+
+  // Clear adjacency so old link structure cannot survive visually or logically
+  try {
+    buildAdjacency?.(nodes?.length || 0, edges);
+  } catch {}
+
+  // Clear cluster assignments and derived cluster data
+  clusterOf = new Array(nodes?.length || 0).fill(-1);
+  clusterSizesTotal = [];
+  clusterColors = [];
+  clusterLabels = [];
+  clusterCount = 0;
+
+  // Clear thematic naming state
+  thematicState = thematicState || {};
+  thematicState.clusterNames = {};
+
+  // If you store cluster names or modes on dimension tools, clear thematic ones
+  if (Array.isArray(dimTools)) {
+    dimTools = dimTools.filter(d => !(String(d?.type || '').toLowerCase() === 'clusters' &&
+                                     String(d?.clusterMode || '').toLowerCase() === 'thematic'));
+  }
+
+  // Clear hover/selection state tied to old clusters
+  clusterHoverId = -1;
+  clusterSelectId = -1;
 }
 
 async function __buildThematicGraphIfNeeded({ forcePrompt = false } = {}) {
-  if (!nodes?.length) return;
+  if (!nodes?.length) return false;
 
   const tc = __viewCache.thematic;
 
+  // If we are prompting again, clear all live thematic cluster/link state first
+  // so no old labels or links can survive visually.
+  if (forcePrompt) {
+    __clearCurrentThematicClusterState({ clearEdges: true });
+    tc.builtKey = null;
+    tc.edges = null;
+    tc.clusterOf = null;
+    tc.clusterSizesTotal = null;
+    tc.clusterColors = null;
+    tc.clusterLabels = null;
+    tc.clusterNames = null;
+  }
+
   if (!tc.settings || forcePrompt) {
     const chosen = await __thematicSettingsPrompt(tc.settings || null);
-    if (!chosen) return false; // cancelled
+    if (!chosen) return false;
     tc.settings = chosen;
   }
 
   const key = __makeThematicBuildKey(tc.settings);
   const already = (tc.builtKey === key) && Array.isArray(tc.edges) && tc.edges.length;
 
-  if (already) return;
+  if (already) return true;
 
-  msg = 'Building thematic links (topics-as-citations)…'; updateInfo?.(); redraw?.();
+  // Hard clear again immediately before rebuilding to guarantee a clean overwrite
+  __clearCurrentThematicClusterState({ clearEdges: true });
 
-const built = buildThematicEdgesFromTopics?.({
-  topicThreshold: tc.settings.topicThreshold,
-  topKPerNode: tc.settings.topKPerNode,
-  maxTopicDfFrac: tc.settings.maxTopicDfFrac,
+  msg = 'Building thematic links (topics-as-citations)…';
+  updateInfo?.();
+  redraw?.();
 
-  includeAuthors: !!tc.settings.includeAuthors,
-  allowAuthorOnlyLinks: !!tc.settings.allowAuthorOnlyLinks,
-  authorThreshold: tc.settings.authorThreshold || 1,
+  const built = buildThematicEdgesFromTopics?.({
+    topicThreshold: tc.settings.topicThreshold,
+    topKPerNode: tc.settings.topKPerNode,
+    maxTopicDfFrac: tc.settings.maxTopicDfFrac,
 
-  authorEdgeWeight: 3,
-  maxAuthorDfFrac: 0.03,
-  useVisibleMask: true,
-}) || { edges: [] };
+    includeAuthors: !!tc.settings.includeAuthors,
+    allowAuthorOnlyLinks: !!tc.settings.allowAuthorOnlyLinks,
+    authorThreshold: tc.settings.authorThreshold || 1,
 
-  // Apply into globals so cluster computation reads the right graph
-  edges = built.edges || [];
+    authorEdgeWeight: 3,
+    maxAuthorDfFrac: 0.03,
+    useVisibleMask: true,
+  }) || { edges: [] };
+
+  edges = Array.isArray(built.edges) ? built.edges : [];
   buildAdjacency?.(nodes.length, edges);
 
-  // Cluster on thematic edges (re-using your existing cluster function)
   computeDomainClusters?.(60);
+  if (!Array.isArray(clusterOf) || clusterOf.length !== nodes.length) {
+  clusterOf = new Array(nodes.length).fill(-1);
+}
 
-  // Ensure a stable palette
   const k = (Array.isArray(clusterSizesTotal) && clusterSizesTotal.length) ? clusterSizesTotal.length : 0;
   if ((!Array.isArray(clusterColors) || !clusterColors.length) && typeof defaultClusterPalette === 'function') {
     clusterColors = defaultClusterPalette(Math.max(1, k)) || clusterColors;
   }
 
-  // Thematic cluster names derived from abstracts (local)
+  // Force labels to be rebuilt only from the NEW clusters
+  clusterLabels = new Array(k).fill('');
   __ensureClusterLabelsForCurrentClusters();
+
   const namesObj = Object.create(null);
   if (Array.isArray(clusterLabels)) {
     for (let i = 0; i < clusterLabels.length; i++) namesObj[i] = clusterLabels[i];
@@ -14962,7 +15537,6 @@ const built = buildThematicEdgesFromTopics?.({
   thematicState = thematicState || {};
   thematicState.clusterNames = namesObj;
 
-  // Snapshot into cache
   tc.builtKey = key;
   tc.edges = __cloneEdges(edges);
   tc.clusterOf = Array.isArray(clusterOf) ? clusterOf.slice() : null;
@@ -14975,8 +15549,7 @@ const built = buildThematicEdgesFromTopics?.({
   msg = `Thematic manifold: ${nodes.length} docs, ${edges.length} thematic links.`;
   updateInfo?.();
   redraw?.();
-
-    return true;
+  return true;
 }
 
 // Public entry points used by the View/Layout menu
@@ -15022,8 +15595,8 @@ const choice = window.prompt(
   // Full reset: drop cached thematic graph, labels, settings, and positions
   if (forceReset) {
     __resetThematicViewCache({ clearSettings: true, clearPositions: true });
+    __clearCurrentThematicClusterState({ clearEdges: true });
 
-    // If citation positions exist, use those as the fresh starting positions
     if (__viewCache?.citation?.pos?.length === nodes.length) {
       for (let i = 0; i < nodes.length; i++) {
         if (__viewCache.citation.pos[i]) {
@@ -15095,6 +15668,10 @@ function __ensureCitationCacheInitialised() {
   edges = __cloneEdges(citationEdges) || [];
   buildAdjacency?.(nodes.length, edges);
   computeDomainClusters?.(60);
+    computeDomainClusters?.(60);
+if (!Array.isArray(clusterOf) || clusterOf.length !== nodes.length) {
+  clusterOf = new Array(nodes.length).fill(-1);
+}
   __ensureClusterLabelsForCurrentClusters();
 
   cc.clusterOf = Array.isArray(clusterOf) ? clusterOf.slice() : null;
@@ -19364,6 +19941,10 @@ function buildViewerDetailsObject(i) {
     ? it.invisibleUniTopics.map(s => String(s || '').trim()).filter(Boolean)
     : [];
 
+     const ukriGrants =
+    (Array.isArray(it?.ukri_grants) ? it.ukri_grants : null) ||
+    (Array.isArray(it?.['UKRI Grants']) ? it['UKRI Grants'] : []); 
+
   return {
     id,
     title: w.display_name || w.title || (it.label || nodes?.[i]?.label || id),
@@ -19383,7 +19964,8 @@ function buildViewerDetailsObject(i) {
     },
     references: refs,
     networkCitations: (degree?.[i] ?? 0)|0,
-    seed: !!it.isSeed
+    seed: !!it.isSeed,
+    ukri_grants: ukriGrants
   };
 }
 
