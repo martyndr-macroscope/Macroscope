@@ -721,7 +721,7 @@ async function fetchFulltextResponse(fullUrl, timeoutMs = 25000) {
 
 const GTR_JSON_ACCEPT = 'application/vnd.rcuk.gtr.json-v7, application/json;q=0.9';
 const GTR_SEARCH_BASE = 'https://gtr.ukri.org/api/search';
-const GTR_API_BASE    = 'https://gtr.ukri.org/gtr/api';
+const GTR_API_BASE    = 'https://gtr.ukri.org/api';
 
 // Be polite to GtR – avoid hammering the service.
 const UKRI_GRANTS_DELAY_MS = 180;
@@ -739,10 +739,13 @@ function normaliseGtrUrl(url) {
   u = u.replace(/^https:\/\/gtruat\.ukri\.org/i, 'https://gtr.ukri.org');
   u = u.replace(/^https:\/\/gtr\.rcuk\.ac\.uk/i, 'https://gtr.ukri.org');
 
-  // Search docs use /api/search/* ; API2 resource docs use /gtr/api/*
-  // For resource URLs, normalise onto /gtr/api/*
-  u = u.replace(/^https:\/\/gtr\.ukri\.org\/api\/(projects|funds|organisations|persons|outcomes)\b/i,
-                'https://gtr.ukri.org/gtr/api/$1');
+  // Current API endpoints are under /api/...
+  // Rewrite old-style /gtr/api/... URLs forward to /api/...
+  u = u.replace(/^https:\/\/gtr\.ukri\.org\/gtr\/api\//i, 'https://gtr.ukri.org/api/');
+
+  // Normalise common singular/plural resource paths
+  u = u.replace(/^https:\/\/gtr\.ukri\.org\/api\/organisations\b/i, 'https://gtr.ukri.org/api/organisation');
+  u = u.replace(/^https:\/\/gtr\.ukri\.org\/api\/persons\b/i, 'https://gtr.ukri.org/api/person');
 
   return u;
 }
@@ -751,26 +754,35 @@ async function fetchGtrJson(url, timeoutMs = 25000) {
   const fullUrl = normaliseGtrUrl(url);
   if (!fullUrl) throw new Error('Empty GtR URL');
 
-  const attempts = FETCH_PROXY ? [viaProxy(fullUrl), fullUrl] : [fullUrl];
+  // GtR is not CORS-open for direct browser calls from semanticspace.ai,
+  // so prefer proxy-only in production. Direct is OK for localhost debugging.
+  const attempts = (FETCH_PROXY && !IS_LOCAL)
+    ? [viaProxy(fullUrl)]
+    : (FETCH_PROXY ? [viaProxy(fullUrl), fullUrl] : [fullUrl]);
+
   let lastErr = null;
 
   for (const u of attempts) {
     try {
-      const r = await fetchWithTimeout(u, {
-        headers: { accept: GTR_JSON_ACCEPT },
-        mode: 'cors',
-        redirect: 'follow'
-      }, timeoutMs);
+      const r = await fetchWithTimeout(
+        u,
+        {
+          headers: { accept: GTR_JSON_ACCEPT },
+          mode: 'cors',
+          redirect: 'follow'
+        },
+        timeoutMs
+      );
 
       if (!r.ok) {
-        lastErr = new Error(`GtR HTTP ${r.status}`);
+        lastErr = new Error(`GtR HTTP ${r.status} for ${fullUrl}`);
         continue;
       }
 
       const text = await r.text();
       try {
         return JSON.parse(text);
-      } catch (e) {
+      } catch {
         lastErr = new Error(`GtR returned non-JSON for ${fullUrl}`);
       }
     } catch (e) {
@@ -846,13 +858,13 @@ function deepCollectStrings(obj, predicate, out = []) {
 
 function extractGtrResourceUrls(obj, kind) {
   const rx = kind === 'publication'
-    ? /\/(?:gtr\/)?api\/outcomes\/publications\/[A-Z0-9-]+/i
+    ? /\/api\/publication\/[A-Z0-9-]+/i
     : kind === 'project'
-      ? /\/(?:gtr\/)?api\/projects\/[A-Z0-9-]+/i
+      ? /\/api\/projects?\/[A-Z0-9-]+/i
       : kind === 'fund'
-        ? /\/(?:gtr\/)?api\/funds\/[A-Z0-9-]+/i
+        ? /\/api\/funds?\/[A-Z0-9-]+/i
         : kind === 'organisation'
-          ? /\/(?:gtr\/)?api\/organisations\/[A-Z0-9-]+/i
+          ? /\/api\/organisation\/[A-Z0-9-]+/i
           : /.^/;
 
   return uniqueBy(
@@ -970,18 +982,30 @@ async function searchGtrPublicationCandidatesForItem(item) {
   const pubUrls = [];
 
   for (const q of queries) {
-    const url = `${GTR_SEARCH_BASE}/publication?term=${encodeURIComponent(q)}&page=1&fetchSize=10`;
+    const url = `${GTR_SEARCH_BASE}/publication?term=${encodeURIComponent(q)}&page=1&fetchSize=25`;
+
     try {
       const res = await fetchGtrJson(url, 25000);
+
+      // Primary path: extract API publication URLs from the JSON payload
       const urls = extractGtrResourceUrls(res, 'publication');
       for (const u of urls) pubUrls.push(u);
+
+      // Secondary path: some search payloads expose publication.resourceUrl portal links;
+      // collect those too so we can at least identify candidate hits if needed later.
+      const portalUrls = deepCollectStrings(
+        res,
+        s => /https:\/\/gtr\.ukri\.org\/publication\/overview\?/i.test(String(s || ''))
+      );
+      for (const u of portalUrls) pubUrls.push(u);
+
       await delay(UKRI_GRANTS_DELAY_MS);
     } catch (e) {
       console.warn('GtR publication search failed for query:', q, e);
     }
   }
 
-  return uniqueBy(pubUrls, s => s).slice(0, UKRI_GRANTS_MAX_CANDIDATES);
+  return uniqueBy(pubUrls.map(normaliseGtrUrl), s => s).slice(0, UKRI_GRANTS_MAX_CANDIDATES);
 }
 
 async function resolveAwardingBodyFromProject(projectObj) {
