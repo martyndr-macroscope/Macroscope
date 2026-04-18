@@ -11839,6 +11839,33 @@ const filt = {
     semanticZoomEnabled
   };
 
+    const fieldState = {
+    fieldOfCluster:
+      (typeof fieldOfCluster !== 'undefined' && Array.isArray(fieldOfCluster))
+        ? Array.from(fieldOfCluster)
+        : null,
+
+    fieldLabels:
+      (typeof fieldLabels !== 'undefined' && Array.isArray(fieldLabels))
+        ? deepCloneJsonSafe(fieldLabels, null)
+        : null,
+
+    fieldCount:
+      (typeof fieldCount !== 'undefined' && Number.isFinite(+fieldCount))
+        ? +fieldCount
+        : 0,
+
+    fieldLabelCenters:
+      (typeof fieldLabelCenters !== 'undefined' && fieldLabelCenters)
+        ? deepCloneJsonSafe(fieldLabelCenters, {})
+        : {},
+
+    fieldSelectId:
+      (typeof fieldSelectId !== 'undefined' && Number.isFinite(+fieldSelectId))
+        ? +fieldSelectId
+        : -1
+  };
+
     if (!checkpointMode) {
     // For a normal save, make best effort to rehydrate persisted texts
     // so the project JSON is self-contained again.
@@ -11909,9 +11936,10 @@ const filt = {
     overlays,
 
     // CRITICAL (your missing piece)
-    viewMode: window.viewMode || 'citation',
+       viewMode: window.viewMode || 'citation',
     viewCache: serializeViewCache(),
 
+    fieldState,
     persistentFieldState: deepCloneJsonSafe(persistentFieldState, null),
     aiFieldsState: deepCloneJsonSafe(aiFieldsState, null),
     conceptState: deepCloneJsonSafe(conceptMapState, null)
