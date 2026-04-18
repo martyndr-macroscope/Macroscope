@@ -1371,6 +1371,18 @@ let layoutBtn; // (optional) UI button
 // ---- Camera / interactions ----
 let cam = { x: 0, y: 0, scale: 1 };
 let zoomLevel = 0; 
+let domainHeatMapsBuiltForKey = null;
+
+const HEATMAP_PHYSICS = {
+  clusterK: 0.030,         // pull nodes toward cluster centroid
+  domainK: 0.010,          // pull clusters toward domain centroid
+  refCoreK: 0.020,         // stronger inward pull for high REF items
+  refRadiusBase: 155,      // default desired radius from cluster centre
+  refRadiusSpan: 110,      // how much the radius shrinks as REF rises
+  domainRestLength: 220,   // preferred spacing between clusters in same domain
+  intraClusterRestMin: 26,
+  intraClusterRestMax: 120
+};
 
 // --- Semantic zoom for labels ----------------------------------------------
 // When true:
@@ -4436,22 +4448,19 @@ function ensureVelArrays() {
 function forceTick() {
   if (!layoutRunning) return;
 
-  // Keep the physics "world" in sync with what you see
   adjustWorldToContent(80);
-
-  // Cooling schedule (alpha ∈ [alphaMin..1]) scales all forces
   layoutAlpha = Math.max(alphaMin, layoutAlpha * alphaDecay);
 
-  // Precompute center target
   const cxMid = layoutCenter ? layoutCenter.cx : (world.w * 0.5);
   const cyMid = layoutCenter ? layoutCenter.cy : (world.h * 0.5);
 
-  // --- cluster centroids (for cohesion) ---
+  // --- cluster centroids ---
   let centX = null, centY = null, centN = null;
   if (Number.isInteger(clusterCount) && clusterCount > 0 && Array.isArray(clusterOf) && clusterOf.length === nodes.length) {
     centX = new Array(clusterCount).fill(0);
     centY = new Array(clusterCount).fill(0);
     centN = new Array(clusterCount).fill(0);
+
     for (let i = 0; i < nodes.length; i++) {
       const cid = clusterOf[i];
       if (cid != null && cid >= 0 && cid < clusterCount) {
@@ -4461,144 +4470,204 @@ function forceTick() {
       }
     }
     for (let c = 0; c < clusterCount; c++) {
-      if (centN[c] > 0) { centX[c] /= centN[c]; centY[c] /= centN[c]; }
-      else { centX[c] = cxMid; centY[c] = cyMid; }
+      if (centN[c] > 0) {
+        centX[c] /= centN[c];
+        centY[c] /= centN[c];
+      } else {
+        centX[c] = cxMid;
+        centY[c] = cyMid;
+      }
     }
   }
 
+  // --- domain centroids (centroids of clusters) ---
+  let domX = null, domY = null, domN = null;
+  if (viewMode === 'heatmap' &&
+      Number.isInteger(fieldCount) &&
+      fieldCount > 0 &&
+      Array.isArray(fieldOfCluster) &&
+      Array.isArray(centX) &&
+      Array.isArray(centY)) {
 
+    domX = new Array(fieldCount).fill(0);
+    domY = new Array(fieldCount).fill(0);
+    domN = new Array(fieldCount).fill(0);
 
-  // Build/update your broad-phase grid from current positions
+    for (let cid = 0; cid < clusterCount; cid++) {
+      const fid = fieldOfCluster[cid];
+      if (fid != null && fid >= 0 && fid < fieldCount && Number.isFinite(centX[cid]) && Number.isFinite(centY[cid])) {
+        domX[fid] += centX[cid];
+        domY[fid] += centY[cid];
+        domN[fid] += 1;
+      }
+    }
+
+    for (let f = 0; f < fieldCount; f++) {
+      if (domN[f] > 0) {
+        domX[f] /= domN[f];
+        domY[f] /= domN[f];
+      } else {
+        domX[f] = cxMid;
+        domY[f] = cyMid;
+      }
+    }
+  }
+
   buildSpatialGrid(physics.cellSize);
 
-  const dt = physics.timeStep;
+  const dt   = physics.timeStep;
   const damp = physics.damping;
   const maxV = physics.maxSpeed;
   const fcap = physics.forceCap;
 
-  // Optional: compute link list once outside loop if you don't already
-  // Assume we have arrays: nodes[], links[] with {source, target, w?}
-  // Also assume vx[], vy[] parallel to nodes[] exist.
+  // --- edge springs ---
+  forEachEdge((ai, bi, L) => {
+    const a = nodes[ai], b = nodes[bi];
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const d  = Math.hypot(dx, dy) || 1e-6;
 
-  // SPRING FORCES (edge springs)
-forEachEdge((ai, bi, L) => {
-  const a = nodes[ai], b = nodes[bi];
-  const dx = b.x - a.x, dy = b.y - a.y;
-  const d  = Math.hypot(dx, dy) || 1e-6;
-  const sameCluster =
-    Array.isArray(clusterOf) &&
-    clusterOf.length === nodes.length &&
-    clusterOf[ai] != null &&
-    clusterOf[ai] === clusterOf[bi];
+    const sameCluster =
+      Array.isArray(clusterOf) &&
+      clusterOf.length === nodes.length &&
+      clusterOf[ai] != null &&
+      clusterOf[ai] === clusterOf[bi];
 
-  const edgeWeight = Math.max(1, Number(L?.weight || 1));
+    const edgeWeight = Math.max(1, Number(L?.weight || 1));
 
-  const conceptBoost =
-    (viewMode === 'concept')
-      ? Math.min(4.0, 1 + (edgeWeight - 1) * 0.45)
-      : 1.0;
+    const conceptBoost =
+      (viewMode === 'concept')
+        ? Math.min(4.0, 1 + (edgeWeight - 1) * 0.45)
+        : 1.0;
 
-  const k = physics.spring *
-            (sameCluster ? physics.clusterSpringBoost : physics.crossSpringFactor) *
-            conceptBoost *
-            layoutAlpha;
+    const k = physics.spring *
+              (sameCluster ? physics.clusterSpringBoost : physics.crossSpringFactor) *
+              conceptBoost *
+              layoutAlpha;
 
-  const rl =
-    (viewMode === 'concept')
-      ? Math.max(38, physics.restLength - (edgeWeight - 1) * 10)
-      : physics.restLength;
+    let rl = physics.restLength;
 
+    if (viewMode === 'concept') {
+      rl = Math.max(38, physics.restLength - (edgeWeight - 1) * 10);
+    } else if (viewMode === 'heatmap' && sameCluster) {
+      const ha = getNodeRefHeatValue(ai);
+      const hb = getNodeRefHeatValue(bi);
+      const meanHeat = (ha + hb) * 0.5;
+      rl = Math.max(
+        HEATMAP_PHYSICS.intraClusterRestMin,
+        HEATMAP_PHYSICS.intraClusterRestMax - meanHeat * 70
+      );
+    }
 
-  const f  = k * (d - rl);
-  const fx = (f * dx / d);
-  const fy = (f * dy / d);
+    const f  = k * (d - rl);
+    const fx = (f * dx / d);
+    const fy = (f * dy / d);
 
-  vx[ai] +=  fx * physics.timeStep;
-  vy[ai] +=  fy * physics.timeStep;
-  vx[bi] -=  fx * physics.timeStep;
-  vy[bi] -=  fy * physics.timeStep;
-});
+    vx[ai] +=  fx * dt;
+    vy[ai] +=  fy * dt;
+    vx[bi] -=  fx * dt;
+    vy[bi] -=  fy * dt;
+  });
 
-  // REPULSION (node–node) via spatial grid neighbours
+  // --- repulsion ---
   for (let i = 0; i < nodes.length; i++) {
     const a = nodes[i];
-    // Iterate only near neighbours (implement getNearbyIndices your way)
     const neigh = getNearbyIndices(a.x, a.y, physics.repelRadius, physics.cellSize);
+
     let fx = 0, fy = 0;
-    if (centX && centY) {
-      const cid = clusterOf[i];
-      if (cid != null && cid >= 0 && cid < clusterCount && centN[cid] > 0) {
-        fx += (centX[cid] - a.x) * physics.clusterCohesion * layoutAlpha;
-        fy += (centY[cid] - a.y) * physics.clusterCohesion * layoutAlpha;
-      }
-    }
-    for (let j = 0; j < neigh.length; j++) {
-      const k = neigh[j];
-      if (k === i) continue;
-      const b = nodes[k];
-      let dx = a.x - b.x, dy = a.y - b.y;
+
+    for (let k = 0; k < neigh.length; k++) {
+      const j = neigh[k] | 0;
+      if (j <= i) continue;
+
+      const b = nodes[j];
+      let dx = a.x - b.x;
+      let dy = a.y - b.y;
       let d2 = dx*dx + dy*dy;
-      if (d2 === 0) { dx = (Math.random()-0.5)*1e-3; dy = (Math.random()-0.5)*1e-3; d2 = dx*dx + dy*dy; }
+      if (d2 < 1e-6) {
+        dx = (Math.random() - 0.5) * 0.01;
+        dy = (Math.random() - 0.5) * 0.01;
+        d2 = dx*dx + dy*dy;
+      }
+
       const d = Math.sqrt(d2);
       if (d > physics.repelRadius) continue;
-      // Coulomb-like, softened at short distances
-      const s = physics.repulsion * layoutAlpha / (d2 + 25);
-      
-      
-      
-      fx += s * (dx / d);
-      fy += s * (dy / d);
+
+      const sameCluster =
+        Array.isArray(clusterOf) &&
+        clusterOf.length === nodes.length &&
+        clusterOf[i] >= 0 &&
+        clusterOf[i] === clusterOf[j];
+
+      const repelFactor = sameCluster ? physics.intraRepelFactor : 1.0;
+      const mag = repelFactor * physics.repulsion / d2 * layoutAlpha;
+
+      const rfx = mag * dx / d;
+      const rfy = mag * dy / d;
+
+      vx[i] += rfx * dt;
+      vy[i] += rfy * dt;
+      vx[j] -= rfx * dt;
+      vy[j] -= rfy * dt;
     }
-    // Gravity toward captured centre (very gentle)
-    fx += (cxMid - a.x) * physics.gravity * layoutAlpha;
-    fy += (cyMid - a.y) * physics.gravity * layoutAlpha;
-
-    // Cap force to avoid spikes
-    if (fx >  fcap) fx =  fcap; else if (fx < -fcap) fx = -fcap;
-    if (fy >  fcap) fy =  fcap; else if (fy < -fcap) fy = -fcap;
-
-    vx[i] += fx * dt;
-    vy[i] += fy * dt;
   }
 
-  // Integrate velocities → positions with damping and caps
-  let sumVx = 0, sumVy = 0;
+  // --- gravity + cluster/domain heatmap pulls ---
   for (let i = 0; i < nodes.length; i++) {
-    // Damping
-    vx[i] *= damp;
-    vy[i] *= damp;
-
-    // Clamp speeds (per axis; simple and effective)
-    if (vx[i] >  maxV) vx[i] =  maxV; else if (vx[i] < -maxV) vx[i] = -maxV;
-    if (vy[i] >  maxV) vy[i] =  maxV; else if (vy[i] < -maxV) vy[i] = -maxV;
-
-    // Integrate
     const n = nodes[i];
+    let fx = 0, fy = 0;
+
+    // global weak gravity
+    fx += (cxMid - n.x) * physics.gravity * layoutAlpha;
+    fy += (cyMid - n.y) * physics.gravity * layoutAlpha;
+
+    const cid = Array.isArray(clusterOf) ? clusterOf[i] : -1;
+
+    // cluster-centre cohesion
+    if (cid >= 0 && centX && centY) {
+      const dxC = centX[cid] - n.x;
+      const dyC = centY[cid] - n.y;
+      fx += dxC * physics.clusterCohesion * layoutAlpha;
+      fy += dyC * physics.clusterCohesion * layoutAlpha;
+    }
+
+    if (viewMode === 'heatmap' && cid >= 0 && centX && centY) {
+      const heat = getNodeRefHeatValue(i);
+
+      // higher REF → smaller desired radius from cluster centre
+      const desiredR = Math.max(
+        18,
+        HEATMAP_PHYSICS.refRadiusBase - heat * HEATMAP_PHYSICS.refRadiusSpan
+      );
+
+      const dx = n.x - centX[cid];
+      const dy = n.y - centY[cid];
+      const d  = Math.hypot(dx, dy) || 1e-6;
+
+      const delta = d - desiredR;
+      fx += (-dx / d) * delta * HEATMAP_PHYSICS.refCoreK * layoutAlpha;
+      fy += (-dy / d) * delta * HEATMAP_PHYSICS.refCoreK * layoutAlpha;
+
+      const fid = Array.isArray(fieldOfCluster) ? fieldOfCluster[cid] : -1;
+      if (fid >= 0 && domX && domY) {
+        const dxD = domX[fid] - centX[cid];
+        const dyD = domY[fid] - centY[cid];
+        fx += dxD * HEATMAP_PHYSICS.domainK * layoutAlpha;
+        fy += dyD * HEATMAP_PHYSICS.domainK * layoutAlpha;
+      }
+    }
+
+    fx = Math.max(-fcap, Math.min(fcap, fx));
+    fy = Math.max(-fcap, Math.min(fcap, fy));
+
+    vx[i] = (vx[i] + fx * dt) * damp;
+    vy[i] = (vy[i] + fy * dt) * damp;
+
+    vx[i] = Math.max(-maxV, Math.min(maxV, vx[i]));
+    vy[i] = Math.max(-maxV, Math.min(maxV, vy[i]));
+
     n.x += vx[i] * dt;
     n.y += vy[i] * dt;
-
-    // NaN guard
-    if (!Number.isFinite(n.x) || !Number.isFinite(n.y)) {
-      n.x = 0; n.y = 0; vx[i] = 0; vy[i] = 0;
-    }
-
-    sumVx += vx[i];
-    sumVy += vy[i];
   }
-
-  // Zero net drift every few ticks to keep the cloud from "walking"
-  layoutTickCount++;
-  if (layoutTickCount % 10 === 0) {
-    const avgVx = sumVx / nodes.length;
-    const avgVy = sumVy / nodes.length;
-    for (let i = 0; i < nodes.length; i++) {
-      vx[i] -= avgVx;
-      vy[i] -= avgVy;
-    }
-  }
-
-  // Optional auto-stop when settled (very low kinetic energy)
-  // If you want: measure KE and pause when below threshold for N frames.
 }
 
 
@@ -14877,7 +14946,7 @@ const __viewCache = (window.__viewCache ||= {
     clusterLabels: null,
     clusterNames: null,
     lensesShowEdges: null,
-    settings: null,   // {topicThreshold, topKPerNode, maxTopicDfFrac}
+    settings: null,
     builtKey: null
   },
   concept: {
@@ -14890,6 +14959,20 @@ const __viewCache = (window.__viewCache ||= {
     lensesShowEdges: null,
     builtKey: null,
     level: 1
+  },
+  heatmap: {
+    pos: null,
+    edges: null,
+    clusterOf: null,
+    clusterSizesTotal: null,
+    clusterColors: null,
+    clusterLabels: null,
+    fieldOfCluster: null,
+    fieldLabels: null,
+    fieldMembers: null,
+    fieldSizesTotal: null,
+    lensesShowEdges: null,
+    builtKey: null
   }
 });
 
@@ -15056,6 +15139,97 @@ function randomiseConceptClusterPositions() {
   adjustWorldToContent?.(160);
 }
 
+function getNodeRefHeatValue(i) {
+  const it = itemsData?.[i] || {};
+  const sortVal = Number(it.ref_score_sort_value);
+
+  if (Number.isFinite(sortVal)) {
+    // REF sort values typically live roughly on the 1..4+ scale.
+    return Math.max(0, Math.min(1, (sortVal - 1) / 3));
+  }
+
+  const star = Number(it.overall_star ?? it.ref_star);
+  if (Number.isFinite(star)) {
+    return Math.max(0, Math.min(1, (star - 1) / 3));
+  }
+
+  const pct = Number(it.ref_percent);
+  if (Number.isFinite(pct)) {
+    return Math.max(0, Math.min(1, pct / 100));
+  }
+
+  return 0;
+}
+
+function randomiseDomainHeatMapPositions() {
+  const n = nodes.length | 0;
+  if (!n) return;
+
+  setWorldSizeForN?.(n);
+
+  const cols = Math.ceil(Math.sqrt(n));
+  const rows = Math.ceil(n / cols);
+  const gapX = Math.max(120, Math.floor(world.w / (cols + 1)));
+  const gapY = Math.max(120, Math.floor(world.h / (rows + 1)));
+  const jitter = 60;
+
+  for (let i = 0; i < n; i++) {
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    nodes[i].x = (col + 1) * gapX + (Math.random() * 2 - 1) * jitter;
+    nodes[i].y = (row + 1) * gapY + (Math.random() * 2 - 1) * jitter;
+  }
+
+  adjustWorldToContent?.(180);
+}
+
+function buildDomainHeatMapIfNeeded() {
+  if (!nodes?.length) return;
+
+  const datasetKey = [
+    nodes.length,
+    Array.isArray(clusterOf) ? clusterOf.length : 0,
+    Array.isArray(fieldOfCluster) ? fieldOfCluster.length : 0,
+    Array.isArray(edges) ? edges.length : 0
+  ].join('|');
+
+  const hc = __viewCache.heatmap;
+  if (hc?.builtKey === datasetKey &&
+      Array.isArray(hc.clusterOf) &&
+      hc.clusterOf.length === nodes.length) {
+    return;
+  }
+
+  // Prefer current cluster/domain assignments if present.
+  // If clusters are missing, fall back to citation-domain clusters.
+  if (!Array.isArray(clusterOf) || clusterOf.length !== nodes.length) {
+    computeDomainClusters?.(60);
+  }
+  if (!Array.isArray(clusterOf) || clusterOf.length !== nodes.length) {
+    clusterOf = new Array(nodes.length).fill(-1);
+  }
+
+  if (!Array.isArray(clusterLabels)) clusterLabels = [];
+  if (!Array.isArray(clusterSizesTotal)) clusterSizesTotal = [];
+  if (!Array.isArray(clusterColors)) clusterColors = [];
+  clusterCount = Array.isArray(clusterSizesTotal) ? clusterSizesTotal.length : 0;
+
+  hc.builtKey = datasetKey;
+  hc.edges = __cloneEdges(edges);
+  hc.clusterOf = Array.isArray(clusterOf) ? clusterOf.slice() : null;
+  hc.clusterSizesTotal = Array.isArray(clusterSizesTotal) ? clusterSizesTotal.slice() : null;
+  hc.clusterColors = Array.isArray(clusterColors) ? clusterColors.slice() : null;
+  hc.clusterLabels = Array.isArray(clusterLabels) ? clusterLabels.slice() : null;
+
+  hc.fieldOfCluster = Array.isArray(fieldOfCluster) ? fieldOfCluster.slice() : null;
+  hc.fieldLabels = Array.isArray(fieldLabels) ? fieldLabels.slice() : null;
+  hc.fieldMembers = Array.isArray(fieldMembers) ? deepCloneJsonSafe(fieldMembers, []) : [];
+  hc.fieldSizesTotal = Array.isArray(fieldSizesTotal) ? fieldSizesTotal.slice() : null;
+  hc.lensesShowEdges = (typeof lenses === 'object' && lenses) ? !!lenses.showEdges : null;
+}
+
+
+
 function buildConceptClusterGraphForLevel(level = 1) {
   const n = nodes.length | 0;
   const inv = rebuildConceptClusterInventory();
@@ -15166,6 +15340,43 @@ function __buildConceptGraphIfNeeded(level = conceptClusterLevel) {
   cc.clusterLabels = clusterLabels.slice();
   cc.clusterColors = clusterColors.slice();
   cc.lensesShowEdges = (typeof lenses === 'object' && lenses) ? !!lenses.showEdges : null;
+}
+
+function switchToDomainHeatMapMode() {
+  if (!nodes?.length) return;
+
+  __snapshotView(viewMode || 'citation');
+
+  buildDomainHeatMapIfNeeded();
+
+  setActiveViewMode('heatmap');
+
+  // First time in this mode: start from fresh random positions
+  if (!__viewCache.heatmap.pos || __viewCache.heatmap.pos.length !== nodes.length) {
+    randomiseDomainHeatMapPositions();
+    __viewCache.heatmap.pos = nodes.map(n => ({ x: n.x, y: n.y }));
+  }
+
+  __applyView('heatmap');
+
+  // make sure the correct cached cluster/domain structures are live
+  const hc = __viewCache.heatmap;
+  if (hc.clusterOf) clusterOf = hc.clusterOf.slice();
+  if (hc.clusterSizesTotal) clusterSizesTotal = hc.clusterSizesTotal.slice();
+  if (hc.clusterColors) clusterColors = hc.clusterColors.slice();
+  if (hc.clusterLabels) clusterLabels = hc.clusterLabels.slice();
+  if (hc.fieldOfCluster) fieldOfCluster = hc.fieldOfCluster.slice();
+  if (hc.fieldLabels) fieldLabels = hc.fieldLabels.slice();
+  if (hc.fieldMembers) fieldMembers = deepCloneJsonSafe(hc.fieldMembers, []);
+  if (hc.fieldSizesTotal) fieldSizesTotal = hc.fieldSizesTotal.slice();
+
+  clusterCount = Array.isArray(clusterSizesTotal) ? clusterSizesTotal.length : 0;
+  fieldCount = Array.isArray(fieldMembers) ? fieldMembers.length : 0;
+
+  // Start the physics fresh for this mode
+  layoutEverStarted = true;
+  layoutRunning = false;
+  toggleLayout?.();
 }
 
 function switchToConceptClusterMode() {
@@ -27615,6 +27826,9 @@ function attachViewMenuToLayoutIcon(btn) {
 
         addItem('Concept cluster view', () => {
       switchToConceptClusterMode?.();
+    });
+        addItem('Domain Heat Maps', () => {
+      switchToDomainHeatMapMode?.();
     });
 
     document.body.appendChild(viewMenu.elt);
