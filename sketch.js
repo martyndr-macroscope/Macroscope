@@ -20574,7 +20574,7 @@ function buildHeatmapSvg(data, width = 1600, height = 1000) {
   const sorted = rows.slice().sort((a, b) => {
     const ga = Number.isFinite(a?.gpa) ? a.gpa : -Infinity;
     const gb = Number.isFinite(b?.gpa) ? b.gpa : -Infinity;
-    return ga - gb;
+    return gb - ga;
   });
 
   sorted.forEach((row, idx) => {
@@ -20595,10 +20595,12 @@ function buildHeatmapSvg(data, width = 1600, height = 1000) {
     `);
 
     const c = mapPt(row.centroid);
+    const rank = idx + 1;
+
     labels.push(`
       <g transform="translate(${c.x.toFixed(1)},${c.y.toFixed(1)})">
-        <text text-anchor="middle" y="-4" font-size="18" font-weight="700" fill="#101828">${escapeHtml(row.label)}</text>
-        <text text-anchor="middle" y="18" font-size="13" fill="#344054">N=${row.size} · REF n=${row.ref_n} · GPA=${Number.isFinite(row.gpa) ? row.gpa.toFixed(2) : '—'}</text>
+        <circle r="9" fill="rgba(255,255,255,0.92)" stroke="#101828" stroke-width="1.2"></circle>
+        <text text-anchor="middle" dominant-baseline="central" font-size="10" font-weight="700" fill="#101828">${rank}</text>
       </g>
     `);
   });
@@ -20837,8 +20839,9 @@ function buildHeatmapHtml(data) {
   const rows = (data?.rows || []).slice()
     .sort((a, b) => (Number(b.gpa || -Infinity) - Number(a.gpa || -Infinity)));
 
-  const tableRows = rows.map(r => `
+  const tableRows = rows.map((r, i) => `
     <tr>
+      <td>${i + 1}</td>
       <td>${escapeHtml(r.label)}</td>
       <td>${r.size}</td>
       <td>${r.ref_n}</td>
@@ -20927,6 +20930,7 @@ function buildHeatmapHtml(data) {
       <table>
         <thead>
           <tr>
+            <th>#</th>
             <th>Cluster</th>
             <th>Size</th>
             <th>REF-reviewed docs</th>
