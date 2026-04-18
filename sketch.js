@@ -2872,6 +2872,37 @@ publishOverviewBtn.mousePressed(() => {
   });
 });
 
+const publishHeatmapBtn = createButton('Heatmap');
+publishHeatmapBtn.parent(publishMenu);
+publishHeatmapBtn.style('text-align', 'left');
+publishHeatmapBtn.style('padding', '8px 10px');
+publishHeatmapBtn.style('background', 'rgba(255,255,255,0.06)');
+publishHeatmapBtn.style('color', '#f1f1f1');
+publishHeatmapBtn.style('border', '1px solid rgba(255,255,255,0.08)');
+publishHeatmapBtn.style('border-radius', '8px');
+publishHeatmapBtn.style('cursor', 'pointer');
+captureUI?.(publishHeatmapBtn.elt);
+
+publishHeatmapBtn.mousePressed(() => {
+  closePublishMenu();
+  openHeatmapThresholdDialog({
+    initialValue: 10,
+    onSubmit: ({ minClusterSize }) => {
+      openPublishDialog({
+        mode: 'heatmap',
+        onSubmit: ({ name, title, text }) => {
+          exportHeatmapReportZip({
+            fileName: name,
+            userTitle: title,
+            userText: text,
+            minClusterSize
+          });
+        }
+      });
+    }
+  });
+});
+
 const publishCitationsBtn = createButton('Cluster Citations');
 publishCitationsBtn.parent(publishMenu);
 publishCitationsBtn.style('text-align', 'left');
@@ -20351,6 +20382,236 @@ function getPublishThresholdValue() {
   return null;
 }
 
+function heatmapClusterFillRgbFromGpa(gpa) {
+  if (!Number.isFinite(gpa)) return [180, 180, 180];
+  const rgb = refOverlayRGB(Math.max(1, Math.min(4, Number(gpa) || 1)));
+  return Array.isArray(rgb) ? rgb : [180, 180, 180];
+}
+
+function rgbToCss(rgb, alpha = 1) {
+  const r = Math.max(0, Math.min(255, Number(rgb?.[0] || 0) | 0));
+  const g = Math.max(0, Math.min(255, Number(rgb?.[1] || 0) | 0));
+  const b = Math.max(0, Math.min(255, Number(rgb?.[2] || 0) | 0));
+  return `rgba(${r},${g},${b},${Math.max(0, Math.min(1, Number(alpha) || 0))})`;
+}
+
+function getClusterNodeIds(cid) {
+  const ids = [];
+  for (let i = 0; i < (clusterOf?.length || 0); i++) {
+    if ((clusterOf[i] | 0) === cid) ids.push(i);
+  }
+  return ids;
+}
+
+function computeHeatmapReportData({
+  userTitle = 'Heatmap',
+  userText = '',
+  minClusterSize = 10
+} = {}) {
+  const rows = [];
+  const pts = [];
+
+  const nClusters = Array.isArray(clusterSizesTotal)
+    ? clusterSizesTotal.length
+    : (Array.isArray(clusterOf) && clusterOf.length ? (Math.max(...clusterOf) + 1) : 0);
+
+  for (let cid = 0; cid < nClusters; cid++) {
+    const nodeIds = getClusterNodeIds(cid);
+    if (nodeIds.length < minClusterSize) continue;
+
+    const ref = collectClusterRefSummary(nodeIds);
+    const gpa = (ref && ref.n > 0 && Number.isFinite(ref.gpa)) ? Number(ref.gpa) : null;
+
+    const screenPts = nodeIds.map(i => {
+      const n = nodes?.[i];
+      if (!n) return null;
+      return {
+        x: Number(n.x || 0),
+        y: Number(n.y || 0),
+        idx: i
+      };
+    }).filter(Boolean);
+
+    if (screenPts.length < 3) continue;
+
+    const cx = screenPts.reduce((a, p) => a + p.x, 0) / screenPts.length;
+    const cy = screenPts.reduce((a, p) => a + p.y, 0) / screenPts.length;
+
+    rows.push({
+      cid,
+      label: clusterLabels?.[cid] || `Cluster ${cid + 1}`,
+      size: nodeIds.length,
+      ref_n: Number(ref?.n || 0),
+      gpa,
+      color_rgb: heatmapClusterFillRgbFromGpa(gpa),
+      centroid: { x: cx, y: cy },
+      points: screenPts,
+      domain_id: Array.isArray(fieldOfCluster) ? (fieldOfCluster[cid] ?? -1) : -1,
+      domain_label: (Array.isArray(fieldLabels) && Array.isArray(fieldOfCluster) && fieldOfCluster[cid] >= 0)
+        ? (fieldLabels[fieldOfCluster[cid]] || '')
+        : ''
+    });
+
+    for (const p of screenPts) pts.push(p);
+  }
+
+  let minX = 0, minY = 0, maxX = 1000, maxY = 1000;
+  if (pts.length) {
+    minX = Math.min(...pts.map(p => p.x));
+    minY = Math.min(...pts.map(p => p.y));
+    maxX = Math.max(...pts.map(p => p.x));
+    maxY = Math.max(...pts.map(p => p.y));
+  }
+
+  return {
+    generatedAt: new Date().toISOString(),
+    title: userTitle,
+    introText: userText,
+    minClusterSize: Math.max(1, Number(minClusterSize || 10) | 0),
+    clusterCountShown: rows.length,
+    bounds: { minX, minY, maxX, maxY },
+    rows
+  };
+}
+
+function heatmapConvexHull(points) {
+  const pts = (points || [])
+    .map(p => ({ x: Number(p.x), y: Number(p.y) }))
+    .filter(p => Number.isFinite(p.x) && Number.isFinite(p.y));
+
+  if (pts.length <= 3) return pts;
+
+  pts.sort((a, b) => a.x === b.x ? a.y - b.y : a.x - b.x);
+
+  const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+
+  const lower = [];
+  for (const p of pts) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) {
+      lower.pop();
+    }
+    lower.push(p);
+  }
+
+  const upper = [];
+  for (let i = pts.length - 1; i >= 0; i--) {
+    const p = pts[i];
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) {
+      upper.pop();
+    }
+    upper.push(p);
+  }
+
+  upper.pop();
+  lower.pop();
+  return lower.concat(upper);
+}
+
+function heatmapExpandHull(points, pad = 26) {
+  const pts = Array.isArray(points) ? points : [];
+  if (!pts.length) return [];
+
+  const cx = pts.reduce((a, p) => a + p.x, 0) / pts.length;
+  const cy = pts.reduce((a, p) => a + p.y, 0) / pts.length;
+
+  return pts.map(p => {
+    const dx = p.x - cx;
+    const dy = p.y - cy;
+    const d = Math.hypot(dx, dy) || 1;
+    return {
+      x: p.x + (dx / d) * pad,
+      y: p.y + (dy / d) * pad
+    };
+  });
+}
+
+function heatmapSmoothClosedPath(points) {
+  const pts = Array.isArray(points) ? points : [];
+  if (pts.length < 3) return '';
+
+  if (pts.length === 3) {
+    return `M ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)} L ${pts[1].x.toFixed(1)} ${pts[1].y.toFixed(1)} L ${pts[2].x.toFixed(1)} ${pts[2].y.toFixed(1)} Z`;
+  }
+
+  let d = '';
+  for (let i = 0; i < pts.length; i++) {
+    const p0 = pts[(i - 1 + pts.length) % pts.length];
+    const p1 = pts[i];
+    const p2 = pts[(i + 1) % pts.length];
+    const p3 = pts[(i + 2) % pts.length];
+
+    const cp1x = p1.x + (p2.x - p0.x) / 6;
+    const cp1y = p1.y + (p2.y - p0.y) / 6;
+    const cp2x = p2.x - (p3.x - p1.x) / 6;
+    const cp2y = p2.y - (p3.y - p1.y) / 6;
+
+    if (i === 0) d += `M ${p1.x.toFixed(1)} ${p1.y.toFixed(1)} `;
+    d += `C ${cp1x.toFixed(1)} ${cp1y.toFixed(1)}, ${cp2x.toFixed(1)} ${cp2y.toFixed(1)}, ${p2.x.toFixed(1)} ${p2.y.toFixed(1)} `;
+  }
+
+  return d + 'Z';
+}
+
+function buildHeatmapSvg(data, width = 1600, height = 1000) {
+  const rows = Array.isArray(data?.rows) ? data.rows : [];
+  const b = data?.bounds || { minX:0, minY:0, maxX:1000, maxY:1000 };
+
+  const pad = 80;
+  const spanX = Math.max(1, (b.maxX - b.minX));
+  const spanY = Math.max(1, (b.maxY - b.minY));
+  const sx = (width - pad * 2) / spanX;
+  const sy = (height - pad * 2) / spanY;
+  const s = Math.min(sx, sy);
+
+  const mapPt = (p) => ({
+    x: pad + (p.x - b.minX) * s,
+    y: pad + (p.y - b.minY) * s
+  });
+
+  const zonePaths = [];
+  const labels = [];
+
+  const sorted = rows.slice().sort((a, b) => {
+    const ga = Number.isFinite(a?.gpa) ? a.gpa : -Infinity;
+    const gb = Number.isFinite(b?.gpa) ? b.gpa : -Infinity;
+    return ga - gb;
+  });
+
+  sorted.forEach((row, idx) => {
+    const hull = heatmapConvexHull(row.points.map(mapPt));
+    const expanded = heatmapExpandHull(hull, 34);
+    const pathD = heatmapSmoothClosedPath(expanded);
+    if (!pathD) return;
+
+    const fill = rgbToCss(row.color_rgb, 0.78);
+    const stroke = rgbToCss(row.color_rgb, 0.98);
+    zonePaths.push(`
+      <path d="${pathD}"
+            fill="${fill}"
+            stroke="${stroke}"
+            stroke-width="3"
+            stroke-linejoin="round"
+            stroke-linecap="round" />
+    `);
+
+    const c = mapPt(row.centroid);
+    labels.push(`
+      <g transform="translate(${c.x.toFixed(1)},${c.y.toFixed(1)})">
+        <text text-anchor="middle" y="-4" font-size="18" font-weight="700" fill="#101828">${escapeHtml(row.label)}</text>
+        <text text-anchor="middle" y="18" font-size="13" fill="#344054">N=${row.size} · REF n=${row.ref_n} · GPA=${Number.isFinite(row.gpa) ? row.gpa.toFixed(2) : '—'}</text>
+      </g>
+    `);
+  });
+
+  return `
+<svg viewBox="0 0 ${width} ${height}" width="100%" height="auto" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Cluster heatmap">
+  <rect x="0" y="0" width="${width}" height="${height}" fill="#ffffff"/>
+  <g>${zonePaths.join('')}</g>
+  <g>${labels.join('')}</g>
+</svg>`;
+}
+
+
 function computeOverviewReportData(opts = {}) {
   const total = nodes.length | 0;
 
@@ -20563,6 +20824,124 @@ function buildOverviewNarrative(data) {
     `Each publication has been fingerprinted using AI-based analysis, and research objects have been clustered by authorship and fingerprint sharing. The active clustering threshold in this export is ${thresholdTxt}.`,
     `Clusters are titled from publication abstracts and fingerprint signals. In total, this map contains ${fmtInt(data.clusterCountShown)} clusters above the current minimum cluster size threshold of ${fmtInt(data.minClusterSize)}.${data.domainCountShown ? ` ${fmtInt(data.domainCountShown)} higher-level domains are also available, defined as groups of clusters sharing broader contextual similarity.` : ''}`
   ].join(' ');
+}
+
+function buildHeatmapHtml(data) {
+  const reportTitle = data?.title || 'Heatmap';
+  const intro = data?.introText
+    ? `<div class="user-note">${escapeHtml(data.introText)}</div>`
+    : '';
+
+  const svg = buildHeatmapSvg(data, 1600, 1000);
+
+  const rows = (data?.rows || []).slice()
+    .sort((a, b) => (Number(b.gpa || -Infinity) - Number(a.gpa || -Infinity)));
+
+  const tableRows = rows.map(r => `
+    <tr>
+      <td>${escapeHtml(r.label)}</td>
+      <td>${r.size}</td>
+      <td>${r.ref_n}</td>
+      <td>${Number.isFinite(r.gpa) ? r.gpa.toFixed(2) : '—'}</td>
+      <td>${escapeHtml(r.domain_label || '—')}</td>
+    </tr>
+  `).join('');
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>${escapeHtml(reportTitle)}</title>
+<style>
+  :root{
+    --bg:#f4f6f8;
+    --panel:#ffffff;
+    --ink:#101828;
+    --muted:#667085;
+    --line:#d0d5dd;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--ink);
+    font:14px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  }
+  .wrap{max-width:1500px;margin:0 auto;padding:32px 24px 56px}
+  .hero,.panel{
+    background:var(--panel);
+    border:1px solid var(--line);
+    border-radius:18px;
+    box-shadow:0 10px 24px rgba(16,24,40,0.06);
+    margin-bottom:20px;
+  }
+  .hero{padding:24px}
+  h1{margin:0 0 8px;font-size:30px;line-height:1.15}
+  .meta{color:var(--muted);font-size:13px}
+  .user-note{
+    margin-top:14px;
+    padding:12px 14px;
+    background:#f8fafc;
+    border:1px solid var(--line);
+    border-radius:12px;
+    white-space:pre-wrap;
+  }
+  .panel{padding:18px}
+  .figure-frame{
+    background:#fff;
+    border:1px solid var(--line);
+    border-radius:16px;
+    padding:12px;
+  }
+  table{width:100%;border-collapse:collapse}
+  th,td{
+    padding:10px 12px;
+    border-bottom:1px solid var(--line);
+    text-align:left;
+    vertical-align:top;
+  }
+  th{font-size:12px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted)}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <h1>${escapeHtml(reportTitle)}</h1>
+      <div class="meta">
+        Generated ${escapeHtml(new Date(data.generatedAt || Date.now()).toLocaleString())} ·
+        Minimum cluster size threshold ${data.minClusterSize} ·
+        ${data.clusterCountShown} clusters shown
+      </div>
+      ${intro}
+    </section>
+
+    <section class="panel">
+      <div class="figure-frame">
+        ${svg}
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2 style="margin:0 0 12px;font-size:20px;">Cluster Summary</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Cluster</th>
+            <th>Size</th>
+            <th>REF-reviewed docs</th>
+            <th>REF GPA</th>
+            <th>Domain</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${tableRows}
+        </tbody>
+      </table>
+    </section>
+  </div>
+</body>
+</html>`;
 }
 
 function buildOverviewHtml(data, mapImgRelPath = 'assets/overview-map.png') {
@@ -22272,6 +22651,48 @@ async function exportOverviewReportZip(opts = {}) {
   showToast?.('Overview HTML report exported.');
 }
 
+async function exportHeatmapReportZip(opts = {}) {
+  projectMeta = {
+    title: (opts.userTitle || '').toString(),
+    text:  (opts.userText  || '').toString(),
+    created: new Date().toISOString()
+  };
+
+  if (typeof JSZip === 'undefined') {
+    showToast?.('JSZip not found');
+    return;
+  }
+
+  showLoading?.('Preparing heatmap report package…', 0.10);
+  const zip = new JSZip();
+
+  const base = `heatmap-report-${Date.now()}/`;
+
+  const reportData = computeHeatmapReportData({
+    userTitle: opts.userTitle || 'Heatmap',
+    userText: opts.userText || '',
+    minClusterSize: Math.max(1, Number(opts.minClusterSize || 10) | 0)
+  });
+
+  setLoadingProgress?.(0.60, 'Building heatmap HTML…');
+  const html = buildHeatmapHtml(reportData);
+
+  zip.file(base + 'heatmap.json', JSON.stringify(reportData, null, 2));
+  zip.file(base + 'heatmap.html', html);
+
+  setLoadingProgress?.(0.90, 'Compressing heatmap report…');
+  const blob = await zip.generateAsync({ type:'blob', compression:'DEFLATE' });
+
+  const fname = normaliseZipName(
+    opts.fileName,
+    `heatmap-report-${Date.now()}`
+  );
+
+  triggerBlobDownload(blob, fname);
+  hideLoading?.();
+  showToast?.('Heatmap HTML report exported.');
+}
+
 async function exportClusterImportanceZip(opts = {}) {
   projectMeta = {
     title: (opts.userTitle || '').toString(),
@@ -22671,6 +23092,68 @@ function normaliseZipName(name, fallbackBase) {
   return out;
 }
 
+function openHeatmapThresholdDialog({
+  initialValue = 10,
+  onSubmit = null
+} = {}) {
+  const bg = document.createElement('div');
+  Object.assign(bg.style, {
+    position: 'fixed',
+    inset: '0',
+    background: 'rgba(0,0,0,0.45)',
+    zIndex: '10110'
+  });
+  document.body.appendChild(bg);
+
+  const box = document.createElement('div');
+  Object.assign(box.style, {
+    position: 'fixed',
+    left: '50%',
+    top: '20%',
+    transform: 'translate(-50%, 0)',
+    width: 'min(420px, 92vw)',
+    background: '#111',
+    color: '#fff',
+    border: '1px solid rgba(255,255,255,0.2)',
+    borderRadius: '12px',
+    boxShadow: '0 12px 40px rgba(0,0,0,0.5)',
+    padding: '16px',
+    zIndex: '10120',
+    font: '13px/1.4 system-ui, -apple-system, Segoe UI, Roboto'
+  });
+
+  box.innerHTML = `
+    <div style="font-weight:700;font-size:15px;margin-bottom:10px;">Heatmap Cluster Threshold</div>
+    <div style="color:rgba(255,255,255,0.78);margin-bottom:10px;">
+      Enter the minimum cluster size to include in the heatmap export.
+    </div>
+    <label style="display:block;margin:8px 0 4px;">Minimum cluster size</label>
+    <input id="heatmap_cluster_min" type="number" min="1" step="1"
+      value="${Math.max(1, Number(initialValue || 10) | 0)}"
+      style="width:100%;padding:8px;border-radius:8px;border:1px solid rgba(255,255,255,0.25);background:#000;color:#fff" />
+    <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:14px;">
+      <button id="heatmap_cancel" style="padding:8px 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.18);background:#222;color:#fff;cursor:pointer;">Cancel</button>
+      <button id="heatmap_ok" style="padding:8px 12px;border-radius:8px;border:0;background:#fff;color:#000;font-weight:600;cursor:pointer;">Continue</button>
+    </div>
+  `;
+
+  document.body.appendChild(box);
+
+  const close = () => {
+    try { box.remove(); } catch {}
+    try { bg.remove(); } catch {}
+  };
+
+  box.querySelector('#heatmap_cancel')?.addEventListener('click', close);
+
+  box.querySelector('#heatmap_ok')?.addEventListener('click', () => {
+    const raw = Number(box.querySelector('#heatmap_cluster_min')?.value);
+    const minClusterSize = Math.max(1, Number.isFinite(raw) ? (raw | 0) : 10);
+    close();
+    if (typeof onSubmit === 'function') onSubmit({ minClusterSize });
+  });
+}
+
 function openPublishDialog({
   mode = 'viewer',   // 'viewer' | 'overview' | 'peaks'
   onSubmit = null
@@ -22684,7 +23167,8 @@ function openPublishDialog({
     citations:  `cluster-citations-${nowIso}.zip`,
     growth:     `cluster-growth-${nowIso}.zip`,
     importance: `cluster-importance-${nowIso}.zip`,
-    integrated: `integrated-northumbria-report-${nowIso}.zip`
+    integrated: `integrated-northumbria-report-${nowIso}.zip`,
+    heatmap:    `heatmap-report-${nowIso}.zip`
   };
 
   const titles = {
@@ -22694,7 +23178,8 @@ function openPublishDialog({
     citations: 'Export Cluster Citations',
     growth: 'Export Cluster Growth',
     importance: 'Export Cluster Importance',
-    integrated: 'Export Integrated Northumbria Report'
+    integrated: 'Export Integrated Northumbria Report',
+    heatmap: 'Export Heatmap'
   };
 
   const help = {
@@ -22704,7 +23189,8 @@ function openPublishDialog({
     citations: 'Cluster Citations = citations.html + citations.json',
     growth: 'Cluster Growth = growth.html + growth.json',
     importance: 'Cluster Importance = importance.html + importance.json',
-    integrated: 'Integrated Northumbria Report = integrated-report.html + integrated-report.json'
+    integrated: 'Integrated Northumbria Report = integrated-report.html + integrated-report.json',
+    heatmap: 'Heatmap report = heatmap.html + heatmap.json'
   };
 
   const bg = document.createElement('div');
