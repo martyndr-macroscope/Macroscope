@@ -394,7 +394,7 @@ let _splashEnabled = true;
 
 // ==== Node size UI ranges (tweak to taste) ====
 let NODE_SIZE_MIN = 2;      // min circle radius (px)
-let NODE_SIZE_MAX = 10;     // max circle radius (px)
+let NODE_SIZE_MAX = 20;     // max circle radius (px)
 
 let FULLTEXT_SIZE_MIN = 0.6;  // min multiplier for square nodes (× circle diameter)
 let FULLTEXT_SIZE_MAX = 2.4;  // max multiplier for square nodes
@@ -5386,7 +5386,7 @@ function mouseWheel(evt) {
   // Otherwise: zoom towards the cursor (your existing code)
   const delta = -evt.deltaY;
   const zoom = Math.exp(delta * 0.0012);
-const newScale = clamp(cam.scale * zoom, 0.1, 64);
+const newScale = clamp(cam.scale * zoom, 0.03125, 64);
 
   const wx = (mouseX - cam.x) / cam.scale;
   const wy = (mouseY - cam.y) / cam.scale;
