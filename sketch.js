@@ -12454,6 +12454,16 @@ async function restoreProjectState(save) {
   // 11) Restore per-view cache BEFORE applying the active view
   setLoadingProgress(0.97, 'Restoring mode caches…');
   restoreViewCache(save.viewCache);
+  // --- Restore semantic clustering payload (external pipeline) ---
+if (save.semantic_clustering && typeof save.semantic_clustering === 'object') {
+  window.semantic_clustering = save.semantic_clustering;
+  window.semanticClustering = save.semantic_clustering; // alias for safety
+
+  console.log(
+    'Semantic clustering payload restored:',
+    save.semantic_clustering?.pipeline_metadata || '(no metadata)'
+  );
+}
 
   if (typeof save.viewMode === 'string' && save.viewMode) {
     setActiveViewMode(save.viewMode);
@@ -15004,7 +15014,19 @@ const __viewCache = (window.__viewCache ||= {
     fieldSizesTotal: null,
     lensesShowEdges: null,
     builtKey: null
+  },
+  semantic: {
+    pos: null,
+    edges: null,
+    clusterOf: null,
+    clusterSizesTotal: null,
+    clusterColors: null,
+    clusterLabels: null,
+    lensesShowEdges: null,
+    builtKey: null
   }
+
+
 });
 
 function __cloneEdges(es) {
@@ -15066,6 +15088,171 @@ function __ensureClusterLabelsForCurrentClusters() {
   const k = (Array.isArray(clusterSizesTotal) ? clusterSizesTotal.length : 0) || (Math.max(-1, ...lab) + 1);
   clusterLabels = new Array(Math.max(0, k)).fill('').map((_, cid) => names[cid] || `Theme ${cid+1}`);
 }
+
+// ─────────────────────────────────────────────────────────────
+// Semantic Mapping view: uses server/local pipeline x/y + HDBSCAN clusters
+// ─────────────────────────────────────────────────────────────
+
+function getSemanticClusteringForItemIndex(i) {
+  const item = itemsData?.[i];
+  if (!item) return null;
+
+  if (item.semantic_clustering && Number.isFinite(Number(item.semantic_clustering.x)) && Number.isFinite(Number(item.semantic_clustering.y))) {
+    return item.semantic_clustering;
+  }
+
+  const root = window.semantic_clustering || window.semanticClustering || null;
+  const results = root?.results;
+  if (!Array.isArray(results)) return null;
+
+  const oaId = item?.openalex?.id || item?.openalex?.ids?.openalex || '';
+  const doiRaw = item?.openalex?.doi || item?.doi || item?.openalex?.ids?.doi || '';
+  const doi = String(doiRaw || '').replace(/^https?:\/\/(dx\.)?doi\.org\//i, '').toLowerCase();
+
+  return results.find(r => {
+    const rid = String(r.doc_id || '');
+    const rdoi = String(r.doi || '').replace(/^https?:\/\/(dx\.)?doi\.org\//i, '').toLowerCase();
+    return (oaId && rid === oaId) || (doi && rdoi === doi);
+  }) || null;
+}
+
+function buildSemanticMapIfNeeded() {
+  if (!nodes?.length || !Array.isArray(itemsData)) return false;
+
+  const scRoot = window.semantic_clustering || window.semanticClustering || null;
+  const metaKey = JSON.stringify({
+    n: nodes.length,
+    created: scRoot?.pipeline_metadata?.created_at || '',
+    model: scRoot?.pipeline_metadata?.parameters?.embedding_model || ''
+  });
+
+  const cache = __viewCache.semantic;
+  if (cache.builtKey === metaKey &&
+      Array.isArray(cache.pos) &&
+      cache.pos.length === nodes.length) {
+    return true;
+  }
+
+  const records = [];
+  for (let i = 0; i < nodes.length; i++) {
+    const sc = getSemanticClusteringForItemIndex(i);
+    if (!sc) continue;
+
+    const x = Number(sc.x);
+    const y = Number(sc.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+
+    records.push({
+      i,
+      x,
+      y,
+      clusterLabel: Number.isFinite(Number(sc.cluster_label)) ? Number(sc.cluster_label) : -1,
+      clusterId: String(sc.cluster_id || ''),
+      probability: Number(sc.cluster_probability || 0),
+      isOutlier: !!sc.is_outlier
+    });
+  }
+
+  if (!records.length) {
+    alert('No semantic mapping coordinates found in this project JSON.');
+    return false;
+  }
+
+  // Normalise pipeline coordinates into a readable Macroscope world-space footprint.
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const r of records) {
+    minX = Math.min(minX, r.x);
+    maxX = Math.max(maxX, r.x);
+    minY = Math.min(minY, r.y);
+    maxY = Math.max(maxY, r.y);
+  }
+
+  const spanX = Math.max(1e-9, maxX - minX);
+  const spanY = Math.max(1e-9, maxY - minY);
+  const target = Math.max(900, Math.sqrt(records.length) * 120);
+  const scale = target / Math.max(spanX, spanY);
+
+  const pos = nodes.map((n, i) => ({ x: n.x, y: n.y, r: n.r }));
+
+  for (const r of records) {
+    const nx = ((r.x - minX) - spanX / 2) * scale;
+    const ny = ((r.y - minY) - spanY / 2) * scale;
+    pos[r.i] = {
+      x: nx,
+      y: ny,
+      r: nodes[r.i]?.r || NODE_R || 4
+    };
+  }
+
+  // Build cluster mapping. Outliers remain -1 so they do not become a labelled cluster.
+  const clusterIds = [...new Set(records.filter(r => !r.isOutlier && r.clusterLabel >= 0).map(r => r.clusterLabel))]
+    .sort((a, b) => a - b);
+
+  const labelToCompact = new Map();
+  clusterIds.forEach((lab, idx) => labelToCompact.set(lab, idx));
+
+  const nextClusterOf = new Array(nodes.length).fill(-1);
+  for (const r of records) {
+    if (!r.isOutlier && labelToCompact.has(r.clusterLabel)) {
+      nextClusterOf[r.i] = labelToCompact.get(r.clusterLabel);
+    }
+  }
+
+  const nextSizes = new Array(clusterIds.length).fill(0);
+  for (const c of nextClusterOf) {
+    if (c >= 0) nextSizes[c]++;
+  }
+
+  const nextLabels = clusterIds.map(lab => `Semantic cluster ${lab + 1}`);
+
+  const nextColors = clusterIds.map((_, idx) => {
+    if (Array.isArray(clusterColors) && clusterColors[idx]) return clusterColors[idx];
+    const hue = (idx * 137.508) % 360;
+    return typeof color === 'function' ? color(`hsl(${hue}, 65%, 58%)`) : [180, 180, 180];
+  });
+
+  cache.pos = pos;
+  cache.edges = [];
+  cache.clusterOf = nextClusterOf;
+  cache.clusterSizesTotal = nextSizes;
+  cache.clusterColors = nextColors;
+  cache.clusterLabels = nextLabels;
+  cache.lensesShowEdges = false;
+  cache.builtKey = metaKey;
+
+  console.log(
+    `Semantic Mapping: loaded ${records.length}/${nodes.length} coordinates, ` +
+    `${clusterIds.length} clusters, ${records.filter(r => r.isOutlier).length} outliers.`
+  );
+
+  return true;
+}
+
+function switchToSemanticMappingMode() {
+  if (!nodes?.length) return;
+
+  __snapshotView(viewMode || 'citation');
+
+  if (!buildSemanticMapIfNeeded()) return;
+
+  setActiveViewMode('semantic');
+  __applyView('semantic');
+
+  if (typeof lenses === 'object' && lenses) {
+    lenses.showEdges = false;
+  }
+
+  layoutRunning = false;
+  layoutAlpha = 0;
+  vx = new Array(nodes.length).fill(0);
+  vy = new Array(nodes.length).fill(0);
+
+  recomputeVisibility?.();
+  fitContentInView?.(60);
+  redraw?.();
+}
+
+
 function __conceptDatasetKey() {
   const base = (typeof makeInstitutionCacheKey === 'function')
     ? makeInstitutionCacheKey()
@@ -28319,6 +28506,9 @@ function attachViewMenuToLayoutIcon(btn) {
     });
         addItem('Domain Heat Maps', () => {
       switchToDomainHeatMapMode?.();
+    });
+        addItem('Semantic Mapping', () => {
+      switchToSemanticMappingMode?.();
     });
 
     document.body.appendChild(viewMenu.elt);
