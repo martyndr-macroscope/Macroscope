@@ -1711,11 +1711,15 @@ edgesSlider = mkSlider('Citation Network', Math.round(visEdges*100), (e) => {
   const initPct = Math.round(
     Math.max(0, Math.min(100, invLerp01(NODE_SIZE_MIN, NODE_SIZE_MAX, initR) * 100))
   );
-  nodeSizeSlider = mkSlider('Node Size', Math.round(nodeSizeScale * 100), (e) => {
-  const v = Number(e.target.value) / 100;
-  // clamp just in case
-  nodeSizeScale = Math.max(0.01, Math.min(5, v));
-  // If you already have a dedicated size recompute, call it; otherwise the usual pair works
+nodeSizeSlider = mkSlider('Node Size', Math.round(
+  Math.max(0, Math.min(100, invLerp01(NODE_SIZE_MIN, NODE_SIZE_MAX, NODE_R * nodeSizeScale) * 100))
+), (e) => {
+  const t = Number(e.target.value) / 100;
+  const targetRadius = lerp01(NODE_SIZE_MIN, NODE_SIZE_MAX, t);
+
+  // Convert desired absolute radius back into your existing multiplier system
+  nodeSizeScale = Math.max(0.01, targetRadius / NODE_R);
+
   if (typeof scheduleVisRecompute === 'function') scheduleVisRecompute();
   else { recomputeVisibility(); redraw(); }
 });
@@ -12538,10 +12542,15 @@ if (save.semantic_clustering && typeof save.semantic_clustering === 'object') {
   applySavedOverlayValue(ovFieldLabelSlider, ovFieldLabels);
   applySavedOverlayValue(ovRefAssessmentSlider, ovRefAssessment);
 
-  if (nodeSizeSlider?.elt) {
-    nodeSizeSlider.elt.value = Math.round(Math.max(1, Math.min(500, nodeSizeScale * 100)));
-    markZeroClass?.(nodeSizeSlider, Number(nodeSizeSlider.elt.value) === 0);
-  }
+if (nodeSizeSlider?.elt) {
+  const currentRadius = NODE_R * nodeSizeScale;
+  const sliderPct = Math.round(
+    Math.max(0, Math.min(100, invLerp01(NODE_SIZE_MIN, NODE_SIZE_MAX, currentRadius) * 100))
+  );
+
+  nodeSizeSlider.elt.value = String(sliderPct);
+  markZeroClass?.(nodeSizeSlider, sliderPct === 0);
+}
 
   if (typeof semanticZoomRadio !== 'undefined' && semanticZoomRadio?.value) {
     semanticZoomRadio.value(semanticZoomEnabled ? 'on' : 'off');
