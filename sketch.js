@@ -394,7 +394,7 @@ let _splashEnabled = true;
 
 // ==== Node size UI ranges (tweak to taste) ====
 let NODE_SIZE_MIN = 2;      // min circle radius (px)
-let NODE_SIZE_MAX = 40;     // max circle radius (px)
+let NODE_SIZE_MAX = 100;     // max circle radius (px)
 
 let FULLTEXT_SIZE_MIN = 0.6;  // min multiplier for square nodes (× circle diameter)
 let FULLTEXT_SIZE_MAX = 2.4;  // max multiplier for square nodes
