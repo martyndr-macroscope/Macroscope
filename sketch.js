@@ -435,7 +435,16 @@ let layoutEverStarted = false;
 
 // ==== Motion Parallax (subtle, citation-based) ====
 // Turn on/off quickly while testing
-let PARALLAX_ENABLED   = true;
+const PARALLAX_STORAGE_KEY = 'macroscope_motion_parallax_enabled';
+
+let PARALLAX_ENABLED = (() => {
+  try {
+    const saved = localStorage.getItem(PARALLAX_STORAGE_KEY);
+    return saved === null ? true : saved === 'true';
+  } catch {
+    return true;
+  }
+})();
 
 // Max extra response, as fractions (10% recommended)
 // - panning: how much extra the camera translation influences close nodes
@@ -1635,6 +1644,7 @@ let dimMembershipDirty = true;
 // Node Visibility panel (left column, above Filters)
 // ────────────────────────────────────────────────────────────────────────────
 let nodeVisPanel, allPubsSlider, dimsSlider, aiDimsSlider, conceptMapSlider;
+let parallaxSwitch = null;
 
 
 function buildNodeVisibilityPanelInto(containerBody) {
@@ -1667,6 +1677,29 @@ function buildNodeVisibilityPanelInto(containerBody) {
     if (onInput) sl.input(onInput);
     return sl;
   };
+
+  const mkSwitch = (label, init, onChange) => {
+  const row = createDiv('');
+  row.parent(containerBody);
+  row.style('display','flex');
+  row.style('align-items','center');
+  row.style('justify-content','space-between');
+  row.style('gap','10px');
+  row.style('margin','0 0 8px');
+
+  const lab = createDiv(label);
+  lab.parent(row);
+  lab.style('color','#eaeaea');
+  lab.style('font-size','12px');
+
+  const cb = createCheckbox('', !!init);
+  cb.parent(row);
+  cb.style('transform','scale(1.05)');
+  captureUI?.(cb.elt);
+
+  cb.changed(() => onChange?.(cb.checked()));
+  return cb;
+};
 
   // All Publications
 allPubsSlider = mkSlider('All Publications', Math.round(visAllPubs*100), (e) => {
@@ -1702,6 +1735,19 @@ edgesSlider = mkSlider('Citation Network', Math.round(visEdges*100), (e) => {
   visEdges = Number(e.target.value)/100;
   markZeroClass?.({elt:e.target}, visEdges===0);
   // No need to recompute visibility for nodes; just redraw with new edge alpha
+  redraw();
+});
+
+parallaxSwitch = mkSwitch('Motion Parallax', PARALLAX_ENABLED, (on) => {
+  PARALLAX_ENABLED = !!on;
+
+  try {
+    localStorage.setItem(PARALLAX_STORAGE_KEY, String(PARALLAX_ENABLED));
+  } catch {}
+
+  // Reset previous camera snapshot to avoid one-frame jump when re-enabled
+  __prevCam = { x: cam.x, y: cam.y, scale: cam.scale };
+
   redraw();
 });
 // ── Node Size (circles) ─────────────────────────────────────────────
