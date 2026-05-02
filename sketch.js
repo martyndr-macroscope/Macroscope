@@ -728,7 +728,7 @@ async function fetchFulltextResponse(fullUrl, timeoutMs = 25000) {
 // UKRI Gateway to Research (GtR) enrichment
 // ─────────────────────────────────────────────────────────────────────────────
 
-const GTR_JSON_ACCEPT = 'application/xml, text/xml, */*';
+const GTR_JSON_ACCEPT = 'application/vnd.rcuk.gtr.json-v7, application/json;q=0.9, application/xml;q=0.8, text/xml;q=0.8, */*;q=0.5';
 const GTR_SEARCH_BASE = 'https://gtr.ukri.org/api/search';
 const GTR_API_BASE    = 'https://gtr.ukri.org/api';
 
