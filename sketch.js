@@ -763,11 +763,9 @@ async function fetchGtrJson(url, timeoutMs = 25000, maxRetries = 4) {
   const fullUrl = normaliseGtrUrl(url);
   if (!fullUrl) throw new Error('Empty GtR URL');
 
-  // Try proxy first, then direct. This is important because the proxy can
-  // return false 404s even when GtR itself returns a valid XML result.
-  const attempts = FETCH_PROXY
-    ? [viaProxy(fullUrl), fullUrl]
-    : [fullUrl];
+const attempts = FETCH_PROXY
+  ? [viaProxy(fullUrl), fullUrl]
+  : [fullUrl];
 
   let lastErr = null;
 
@@ -778,7 +776,8 @@ async function fetchGtrJson(url, timeoutMs = 25000, maxRetries = 4) {
           u,
           {
             headers: {
-              accept: GTR_JSON_ACCEPT
+              // GtR often returns XML even when JSON is requested.
+              accept: 'application/vnd.rcuk.gtr.json-v7, application/json;q=0.9, application/xml;q=0.8, text/xml;q=0.8, */*;q=0.5'
             },
             mode: 'cors',
             redirect: 'follow'
@@ -788,41 +787,35 @@ async function fetchGtrJson(url, timeoutMs = 25000, maxRetries = 4) {
 
         const text = await r.text();
 
-        // Do not immediately throw on 404: proxy may produce false 404s.
-        // Continue to the next attempt, usually the direct GtR URL.
-        if (r.status === 404) {
-          lastErr = new Error(`GtR HTTP 404 for ${fullUrl}`);
-          continue;
-        }
+        // Do not retry permanent URL/endpoint failures.
+if (r.status === 404) {
+  lastErr = new Error(`GtR HTTP 404 for ${fullUrl}`);
+  continue;
+}
 
-        // Retry throttling/server errors with exponential backoff.
+        // Retry temporary / throttling failures.
         if (!r.ok) {
           if ([429, 500, 502, 503, 504].includes(r.status)) {
             const waitMs = Math.min(60000, 3000 * Math.pow(2, retry));
-            console.warn(
-              `GtR temporary HTTP ${r.status}; waiting ${waitMs} ms before retrying:`,
-              fullUrl
-            );
+            console.warn(`GtR temporary HTTP ${r.status}; waiting ${waitMs} ms before retrying:`, fullUrl);
             await delay(waitMs);
             lastErr = new Error(`GtR HTTP ${r.status} for ${fullUrl}`);
             continue;
           }
 
-          lastErr = new Error(`GtR HTTP ${r.status} for ${fullUrl}`);
-          continue;
+          throw new Error(`GtR HTTP ${r.status} for ${fullUrl}`);
         }
 
-        // Try JSON first.
+        // First try JSON.
         try {
           return JSON.parse(text);
         } catch {
-          // GtR often returns XML even when JSON is requested.
+          // Then try XML.
           const xml = new DOMParser().parseFromString(text, 'application/xml');
           const parserError = xml.querySelector('parsererror');
 
           if (parserError) {
-            lastErr = new Error(`GtR returned non-JSON and non-XML for ${fullUrl}`);
-            continue;
+            throw new Error(`GtR returned non-JSON and non-XML for ${fullUrl}`);
           }
 
           return xml;
@@ -830,7 +823,11 @@ async function fetchGtrJson(url, timeoutMs = 25000, maxRetries = 4) {
 
       } catch (e) {
         lastErr = e;
-        continue;
+
+        // Do not retry 404-like failures.
+        if (String(e?.message || '').includes('HTTP 404')) {
+          throw e;
+        }
       }
     }
   }
@@ -838,24 +835,7 @@ async function fetchGtrJson(url, timeoutMs = 25000, maxRetries = 4) {
   throw lastErr || new Error(`GtR request failed for ${fullUrl}`);
 }
 
-function extractGtrResourceUrls(obj, kind) {
-  if (obj instanceof Document) {
-    const links = Array.from(obj.querySelectorAll('link, gtr\\:link, resourceUrl, gtr\\:resourceUrl'));
-    return uniqueBy(
-      links
-        .map(el => normaliseGtrUrl(el.textContent || el.getAttribute('href') || ''))
-        .filter(u => kind === 'publication'
-          ? /\/api\/publication\//i.test(u)
-          : kind === 'project'
-            ? /\/api\/project/i.test(u)
-            : true
-        ),
-      s => s
-    );
-  }
 
-  // existing JSON path below...
-}
 
 function getVisiblePublicationIndices() {
   const out = [];
@@ -921,20 +901,7 @@ function deepCollectStrings(obj, predicate, out = []) {
 }
 
 function extractGtrResourceUrls(obj, kind) {
-  const rx = kind === 'publication'
-    ? /\/api\/publication\/[A-Z0-9-]+/i
-    : kind === 'project'
-      ? /\/api\/projects?\/[A-Z0-9-]+/i
-      : kind === 'fund'
-        ? /\/api\/funds?\/[A-Z0-9-]+/i
-        : kind === 'organisation'
-          ? /\/api\/organisation\/[A-Z0-9-]+/i
-          : /.^/;
-
-  return uniqueBy(
-    deepCollectStrings(obj, s => rx.test(String(s || ''))).map(normaliseGtrUrl),
-    s => s
-  );
+  return extractGtrResourceUrlsAny(obj, kind);
 }
 
 function getLinksArray(obj) {
@@ -1033,260 +1000,633 @@ function scoreGtrPublicationCandidate(localItem, pubObj) {
   return score;
 }
 
-async function searchGtrPublicationCandidatesForItem(item) {
-  const title = String(item?.openalex?.display_name || item?.openalex?.title || item?.label || '').trim();
-  const doi = (typeof cleanDOI === 'function')
-    ? cleanDOI(item?.openalex?.doi || item?.doi || '')
-    : String(item?.openalex?.doi || item?.doi || '').replace(/^https?:\/\/doi\.org\//i, '').trim();
+// ─────────────────────────────────────────────────────────────────────────────
+// UKRI Gateway to Research enrichment — project-first architecture
+// ─────────────────────────────────────────────────────────────────────────────
 
-  const queries = [];
-  if (doi) queries.push(`"${doi}"`);
-  if (title) queries.push(`"${title}"`);
+const UKRI_PROJECT_SEARCH_MAX_PAGES = 20;
+const UKRI_PROJECT_SEARCH_FETCH_SIZE = 25;
+const UKRI_PROJECT_MAX_PROJECTS = 500;
+const UKRI_GRANTS_DELAY_MS_SAFE = 1200;
 
-  const pubUrls = [];
-
-  for (const q of queries) {
-    const url = `${GTR_SEARCH_BASE}/publication?term=${encodeURIComponent(q)}&page=1&fetchSize=25`;
-
-    try {
-      const res = await fetchGtrJson(url, 25000);
-
-      // Primary path: extract API publication URLs from the JSON payload
-      const urls = extractGtrResourceUrls(res, 'publication');
-      for (const u of urls) pubUrls.push(u);
-
-      // Secondary path: some search payloads expose publication.resourceUrl portal links;
-      // collect those too so we can at least identify candidate hits if needed later.
-      const portalUrls = deepCollectStrings(
-        res,
-        s => /https:\/\/gtr\.ukri\.org\/publication\/overview\?/i.test(String(s || ''))
-      );
-      for (const u of portalUrls) pubUrls.push(u);
-
-      await delay(UKRI_GRANTS_DELAY_MS);
-    } catch (e) {
-      console.warn('GtR publication search failed for query:', q, e);
-    }
-  }
-
-  return uniqueBy(pubUrls.map(normaliseGtrUrl), s => s).slice(0, UKRI_GRANTS_MAX_CANDIDATES);
-}
-
-async function resolveAwardingBodyFromProject(projectObj) {
-  // Try direct text fields first
-  const direct = extractBestTextField(projectObj, [
-    'funder', 'funderName', 'leadFunder', 'leadFunderName', 'organisation', 'organization'
-  ]);
-  if (direct) return direct;
-
-  // Try linked FUNDER organisations on the project itself
-  const orgLinks = extractLinkedUrlsByRel(projectObj, 'FUNDER');
-  for (const href of orgLinks) {
-    try {
-      const orgObj = await fetchGtrJson(href, 25000);
-      const name = extractBestTextField(orgObj, ['name', 'title', 'organisationName']);
-      if (name) return name;
-      await delay(UKRI_GRANTS_DELAY_MS);
-    } catch (e) {
-      console.warn('GtR funder organisation lookup failed:', href, e);
-    }
-  }
-
-  // Try linked fund records, then funder orgs from those
-  const fundLinks = extractLinkedUrlsByRel(projectObj, 'FUND');
-  for (const href of fundLinks) {
-    try {
-      const fundObj = await fetchGtrJson(href, 25000);
-
-      const directFundName = extractBestTextField(fundObj, [
-        'funder', 'funderName', 'name', 'title'
-      ]);
-      if (directFundName) return directFundName;
-
-      const funderOrgLinks = extractLinkedUrlsByRel(fundObj, 'FUNDER');
-      for (const orgHref of funderOrgLinks) {
-        try {
-          const orgObj = await fetchGtrJson(orgHref, 25000);
-          const name = extractBestTextField(orgObj, ['name', 'title', 'organisationName']);
-          if (name) return name;
-          await delay(UKRI_GRANTS_DELAY_MS);
-        } catch (e) {
-          console.warn('GtR funder org lookup from fund failed:', orgHref, e);
-        }
-      }
-
-      await delay(UKRI_GRANTS_DELAY_MS);
-    } catch (e) {
-      console.warn('GtR fund lookup failed:', href, e);
-    }
-  }
-
-  return '';
-}
-
-function formatGrantDateRange(start, end) {
-  const s = compactDateStr(start);
-  const e = compactDateStr(end);
-  if (s && e) return `${s} → ${e}`;
-  return s || e || '';
-}
-
-async function buildUkriGrantRecordsForItem(i) {
-  const item = itemsData?.[i];
-  if (!item) return [];
-
-  const publicationCandidates = await searchGtrPublicationCandidatesForItem(item);
-  if (!publicationCandidates.length) return [];
-
-  const pubDetails = [];
-
-  for (const pubUrl of publicationCandidates) {
-    try {
-      const pubObj = await fetchGtrJson(pubUrl, 25000);
-      pubDetails.push({ url: pubUrl, obj: pubObj, score: scoreGtrPublicationCandidate(item, pubObj) });
-      await delay(UKRI_GRANTS_DELAY_MS);
-    } catch (e) {
-      console.warn('GtR publication detail lookup failed:', pubUrl, e);
-    }
-  }
-
-  pubDetails.sort((a, b) => b.score - a.score);
-
-  const keptPubs = pubDetails.filter(x => x.score >= 40 || x.score >= 100);
-  const projectUrls = uniqueBy(
-    keptPubs.flatMap(p => extractLinkedUrlsByRel(p.obj, 'PROJECT')),
-    s => s
+function openUkriGrantRetrievalDialog() {
+  const institution = prompt(
+    'Retrieve UKRI grants for which institution?\n\nExample: Northumbria University'
   );
 
-  if (!projectUrls.length) return [];
-
-  const grants = [];
-
-  for (const projUrl of projectUrls) {
-    try {
-      const projObj = await fetchGtrJson(projUrl, 25000);
-
-      const title = extractBestTextField(projObj, ['title', 'name', 'projectTitle']);
-      const directStart = extractBestTextField(projObj, ['start', 'startDate', 'fundStart', 'plannedStartDate']);
-      const directEnd   = extractBestTextField(projObj, ['end', 'endDate', 'fundEnd', 'plannedEndDate']);
-
-      const linkDates = extractLinkedDateRangeByRel(projObj, 'FUND');
-      const start = compactDateStr(directStart || linkDates.start || '');
-      const end   = compactDateStr(directEnd   || linkDates.end   || '');
-
-      const awardingBody = await resolveAwardingBodyFromProject(projObj);
-
-      const projectId = String(projUrl).split('/').pop() || '';
-      const projectHref = normaliseGtrUrl(projUrl);
-
-      if (title) {
-        grants.push({
-          grant_title: title,
-          dates: formatGrantDateRange(start, end),
-          start_date: start || '',
-          end_date: end || '',
-          awarding_body: awardingBody || '',
-          project_id: projectId,
-          project_url: projectHref,
-          source: 'UKRI Gateway to Research'
-        });
-      }
-
-      await delay(UKRI_GRANTS_DELAY_MS);
-    } catch (e) {
-      console.warn('GtR project lookup failed:', projUrl, e);
-    }
-  }
-
-  return uniqueBy(
-    grants,
-    g => [
-      normLooseTitle(g.grant_title),
-      g.start_date || '',
-      g.end_date || '',
-      normLooseTitle(g.awarding_body || '')
-    ].join('|')
-  );
-}
-
-function setUkriGrantsOnItem(i, grants) {
-  const item = itemsData?.[i];
-  if (!item) return;
-
-  const clean = Array.isArray(grants) ? grants.filter(g => g && g.grant_title) : [];
-
-  if (clean.length) {
-    item.ukri_grants = clean;
-    item['UKRI Grants'] = clean;
-  } else {
-    delete item.ukri_grants;
-    delete item['UKRI Grants'];
-  }
-
-  item.ukri_grants_checked_at = new Date().toISOString();
-  item.ukri_grants_source = 'UKRI Gateway to Research';
-
-  if (selectedIndex === i && infoPanel?.setItemIndex) {
-    infoPanel.setItemIndex(i);
-  }
-}
-
-async function retrieveUkriGrantsForVisible() {
-  const ids = getVisiblePublicationIndices();
-  if (!ids.length) {
-    msg = 'No visible publications to check for UKRI grants.';
+  if (!institution || !institution.trim()) {
+    msg = 'Retrieve UKRI Grants cancelled: no institution supplied.';
     updateInfo?.();
     redraw?.();
     return;
   }
 
-  let hits = 0;
-  let checked = 0;
-  let failed = 0;
-
-  for (let k = 0; k < ids.length; k++) {
-    const i = ids[k];
-    const item = itemsData?.[i] || {};
-    const title = String(
-      item?.openalex?.display_name ||
-      item?.openalex?.title ||
-      item?.label ||
-      `Item ${i + 1}`
-    );
-
-    msg = `Retrieve UKRI Grants: ${k + 1}/${ids.length} — positive: ${hits}, failed: ${failed} — ${title}`;
+  retrieveUkriGrantsProjectFirst({
+    institutionName: institution.trim()
+  }).catch(err => {
+    console.error('Project-first UKRI grant retrieval failed:', err);
+    msg = 'Retrieve UKRI Grants failed. See console for details.';
     updateInfo?.();
     redraw?.();
+  });
+}
 
-    try {
-      const grants = await buildUkriGrantRecordsForItem(i);
-      setUkriGrantsOnItem(i, grants);
+function gtrText(obj) {
+  if (obj == null) return '';
 
-      checked++;
+  if (typeof obj === 'string') return obj;
 
-      if (grants.length) {
-        hits++;
-        item.ukri_grants_positive = true;
-      } else {
-        item.ukri_grants_positive = false;
-      }
-
-    } catch (e) {
-      console.warn('UKRI grants lookup failed for item', i, e);
-      setUkriGrantsOnItem(i, []);
-      item.ukri_grants_positive = false;
-      item.ukri_grants_error = String(e?.message || e || 'Unknown error');
-      failed++;
-    }
-
-    msg = `Retrieve UKRI Grants: checked ${checked}/${ids.length} — positive: ${hits}, failed: ${failed}`;
-    updateInfo?.();
-    redraw?.();
-
-    await delay(UKRI_GRANTS_DELAY_MS);
+  if (obj instanceof Document) {
+    return obj.documentElement?.textContent || '';
   }
 
-  msg = `Retrieve UKRI Grants complete: ${hits} / ${ids.length} visible publications tested positive. Failed: ${failed}.`;
+  if (Array.isArray(obj)) {
+    return obj.map(gtrText).join(' ');
+  }
+
+  if (typeof obj === 'object') {
+    return Object.values(obj).map(gtrText).join(' ');
+  }
+
+  return String(obj || '');
+}
+
+function cleanGtrDoi(s) {
+  let v = String(s || '').trim();
+  v = v.replace(/^https?:\/\/(dx\.)?doi\.org\//i, '');
+  v = v.replace(/^doi:\s*/i, '');
+  v = v.trim();
+  return v.toLowerCase();
+}
+
+function normGrantTitle(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/[^\w\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function getLocalItemTitle(item) {
+  return String(
+    item?.openalex?.display_name ||
+    item?.openalex?.title ||
+    item?.title ||
+    item?.label ||
+    ''
+  ).trim();
+}
+
+function getLocalItemDoi(item) {
+  const raw = item?.openalex?.doi || item?.doi || '';
+  return cleanGtrDoi(raw);
+}
+
+function buildLocalPublicationIndex() {
+  const byDoi = new Map();
+  const byTitle = new Map();
+
+  for (let i = 0; i < (itemsData?.length || 0); i++) {
+    const item = itemsData[i];
+    if (!item) continue;
+
+    const doi = getLocalItemDoi(item);
+    const title = normGrantTitle(getLocalItemTitle(item));
+
+    if (doi) {
+      if (!byDoi.has(doi)) byDoi.set(doi, []);
+      byDoi.get(doi).push(i);
+    }
+
+    if (title) {
+      if (!byTitle.has(title)) byTitle.set(title, []);
+      byTitle.get(title).push(i);
+    }
+  }
+
+  return { byDoi, byTitle };
+}
+
+function extractXmlValues(xml, selectors) {
+  if (!(xml instanceof Document)) return [];
+  const out = [];
+
+  for (const sel of selectors) {
+    for (const el of Array.from(xml.querySelectorAll(sel))) {
+      const v = String(el.textContent || el.getAttribute('href') || '').trim();
+      if (v) out.push(v);
+    }
+  }
+
+  return uniqueBy(out, s => s);
+}
+
+function extractGtrLinks(obj) {
+  const out = [];
+
+  if (obj instanceof Document) {
+    const nodes = Array.from(obj.querySelectorAll('link, gtr\\:link'));
+    for (const el of nodes) {
+      const href =
+        el.getAttribute('href') ||
+        el.getAttribute('url') ||
+        el.textContent ||
+        '';
+
+      const rel =
+        el.getAttribute('rel') ||
+        el.getAttribute('type') ||
+        '';
+
+      const start = el.getAttribute('start') || el.getAttribute('startDate') || '';
+      const end = el.getAttribute('end') || el.getAttribute('endDate') || '';
+
+      if (href) {
+        out.push({
+          href: normaliseGtrUrl(href),
+          rel: String(rel || '').trim().toUpperCase(),
+          start,
+          end
+        });
+      }
+    }
+    return out;
+  }
+
+  return getLinksArray(obj).map(l => ({
+    href: normaliseGtrUrl(l?.href || l?.url || ''),
+    rel: String(l?.rel || l?.type || '').trim().toUpperCase(),
+    start: l?.start || l?.startDate || '',
+    end: l?.end || l?.endDate || ''
+  })).filter(l => l.href);
+}
+
+function extractGtrResourceUrlsAny(obj, kind) {
+  const rx =
+    kind === 'project'
+      ? /\/api\/projects?\/[A-Z0-9-]+/i
+      : kind === 'publication'
+        ? /\/api\/publications?\/[A-Z0-9-]+/i
+        : kind === 'organisation'
+          ? /\/api\/organisation\/[A-Z0-9-]+/i
+          : kind === 'fund'
+            ? /\/api\/funds?\/[A-Z0-9-]+/i
+            : /\/api\/[a-z]+\/[A-Z0-9-]+/i;
+
+  const urls = [];
+
+  if (obj instanceof Document) {
+    urls.push(...extractXmlValues(obj, [
+      'resourceUrl',
+      'gtr\\:resourceUrl',
+      'link',
+      'gtr\\:link'
+    ]));
+  } else {
+    urls.push(...deepCollectStrings(obj, s => rx.test(String(s || ''))));
+  }
+
+  return uniqueBy(
+    urls
+      .map(normaliseGtrUrl)
+      .filter(u => rx.test(u)),
+    s => s
+  );
+}
+
+function extractProjectIdFromUrl(url) {
+  const m = String(url || '').match(/\/api\/projects?\/([^/?#]+)/i);
+  return m ? m[1] : '';
+}
+
+function getProjectOutcomePublicationUrl(projectUrl) {
+  const id = extractProjectIdFromUrl(projectUrl);
+  return id ? `${GTR_API_BASE}/projects/${id}/outcomes/publications` : '';
+}
+
+function extractProjectTitle(projectObj) {
+  if (projectObj instanceof Document) {
+    return extractXmlValues(projectObj, [
+      'title',
+      'gtr\\:title',
+      'name',
+      'gtr\\:name'
+    ])[0] || '';
+  }
+
+  return extractBestTextField(projectObj, [
+    'title',
+    'name',
+    'projectTitle'
+  ]);
+}
+
+function extractProjectDates(projectObj) {
+  if (projectObj instanceof Document) {
+    const start = extractXmlValues(projectObj, [
+      'start',
+      'gtr\\:start',
+      'startDate',
+      'gtr\\:startDate'
+    ])[0] || '';
+
+    const end = extractXmlValues(projectObj, [
+      'end',
+      'gtr\\:end',
+      'endDate',
+      'gtr\\:endDate'
+    ])[0] || '';
+
+    return {
+      start: compactDateStr(start),
+      end: compactDateStr(end)
+    };
+  }
+
+  const directStart = extractBestTextField(projectObj, [
+    'start',
+    'startDate',
+    'fundStart',
+    'plannedStartDate'
+  ]);
+
+  const directEnd = extractBestTextField(projectObj, [
+    'end',
+    'endDate',
+    'fundEnd',
+    'plannedEndDate'
+  ]);
+
+  const linkDates = extractLinkedDateRangeByRel(projectObj, 'FUND');
+
+  return {
+    start: compactDateStr(directStart || linkDates.start || ''),
+    end: compactDateStr(directEnd || linkDates.end || '')
+  };
+}
+
+function extractPublicationCoreFromGtr(pubObj) {
+  if (pubObj instanceof Document) {
+    const title = extractXmlValues(pubObj, [
+      'title',
+      'gtr\\:title',
+      'name',
+      'gtr\\:name',
+      'publicationTitle',
+      'gtr\\:publicationTitle'
+    ])[0] || '';
+
+    const doiCandidates = extractXmlValues(pubObj, [
+      'doi',
+      'gtr\\:doi',
+      'digitalPublicationUrl',
+      'gtr\\:digitalPublicationUrl',
+      'url',
+      'gtr\\:url'
+    ]);
+
+    const doi = doiCandidates
+      .map(cleanGtrDoi)
+      .find(v => v && v.includes('/')) || '';
+
+    const year = yearFromAny(gtrText(pubObj));
+
+    return {
+      title,
+      title_norm: normGrantTitle(title),
+      doi,
+      year: Number.isFinite(year) ? year : NaN
+    };
+  }
+
+  const core = extractPublicationCore(pubObj);
+
+  const doiFromText = deepCollectStrings(
+    pubObj,
+    s => /10\.\d{4,9}\//i.test(String(s || ''))
+  ).map(cleanGtrDoi).find(Boolean) || '';
+
+  return {
+    title: core.title || '',
+    title_norm: normGrantTitle(core.title || ''),
+    doi: cleanGtrDoi(core.doi || doiFromText || ''),
+    year: core.year
+  };
+}
+
+function matchGtrPublicationToLocal(pubCore, localIndex) {
+  const matches = new Set();
+
+  if (pubCore.doi && localIndex.byDoi.has(pubCore.doi)) {
+    for (const i of localIndex.byDoi.get(pubCore.doi)) matches.add(i);
+  }
+
+  if (!matches.size && pubCore.title_norm && localIndex.byTitle.has(pubCore.title_norm)) {
+    for (const i of localIndex.byTitle.get(pubCore.title_norm)) matches.add(i);
+  }
+
+  return Array.from(matches);
+}
+
+function institutionAppearsInProject(projectObj, institutionName) {
+  const needle = normGrantTitle(institutionName);
+  if (!needle) return false;
+  return normGrantTitle(gtrText(projectObj)).includes(needle);
+}
+
+function inferInstitutionRole(projectObj, institutionName) {
+  const needle = normGrantTitle(institutionName);
+  const links = extractGtrLinks(projectObj);
+
+  const leadLike = links.some(l =>
+    /LEAD|PI|PRINCIPAL|PRINCIPLE/.test(l.rel) &&
+    normGrantTitle(l.href).includes(needle)
+  );
+
+  if (leadLike) return 'lead_or_pi_institution';
+
+  const text = normGrantTitle(gtrText(projectObj));
+  if (!text.includes(needle)) return 'not_detected';
+
+  const leadTerms = [
+    'principal investigator',
+    'principle investigator',
+    'lead research organisation',
+    'lead organisation',
+    'lead institution',
+    'pi organisation'
+  ];
+
+  const nearLead = leadTerms.some(term => text.includes(term) && text.includes(needle));
+
+  return nearLead ? 'possible_lead_or_pi_institution' : 'participant_or_mentioned_institution';
+}
+
+function extractGrantValueForInstitution(projectObj, institutionName) {
+  const text = gtrText(projectObj);
+  const needle = normGrantTitle(institutionName);
+
+  const moneyMatches = Array.from(
+    text.matchAll(/£\s?[\d,]+(?:\.\d+)?|GBP\s?[\d,]+(?:\.\d+)?/gi)
+  ).map(m => m[0]);
+
+  // Conservative: if we cannot confidently attribute it to the institution,
+  // store the visible project-level amount as "possible", not definitive.
+  return {
+    value_to_institution: '',
+    project_value_possible: moneyMatches[0] || '',
+    value_note: moneyMatches.length
+      ? 'Project/fund value detected in GtR text; institution-specific value not confidently attributable from this record.'
+      : 'No monetary value detected in fetched GtR project record.'
+  };
+}
+
+async function searchGtrProjectsForInstitution(institutionName) {
+  const projectUrls = [];
+  const q = `"${institutionName}"`;
+
+  for (let page = 1; page <= UKRI_PROJECT_SEARCH_MAX_PAGES; page++) {
+    const url =
+      `${GTR_SEARCH_BASE}/project?term=${encodeURIComponent(q)}` +
+      `&page=${page}&fetchSize=${UKRI_PROJECT_SEARCH_FETCH_SIZE}`;
+
+    try {
+      const res = await fetchGtrJson(url, 30000, 2);
+      const urls = extractGtrResourceUrlsAny(res, 'project');
+
+      for (const u of urls) projectUrls.push(u);
+
+      msg = `Retrieve UKRI Grants: found ${uniqueBy(projectUrls, s => s).length} candidate projects for ${institutionName}...`;
+      updateInfo?.();
+      redraw?.();
+
+      if (!urls.length) break;
+      if (projectUrls.length >= UKRI_PROJECT_MAX_PROJECTS) break;
+
+      await delay(UKRI_GRANTS_DELAY_MS_SAFE);
+    } catch (e) {
+      console.warn('GtR project search failed:', url, e);
+      break;
+    }
+  }
+
+  return uniqueBy(projectUrls, s => s).slice(0, UKRI_PROJECT_MAX_PROJECTS);
+}
+
+async function fetchGtrPublicationDetailsFromProject(projectUrl, projectObj) {
+  const pubUrls = [];
+
+  // 1. Links embedded in project record
+  const links = extractGtrLinks(projectObj);
+  for (const l of links) {
+    if (/PUBLICATION|OUTCOME/.test(l.rel) && /\/api\/publications?\//i.test(l.href)) {
+      pubUrls.push(l.href);
+    }
+  }
+
+  // 2. Explicit outcomes/publications endpoint
+  const outcomesUrl = getProjectOutcomePublicationUrl(projectUrl);
+  if (outcomesUrl) {
+    try {
+      const outObj = await fetchGtrJson(outcomesUrl, 30000, 2);
+      pubUrls.push(...extractGtrResourceUrlsAny(outObj, 'publication'));
+
+      // Sometimes the outcomes endpoint returns embedded publication records.
+      const embedded = extractEmbeddedPublicationObjects(outObj);
+      if (embedded.length) return { pubUrls: uniqueBy(pubUrls, s => s), embedded };
+    } catch (e) {
+      console.warn('GtR project publication outcomes lookup failed:', outcomesUrl, e);
+    }
+  }
+
+  return { pubUrls: uniqueBy(pubUrls, s => s), embedded: [] };
+}
+
+function extractEmbeddedPublicationObjects(obj) {
+  if (obj instanceof Document) {
+    const candidates = Array.from(obj.querySelectorAll(
+      'publication, gtr\\:publication, result, gtr\\:result'
+    ));
+    return candidates.length ? candidates : [];
+  }
+
+  const out = [];
+
+  function walk(x) {
+    if (!x) return;
+    if (Array.isArray(x)) {
+      x.forEach(walk);
+      return;
+    }
+    if (typeof x === 'object') {
+      const looksLikePub =
+        x.title || x.publicationTitle || x.doi || x.digitalPublicationUrl;
+
+      if (looksLikePub) out.push(x);
+
+      Object.values(x).forEach(walk);
+    }
+  }
+
+  walk(obj);
+  return out;
+}
+
+async function buildGrantRecordFromProject(projectUrl, projectObj, institutionName) {
+  const title = extractProjectTitle(projectObj);
+  const dates = extractProjectDates(projectObj);
+  const awardingBody = await resolveAwardingBodyFromProject(projectObj);
+  const valueInfo = extractGrantValueForInstitution(projectObj, institutionName);
+  const role = inferInstitutionRole(projectObj, institutionName);
+
+  return {
+    grant_title: title || '(Untitled UKRI project)',
+    dates: formatGrantDateRange(dates.start, dates.end),
+    start_date: dates.start || '',
+    end_date: dates.end || '',
+    awarding_body: awardingBody || '',
+    institution_searched: institutionName,
+    institution_role: role,
+    institution_is_pi_or_lead: role === 'lead_or_pi_institution' || role === 'possible_lead_or_pi_institution',
+    value_to_institution: valueInfo.value_to_institution,
+    project_value_possible: valueInfo.project_value_possible,
+    value_note: valueInfo.value_note,
+    project_id: extractProjectIdFromUrl(projectUrl),
+    project_url: normaliseGtrUrl(projectUrl),
+    source: 'UKRI Gateway to Research',
+    match_method: 'GtR project-first publication outcome match'
+  };
+}
+
+function appendUkriGrantToItem(i, grant) {
+  const item = itemsData?.[i];
+  if (!item || !grant?.grant_title) return false;
+
+  const existing = Array.isArray(item.ukri_grants) ? item.ukri_grants : [];
+  const key = [
+    normGrantTitle(grant.grant_title),
+    grant.project_id || '',
+    grant.start_date || '',
+    grant.end_date || ''
+  ].join('|');
+
+  const exists = existing.some(g => [
+    normGrantTitle(g.grant_title),
+    g.project_id || '',
+    g.start_date || '',
+    g.end_date || ''
+  ].join('|') === key);
+
+  if (!exists) {
+    existing.push(grant);
+  }
+
+  item.ukri_grants = existing;
+  item['UKRI Grants'] = existing;
+  item.ukri_grants_positive = existing.length > 0;
+  item.ukri_grants_checked_at = new Date().toISOString();
+  item.ukri_grants_source = 'UKRI Gateway to Research';
+
+  return !exists;
+}
+
+async function retrieveUkriGrantsProjectFirst({ institutionName }) {
+  if (!institutionName) return;
+
+  const localIndex = buildLocalPublicationIndex();
+
+  for (const item of itemsData || []) {
+    if (!item) continue;
+    delete item.ukri_grants;
+    delete item['UKRI Grants'];
+    item.ukri_grants_positive = false;
+  }
+
+  msg = `Retrieve UKRI Grants: searching GtR projects for ${institutionName}...`;
+  updateInfo?.();
+  redraw?.();
+
+  const projectUrls = await searchGtrProjectsForInstitution(institutionName);
+
+  let projectsChecked = 0;
+  let projectsUsed = 0;
+  let publicationRecordsChecked = 0;
+  let publicationMatches = 0;
+  let publicationsFlagged = 0;
+
+  for (const projectUrl of projectUrls) {
+    projectsChecked++;
+
+    msg = `Retrieve UKRI Grants: project ${projectsChecked}/${projectUrls.length}; matched publications ${publicationMatches}`;
+    updateInfo?.();
+    redraw?.();
+
+    let projectObj = null;
+
+    try {
+      projectObj = await fetchGtrJson(projectUrl, 30000, 2);
+      await delay(UKRI_GRANTS_DELAY_MS_SAFE);
+    } catch (e) {
+      console.warn('GtR project lookup failed:', projectUrl, e);
+      continue;
+    }
+
+    if (!institutionAppearsInProject(projectObj, institutionName)) {
+      continue;
+    }
+
+    const grant = await buildGrantRecordFromProject(projectUrl, projectObj, institutionName);
+    projectsUsed++;
+
+    const { pubUrls, embedded } = await fetchGtrPublicationDetailsFromProject(projectUrl, projectObj);
+
+    const pubObjects = [...embedded];
+
+    for (const pubUrl of pubUrls) {
+      try {
+        const pubObj = await fetchGtrJson(pubUrl, 30000, 2);
+        pubObjects.push(pubObj);
+        await delay(UKRI_GRANTS_DELAY_MS_SAFE);
+      } catch (e) {
+        console.warn('GtR publication detail lookup failed:', pubUrl, e);
+      }
+    }
+
+    for (const pubObj of pubObjects) {
+      publicationRecordsChecked++;
+
+      const core = extractPublicationCoreFromGtr(pubObj);
+      const matches = matchGtrPublicationToLocal(core, localIndex);
+
+      if (!matches.length) continue;
+
+      publicationMatches += matches.length;
+
+      for (const i of matches) {
+        const added = appendUkriGrantToItem(i, {
+          ...grant,
+          matched_publication_title: core.title || '',
+          matched_publication_doi: core.doi || ''
+        });
+
+        if (added) publicationsFlagged++;
+      }
+    }
+
+    if (selectedIndex >= 0 && infoPanel?.setItemIndex) {
+      infoPanel.setItemIndex(selectedIndex);
+    }
+
+    redraw?.();
+  }
+
+  msg =
+    `Retrieve UKRI Grants complete: ` +
+    `${publicationsFlagged} publication-grant links added; ` +
+    `${publicationMatches} matched publication records; ` +
+    `${projectsUsed}/${projectsChecked} institution-relevant projects used.`;
+
   updateInfo?.();
   redraw?.();
 }
@@ -14615,12 +14955,7 @@ addItem('Retrieve Full Texts', () => {
 });
 
 addItem('Retrieve UKRI Grants', () => {
-  retrieveUkriGrantsForVisible().catch(err => {
-    console.error('Retrieve UKRI Grants failed:', err);
-    msg = 'Retrieve UKRI Grants failed. See console for details.';
-    updateInfo?.();
-    redraw?.();
-  });
+  openUkriGrantRetrievalDialog();
 });
 
 
