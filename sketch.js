@@ -1401,8 +1401,13 @@ async function searchGtrProjectsForInstitution(institutionName) {
 
   for (let page = 1; page <= UKRI_PROJECT_SEARCH_MAX_PAGES; page++) {
     const url =
-      `${GTR_SEARCH_BASE}/project?term=${encodeURIComponent(q)}` +
-      `&page=${page}&fetchSize=${UKRI_PROJECT_SEARCH_FETCH_SIZE}`;
+  `${GTR_SEARCH_BASE}/project?term=${encodeURIComponent(q)}` +
+  `&page=${page}` +
+  `&fetchSize=${UKRI_PROJECT_SEARCH_FETCH_SIZE}` +
+  `&selectedSortableField=score` +
+  `&selectedSortOrder=DESC` +
+  `&selectedFacets=` +
+  `&fields=project.abs`;
 
     try {
       const res = await fetchGtrJson(url, 30000, 2);
