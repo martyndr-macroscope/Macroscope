@@ -1081,6 +1081,30 @@ function normGrantTitle(s) {
     .trim();
 }
 
+function titleTokens(s) {
+  return normGrantTitle(s)
+    .split(' ')
+    .filter(w => w.length > 2 && ![
+      'the','and','for','with','from','into','onto','this','that','using','based'
+    ].includes(w));
+}
+
+function titleSimilarity(a, b) {
+  const A = new Set(titleTokens(a));
+  const B = new Set(titleTokens(b));
+
+  if (!A.size || !B.size) return 0;
+
+  let inter = 0;
+  for (const x of A) if (B.has(x)) inter++;
+
+  const union = new Set([...A, ...B]).size;
+  const jaccard = inter / union;
+  const containment = inter / Math.min(A.size, B.size);
+
+  return Math.max(jaccard, containment);
+}
+
 function getLocalItemTitle(item) {
   return String(
     item?.openalex?.display_name ||
@@ -1099,26 +1123,36 @@ function getLocalItemDoi(item) {
 function buildLocalPublicationIndex() {
   const byDoi = new Map();
   const byTitle = new Map();
+  const records = [];
 
   for (let i = 0; i < (itemsData?.length || 0); i++) {
     const item = itemsData[i];
     if (!item) continue;
 
     const doi = getLocalItemDoi(item);
-    const title = normGrantTitle(getLocalItemTitle(item));
+    const title = getLocalItemTitle(item);
+    const titleNorm = normGrantTitle(title);
+    const year =
+      Number(item?.openalex?.publication_year) ||
+      Number(item?.publication_year) ||
+      Number(item?.year) ||
+      NaN;
+
+    const rec = { i, item, doi, title, titleNorm, year };
+    records.push(rec);
 
     if (doi) {
       if (!byDoi.has(doi)) byDoi.set(doi, []);
       byDoi.get(doi).push(i);
     }
 
-    if (title) {
-      if (!byTitle.has(title)) byTitle.set(title, []);
-      byTitle.get(title).push(i);
+    if (titleNorm) {
+      if (!byTitle.has(titleNorm)) byTitle.set(titleNorm, []);
+      byTitle.get(titleNorm).push(i);
     }
   }
 
-  return { byDoi, byTitle };
+  return { byDoi, byTitle, records };
 }
 
 function extractXmlValues(xml, selectors) {
@@ -1324,7 +1358,7 @@ function extractPublicationCoreFromGtr(pubObj) {
 
     const doi = doiCandidates
       .map(cleanGtrDoi)
-      .find(v => v && v.includes('/')) || '';
+      .find(v => v && /^10\.\d{4,9}\//i.test(v)) || '';
 
     const year = yearFromAny(gtrText(pubObj));
 
@@ -1336,31 +1370,82 @@ function extractPublicationCoreFromGtr(pubObj) {
     };
   }
 
-  const core = extractPublicationCore(pubObj);
+  const title =
+    pubObj?.title ||
+    pubObj?.publicationTitle ||
+    pubObj?.name ||
+    pubObj?.description ||
+    pubObj?.publication?.title ||
+    pubObj?.publication?.publicationTitle ||
+    '';
 
-  const doiFromText = deepCollectStrings(
-    pubObj,
-    s => /10\.\d{4,9}\//i.test(String(s || ''))
-  ).map(cleanGtrDoi).find(Boolean) || '';
+  const doiCandidates = [
+    pubObj?.doi,
+    pubObj?.DOI,
+    pubObj?.digitalPublicationUrl,
+    pubObj?.url,
+    pubObj?.publication?.doi,
+    pubObj?.publication?.digitalPublicationUrl,
+    ...deepCollectStrings(pubObj, s => /10\.\d{4,9}\//i.test(String(s || '')))
+  ];
+
+  const doi = doiCandidates
+    .map(cleanGtrDoi)
+    .find(v => v && /^10\.\d{4,9}\//i.test(v)) || '';
+
+  const year =
+    yearFromAny(pubObj?.publishedDate) ||
+    yearFromAny(pubObj?.publicationDate) ||
+    yearFromAny(pubObj?.date) ||
+    yearFromAny(pubObj?.year) ||
+    yearFromAny(gtrText(pubObj));
 
   return {
-    title: core.title || '',
-    title_norm: normGrantTitle(core.title || ''),
-    doi: cleanGtrDoi(core.doi || doiFromText || ''),
-    year: core.year
+    title,
+    title_norm: normGrantTitle(title),
+    doi,
+    year: Number.isFinite(year) ? year : NaN
   };
 }
 
 function matchGtrPublicationToLocal(pubCore, localIndex) {
   const matches = new Set();
 
+  // 1. Exact DOI match
   if (pubCore.doi && localIndex.byDoi.has(pubCore.doi)) {
     for (const i of localIndex.byDoi.get(pubCore.doi)) matches.add(i);
   }
 
-  if (!matches.size && pubCore.title_norm && localIndex.byTitle.has(pubCore.title_norm)) {
+  if (matches.size) return Array.from(matches);
+
+  // 2. Exact normalised title match
+  if (pubCore.title_norm && localIndex.byTitle.has(pubCore.title_norm)) {
     for (const i of localIndex.byTitle.get(pubCore.title_norm)) matches.add(i);
   }
+
+  if (matches.size) return Array.from(matches);
+
+  // 3. Fuzzy title match, optionally year-confirmed
+  let best = { i: -1, score: 0 };
+
+  for (const rec of localIndex.records || []) {
+    if (!rec.titleNorm || !pubCore.title_norm) continue;
+
+    const sim = titleSimilarity(pubCore.title_norm, rec.titleNorm);
+
+    const yearOk =
+      !Number.isFinite(pubCore.year) ||
+      !Number.isFinite(rec.year) ||
+      Math.abs(pubCore.year - rec.year) <= 1;
+
+    const threshold = yearOk ? 0.82 : 0.92;
+
+    if (sim > best.score && sim >= threshold) {
+      best = { i: rec.i, score: sim };
+    }
+  }
+
+  if (best.i >= 0) matches.add(best.i);
 
   return Array.from(matches);
 }
@@ -1474,34 +1559,55 @@ continue;
 
 async function fetchGtrPublicationDetailsFromProject(projectUrl, projectObj) {
   const pubUrls = [];
+  let embedded = extractEmbeddedPublicationObjects(projectObj);
 
   // 1. Links embedded in project record
   const links = extractGtrLinks(projectObj);
   for (const l of links) {
-    if (/PUBLICATION|OUTCOME/.test(l.rel) && /\/api\/publications?\//i.test(l.href)) {
+    if (/PUBLICATION|OUTCOME|OUTPUT/.test(l.rel) && /\/api\/publications?/i.test(l.href)) {
       pubUrls.push(l.href);
     }
   }
 
-  // 2. Explicit outcomes/publications endpoint
-  const outcomesUrl = getProjectOutcomePublicationUrl(projectUrl);
-  if (outcomesUrl) {
-    try {
-      const outObj = await fetchGtrJson(outcomesUrl, 30000, 2);
-      pubUrls.push(...extractGtrResourceUrlsAny(outObj, 'publication'));
+  // 2. If the fetched project has UUID-style id, try outcomes endpoint
+  const uuid =
+    projectObj?.projectComposition?.project?.id ||
+    projectObj?.project?.id ||
+    projectObj?.id ||
+    '';
 
-      // Sometimes the outcomes endpoint returns embedded publication records.
-      const embedded = extractEmbeddedPublicationObjects(outObj);
-      if (embedded.length) return { pubUrls: uniqueBy(pubUrls, s => s), embedded };
+  const candidateOutcomeUrls = [];
+
+  if (uuid) {
+    candidateOutcomeUrls.push(`${GTR_API_BASE}/projects/${encodeURIComponent(uuid)}/outcomes/publications`);
+  }
+
+  const outcomesUrl = getProjectOutcomePublicationUrl(projectUrl);
+  if (outcomesUrl) candidateOutcomeUrls.push(outcomesUrl);
+
+  for (const u of uniqueBy(candidateOutcomeUrls, s => s)) {
+    try {
+      const outObj = await fetchGtrJson(u, 30000, 1);
+      pubUrls.push(...extractGtrResourceUrlsAny(outObj, 'publication'));
+      embedded.push(...extractEmbeddedPublicationObjects(outObj));
+      await delay(UKRI_GRANTS_DELAY_MS_SAFE);
     } catch (e) {
-      console.warn('GtR project publication outcomes lookup failed:', outcomesUrl, e);
+      console.warn('GtR project publication outcomes lookup failed:', u, e);
     }
   }
 
-  return { pubUrls: uniqueBy(pubUrls, s => s), embedded: [] };
+  return {
+    pubUrls: uniqueBy(pubUrls.map(normaliseGtrUrl), s => s),
+    embedded: uniqueBy(embedded, p => {
+      const c = extractPublicationCoreFromGtr(p);
+      return `${c.doi || ''}|${c.title_norm || ''}|${c.year || ''}`;
+    })
+  };
 }
 
 function extractEmbeddedPublicationObjects(obj) {
+  const out = [];
+
   if (obj instanceof Document) {
     const candidates = Array.from(obj.querySelectorAll(
       'publication, gtr\\:publication, result, gtr\\:result'
@@ -1509,26 +1615,59 @@ function extractEmbeddedPublicationObjects(obj) {
     return candidates.length ? candidates : [];
   }
 
-  const out = [];
+  function pushMaybe(x) {
+    if (!x || typeof x !== 'object') return;
+
+    const looksLikePub =
+      x.title ||
+      x.publicationTitle ||
+      x.doi ||
+      x.DOI ||
+      x.digitalPublicationUrl ||
+      x.publication?.title ||
+      x.publication?.doi;
+
+    if (looksLikePub) out.push(x);
+  }
 
   function walk(x) {
     if (!x) return;
+
     if (Array.isArray(x)) {
       x.forEach(walk);
       return;
     }
-    if (typeof x === 'object') {
-      const looksLikePub =
-        x.title || x.publicationTitle || x.doi || x.digitalPublicationUrl;
 
-      if (looksLikePub) out.push(x);
+    if (typeof x === 'object') {
+      pushMaybe(x);
+
+      // Explicit GtR shapes
+      if (Array.isArray(x?.projectComposition?.project?.publications)) {
+        x.projectComposition.project.publications.forEach(pushMaybe);
+      }
+
+      if (Array.isArray(x?.project?.publications)) {
+        x.project.publications.forEach(pushMaybe);
+      }
+
+      if (Array.isArray(x?.publications)) {
+        x.publications.forEach(pushMaybe);
+      }
+
+      if (Array.isArray(x?.outputs)) {
+        x.outputs.forEach(pushMaybe);
+      }
 
       Object.values(x).forEach(walk);
     }
   }
 
   walk(obj);
-  return out;
+
+  return uniqueBy(out, p => {
+    const c = extractPublicationCoreFromGtr(p);
+    return `${c.doi || ''}|${c.title_norm || ''}|${c.year || ''}`;
+  });
 }
 
 async function resolveAwardingBodyFromProject(projectObj) {
@@ -1672,6 +1811,13 @@ async function retrieveUkriGrantsProjectFirst({ institutionName }) {
 
     const { pubUrls, embedded } = await fetchGtrPublicationDetailsFromProject(projectUrl, projectObj);
 
+    console.log(
+  'GtR project publication candidates:',
+  extractProjectTitle(projectObj),
+  { pubUrls: pubUrls.length, embedded: embedded.length },
+  embedded.slice(0, 3).map(extractPublicationCoreFromGtr)
+);
+    
     const pubObjects = [...embedded];
 
     for (const pubUrl of pubUrls) {
