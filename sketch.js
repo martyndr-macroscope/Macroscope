@@ -728,7 +728,7 @@ async function fetchFulltextResponse(fullUrl, timeoutMs = 25000) {
 // UKRI Gateway to Research (GtR) enrichment
 // ─────────────────────────────────────────────────────────────────────────────
 
-const GTR_JSON_ACCEPT = 'application/vnd.rcuk.gtr.json-v7, application/json;q=0.9';
+const GTR_JSON_ACCEPT = 'application/xml, text/xml, */*';
 const GTR_SEARCH_BASE = 'https://gtr.ukri.org/api/search';
 const GTR_API_BASE    = 'https://gtr.ukri.org/api';
 
@@ -759,7 +759,7 @@ function normaliseGtrUrl(url) {
   return u;
 }
 
-async function fetchGtrJson(url, timeoutMs = 25000, maxRetries = 5) {
+async function fetchGtrJson(url, timeoutMs = 25000, maxRetries = 4) {
   const fullUrl = normaliseGtrUrl(url);
   if (!fullUrl) throw new Error('Empty GtR URL');
 
@@ -775,34 +775,82 @@ async function fetchGtrJson(url, timeoutMs = 25000, maxRetries = 5) {
         const r = await fetchWithTimeout(
           u,
           {
-            headers: { accept: GTR_JSON_ACCEPT },
+            headers: {
+              // GtR often returns XML even when JSON is requested.
+              accept: 'application/vnd.rcuk.gtr.json-v7, application/json;q=0.9, application/xml;q=0.8, text/xml;q=0.8, */*;q=0.5'
+            },
             mode: 'cors',
             redirect: 'follow'
           },
           timeoutMs
         );
 
-        if (r.ok) {
-          const text = await r.text();
+        const text = await r.text();
+
+        // Do not retry permanent URL/endpoint failures.
+        if (r.status === 404) {
+          throw new Error(`GtR HTTP 404 for ${fullUrl}`);
+        }
+
+        // Retry temporary / throttling failures.
+        if (!r.ok) {
+          if ([429, 500, 502, 503, 504].includes(r.status)) {
+            const waitMs = Math.min(60000, 3000 * Math.pow(2, retry));
+            console.warn(`GtR temporary HTTP ${r.status}; waiting ${waitMs} ms before retrying:`, fullUrl);
+            await delay(waitMs);
+            lastErr = new Error(`GtR HTTP ${r.status} for ${fullUrl}`);
+            continue;
+          }
+
+          throw new Error(`GtR HTTP ${r.status} for ${fullUrl}`);
+        }
+
+        // First try JSON.
+        try {
           return JSON.parse(text);
+        } catch {
+          // Then try XML.
+          const xml = new DOMParser().parseFromString(text, 'application/xml');
+          const parserError = xml.querySelector('parsererror');
+
+          if (parserError) {
+            throw new Error(`GtR returned non-JSON and non-XML for ${fullUrl}`);
+          }
+
+          return xml;
         }
 
-        if (r.status === 429) {
-          const waitMs = Math.min(60000, 3000 * Math.pow(2, retry));
-          console.warn(`GtR rate limited. Waiting ${waitMs} ms before retrying:`, fullUrl);
-          await delay(waitMs);
-          lastErr = new Error(`GtR HTTP 429 for ${fullUrl}`);
-          continue;
-        }
-
-        lastErr = new Error(`GtR HTTP ${r.status} for ${fullUrl}`);
       } catch (e) {
         lastErr = e;
+
+        // Do not retry 404-like failures.
+        if (String(e?.message || '').includes('HTTP 404')) {
+          throw e;
+        }
       }
     }
   }
 
   throw lastErr || new Error(`GtR request failed for ${fullUrl}`);
+}
+
+function extractGtrResourceUrls(obj, kind) {
+  if (obj instanceof Document) {
+    const links = Array.from(obj.querySelectorAll('link, gtr\\:link, resourceUrl, gtr\\:resourceUrl'));
+    return uniqueBy(
+      links
+        .map(el => normaliseGtrUrl(el.textContent || el.getAttribute('href') || ''))
+        .filter(u => kind === 'publication'
+          ? /\/api\/publication\//i.test(u)
+          : kind === 'project'
+            ? /\/api\/project/i.test(u)
+            : true
+        ),
+      s => s
+    );
+  }
+
+  // existing JSON path below...
 }
 
 function getVisiblePublicationIndices() {
