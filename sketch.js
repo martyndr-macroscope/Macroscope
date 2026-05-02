@@ -1178,14 +1178,14 @@ function extractGtrLinks(obj) {
 function extractGtrResourceUrlsAny(obj, kind) {
   const rx =
     kind === 'project'
-      ? /\/api\/projects?\/[A-Z0-9-]+/i
+      ? /\/api\/projects?(?:[/?][^"'<>\s]*)?/i
       : kind === 'publication'
-        ? /\/api\/publications?\/[A-Z0-9-]+/i
+        ? /\/api\/publications?(?:[/?][^"'<>\s]*)?/i
         : kind === 'organisation'
-          ? /\/api\/organisation\/[A-Z0-9-]+/i
+          ? /\/api\/organisation(?:[/?][^"'<>\s]*)?/i
           : kind === 'fund'
-            ? /\/api\/funds?\/[A-Z0-9-]+/i
-            : /\/api\/[a-z]+\/[A-Z0-9-]+/i;
+            ? /\/api\/funds?(?:[/?][^"'<>\s]*)?/i
+            : /\/api\/[a-z]+(?:[/?][^"'<>\s]*)?/i;
 
   const urls = [];
 
@@ -1216,13 +1216,27 @@ function extractGtrResourceUrlsAny(obj, kind) {
 }
 
 function extractProjectIdFromUrl(url) {
-  const m = String(url || '').match(/\/api\/projects?\/([^/?#]+)/i);
-  return m ? m[1] : '';
+  const s = String(url || '');
+
+  try {
+    const u = new URL(s);
+    const ref = u.searchParams.get('ref');
+    if (ref) return decodeURIComponent(ref);
+  } catch {}
+
+  const m = s.match(/\/api\/projects?\/([^/?#]+)/i);
+  return m ? decodeURIComponent(m[1]) : '';
 }
 
 function getProjectOutcomePublicationUrl(projectUrl) {
+  const s = String(projectUrl || '');
+
+  // GtR search often returns project URLs as /api/projects?ref=...
+  // Do not construct /outcomes/publications from those, because the ref can contain slashes.
+  if (/[?&]ref=/i.test(s)) return '';
+
   const id = extractProjectIdFromUrl(projectUrl);
-  return id ? `${GTR_API_BASE}/projects/${id}/outcomes/publications` : '';
+  return id ? `${GTR_API_BASE}/projects/${encodeURIComponent(id)}/outcomes/publications` : '';
 }
 
 function extractProjectTitle(projectObj) {
