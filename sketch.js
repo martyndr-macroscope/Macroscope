@@ -1556,6 +1556,14 @@ async function resolveAwardingBodyFromProject(projectObj) {
   return String(direct || '').trim();
 }
 
+function formatGrantDateRange(start, end) {
+  const s = compactDateStr(start);
+  const e = compactDateStr(end);
+
+  if (s && e) return `${s} → ${e}`;
+  return s || e || '';
+}
+
 async function buildGrantRecordFromProject(projectUrl, projectObj, institutionName) {
   const title = extractProjectTitle(projectObj);
   const dates = extractProjectDates(projectObj);
