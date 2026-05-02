@@ -759,43 +759,46 @@ function normaliseGtrUrl(url) {
   return u;
 }
 
-async function fetchGtrJson(url, timeoutMs = 25000) {
+async function fetchGtrJson(url, timeoutMs = 25000, maxRetries = 5) {
   const fullUrl = normaliseGtrUrl(url);
   if (!fullUrl) throw new Error('Empty GtR URL');
 
-  // GtR is not CORS-open for direct browser calls from semanticspace.ai,
-  // so prefer proxy-only in production. Direct is OK for localhost debugging.
   const attempts = (FETCH_PROXY && !IS_LOCAL)
     ? [viaProxy(fullUrl)]
     : (FETCH_PROXY ? [viaProxy(fullUrl), fullUrl] : [fullUrl]);
 
   let lastErr = null;
 
-  for (const u of attempts) {
-    try {
-      const r = await fetchWithTimeout(
-        u,
-        {
-          headers: { accept: GTR_JSON_ACCEPT },
-          mode: 'cors',
-          redirect: 'follow'
-        },
-        timeoutMs
-      );
-
-      if (!r.ok) {
-        lastErr = new Error(`GtR HTTP ${r.status} for ${fullUrl}`);
-        continue;
-      }
-
-      const text = await r.text();
+  for (let retry = 0; retry <= maxRetries; retry++) {
+    for (const u of attempts) {
       try {
-        return JSON.parse(text);
-      } catch {
-        lastErr = new Error(`GtR returned non-JSON for ${fullUrl}`);
+        const r = await fetchWithTimeout(
+          u,
+          {
+            headers: { accept: GTR_JSON_ACCEPT },
+            mode: 'cors',
+            redirect: 'follow'
+          },
+          timeoutMs
+        );
+
+        if (r.ok) {
+          const text = await r.text();
+          return JSON.parse(text);
+        }
+
+        if (r.status === 429) {
+          const waitMs = Math.min(60000, 3000 * Math.pow(2, retry));
+          console.warn(`GtR rate limited. Waiting ${waitMs} ms before retrying:`, fullUrl);
+          await delay(waitMs);
+          lastErr = new Error(`GtR HTTP 429 for ${fullUrl}`);
+          continue;
+        }
+
+        lastErr = new Error(`GtR HTTP ${r.status} for ${fullUrl}`);
+      } catch (e) {
+        lastErr = e;
       }
-    } catch (e) {
-      lastErr = e;
     }
   }
 
