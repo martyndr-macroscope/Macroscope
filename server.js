@@ -23,33 +23,35 @@ app.get('/fetch', async (req, res) => {
   try {
     const raw = req.query.url || '';
     const u = new URL(String(raw));
+
     if (!['http:', 'https:'].includes(u.protocol)) {
       return res.status(400).json({ error: 'Only http/https allowed' });
     }
+
     const upstream = await fetch(u, {
       redirect: 'follow',
-      headers: { 'User-Agent': 'Mozilla/5.0 (LocalFetcher)' }
+      headers: {
+        'User-Agent': 'Macroscope/1.0',
+        'Accept': 'application/vnd.rcuk.gtr.json-v7, application/json;q=0.9, application/xml;q=0.8, text/xml;q=0.8, */*;q=0.5'
+      }
     });
-    if (!upstream.ok) return res.status(upstream.status).send(`Upstream ${upstream.status}`);
 
     const ctype = upstream.headers.get('content-type') || 'application/octet-stream';
+    const body = await upstream.arrayBuffer();
+
+    res.set('Access-Control-Allow-Origin', '*');
     res.set('Content-Type', ctype);
     res.set('Cache-Control', 'no-store');
 
-    let sent = 0;
-    const reader = upstream.body.getReader();
-    res.writeHead(200);
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      sent += value.byteLength;
-      if (sent > MAX_BYTES) { res.end(); return; }
-      res.write(Buffer.from(value));
+    if (body.byteLength > MAX_BYTES) {
+      return res.status(413).send('Upstream response too large');
     }
-    res.end();
+
+    return res.status(upstream.status).send(Buffer.from(body));
+
   } catch (e) {
-    console.error(e);
-    res.status(502).send('Fetch failed');
+    console.error('Fetch proxy failed:', e);
+    return res.status(502).send(String(e?.message || e || 'Fetch failed'));
   }
 });
 
