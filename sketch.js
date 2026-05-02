@@ -1189,29 +1189,52 @@ async function retrieveUkriGrantsForVisible() {
   }
 
   let hits = 0;
+  let checked = 0;
+  let failed = 0;
 
   for (let k = 0; k < ids.length; k++) {
     const i = ids[k];
     const item = itemsData?.[i] || {};
-    const title = String(item?.openalex?.display_name || item?.openalex?.title || item?.label || `Item ${i + 1}`);
+    const title = String(
+      item?.openalex?.display_name ||
+      item?.openalex?.title ||
+      item?.label ||
+      `Item ${i + 1}`
+    );
 
-    msg = `Retrieve UKRI Grants: ${k + 1}/${ids.length} — ${title}`;
+    msg = `Retrieve UKRI Grants: ${k + 1}/${ids.length} — positive: ${hits}, failed: ${failed} — ${title}`;
     updateInfo?.();
     redraw?.();
 
     try {
       const grants = await buildUkriGrantRecordsForItem(i);
       setUkriGrantsOnItem(i, grants);
-      if (grants.length) hits++;
+
+      checked++;
+
+      if (grants.length) {
+        hits++;
+        item.ukri_grants_positive = true;
+      } else {
+        item.ukri_grants_positive = false;
+      }
+
     } catch (e) {
       console.warn('UKRI grants lookup failed for item', i, e);
       setUkriGrantsOnItem(i, []);
+      item.ukri_grants_positive = false;
+      item.ukri_grants_error = String(e?.message || e || 'Unknown error');
+      failed++;
     }
+
+    msg = `Retrieve UKRI Grants: checked ${checked}/${ids.length} — positive: ${hits}, failed: ${failed}`;
+    updateInfo?.();
+    redraw?.();
 
     await delay(UKRI_GRANTS_DELAY_MS);
   }
 
-  msg = `Retrieve UKRI Grants complete: ${hits} / ${ids.length} visible publications matched to UKRI grants.`;
+  msg = `Retrieve UKRI Grants complete: ${hits} / ${ids.length} visible publications tested positive. Failed: ${failed}.`;
   updateInfo?.();
   redraw?.();
 }
