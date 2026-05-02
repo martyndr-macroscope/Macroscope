@@ -1249,11 +1249,13 @@ function extractProjectTitle(projectObj) {
     ])[0] || '';
   }
 
-  return extractBestTextField(projectObj, [
-    'title',
-    'name',
-    'projectTitle'
-  ]);
+  return (
+    projectObj?.projectComposition?.project?.title ||
+    projectObj?.title ||
+    projectObj?.name ||
+    projectObj?.projectTitle ||
+    ''
+  );
 }
 
 function extractProjectDates(projectObj) {
@@ -1366,6 +1368,14 @@ function matchGtrPublicationToLocal(pubCore, localIndex) {
 function institutionAppearsInProject(projectObj, institutionName) {
   const needle = normGrantTitle(institutionName);
   if (!needle) return false;
+
+  const leadOrg =
+    projectObj?.projectComposition?.leadResearchOrganisation?.name ||
+    projectObj?.leadResearchOrganisation?.name ||
+    '';
+
+  if (normGrantTitle(leadOrg).includes(needle)) return true;
+
   return normGrantTitle(gtrText(projectObj)).includes(needle);
 }
 
@@ -1398,21 +1408,24 @@ function inferInstitutionRole(projectObj, institutionName) {
 }
 
 function extractGrantValueForInstitution(projectObj, institutionName) {
-  const text = gtrText(projectObj);
-  const needle = normGrantTitle(institutionName);
+  const directValue =
+    projectObj?.projectComposition?.project?.fund?.valuePounds ??
+    projectObj?.project?.fund?.valuePounds ??
+    projectObj?.fund?.valuePounds ??
+    null;
 
-  const moneyMatches = Array.from(
-    text.matchAll(/£\s?[\d,]+(?:\.\d+)?|GBP\s?[\d,]+(?:\.\d+)?/gi)
-  ).map(m => m[0]);
+  if (Number.isFinite(Number(directValue))) {
+    return {
+      value_to_institution: Number(directValue),
+      project_value_possible: `£${Number(directValue).toLocaleString('en-GB')}`,
+      value_note: 'GtR project fund value. For single-lead projects this is treated as value associated with the lead institution.'
+    };
+  }
 
-  // Conservative: if we cannot confidently attribute it to the institution,
-  // store the visible project-level amount as "possible", not definitive.
   return {
     value_to_institution: '',
-    project_value_possible: moneyMatches[0] || '',
-    value_note: moneyMatches.length
-      ? 'Project/fund value detected in GtR text; institution-specific value not confidently attributable from this record.'
-      : 'No monetary value detected in fetched GtR project record.'
+    project_value_possible: '',
+    value_note: 'No monetary value detected in fetched GtR project record.'
   };
 }
 
@@ -1451,8 +1464,8 @@ async function searchGtrProjectsForInstitution(institutionName) {
 
       await delay(UKRI_GRANTS_DELAY_MS_SAFE);
     } catch (e) {
-      console.warn('GtR project search failed:', url, e);
-      break;
+console.warn('GtR project search page failed; continuing:', url, e);
+continue;
     }
   }
 
@@ -1516,6 +1529,31 @@ function extractEmbeddedPublicationObjects(obj) {
 
   walk(obj);
   return out;
+}
+
+async function resolveAwardingBodyFromProject(projectObj) {
+  if (projectObj instanceof Document) {
+    const funderNames = extractXmlValues(projectObj, [
+      'funder name',
+      'gtr\\:funder gtr\\:name',
+      'funder',
+      'gtr\\:funder',
+      'name',
+      'gtr\\:name'
+    ]);
+
+    return funderNames[0] || '';
+  }
+
+  const direct =
+    projectObj?.projectComposition?.project?.fund?.funder?.name ||
+    projectObj?.fund?.funder?.name ||
+    projectObj?.funder?.name ||
+    projectObj?.funderName ||
+    projectObj?.leadFunderName ||
+    '';
+
+  return String(direct || '').trim();
 }
 
 async function buildGrantRecordFromProject(projectUrl, projectObj, institutionName) {
