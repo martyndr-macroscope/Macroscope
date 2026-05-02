@@ -763,9 +763,11 @@ async function fetchGtrJson(url, timeoutMs = 25000, maxRetries = 4) {
   const fullUrl = normaliseGtrUrl(url);
   if (!fullUrl) throw new Error('Empty GtR URL');
 
-  const attempts = (FETCH_PROXY && !IS_LOCAL)
-    ? [viaProxy(fullUrl)]
-    : (FETCH_PROXY ? [viaProxy(fullUrl), fullUrl] : [fullUrl]);
+  // Try proxy first, then direct. This is important because the proxy can
+  // return false 404s even when GtR itself returns a valid XML result.
+  const attempts = FETCH_PROXY
+    ? [viaProxy(fullUrl), fullUrl]
+    : [fullUrl];
 
   let lastErr = null;
 
@@ -776,8 +778,7 @@ async function fetchGtrJson(url, timeoutMs = 25000, maxRetries = 4) {
           u,
           {
             headers: {
-              // GtR often returns XML even when JSON is requested.
-              accept: 'application/vnd.rcuk.gtr.json-v7, application/json;q=0.9, application/xml;q=0.8, text/xml;q=0.8, */*;q=0.5'
+              accept: GTR_JSON_ACCEPT
             },
             mode: 'cors',
             redirect: 'follow'
@@ -787,34 +788,41 @@ async function fetchGtrJson(url, timeoutMs = 25000, maxRetries = 4) {
 
         const text = await r.text();
 
-        // Do not retry permanent URL/endpoint failures.
+        // Do not immediately throw on 404: proxy may produce false 404s.
+        // Continue to the next attempt, usually the direct GtR URL.
         if (r.status === 404) {
-          throw new Error(`GtR HTTP 404 for ${fullUrl}`);
+          lastErr = new Error(`GtR HTTP 404 for ${fullUrl}`);
+          continue;
         }
 
-        // Retry temporary / throttling failures.
+        // Retry throttling/server errors with exponential backoff.
         if (!r.ok) {
           if ([429, 500, 502, 503, 504].includes(r.status)) {
             const waitMs = Math.min(60000, 3000 * Math.pow(2, retry));
-            console.warn(`GtR temporary HTTP ${r.status}; waiting ${waitMs} ms before retrying:`, fullUrl);
+            console.warn(
+              `GtR temporary HTTP ${r.status}; waiting ${waitMs} ms before retrying:`,
+              fullUrl
+            );
             await delay(waitMs);
             lastErr = new Error(`GtR HTTP ${r.status} for ${fullUrl}`);
             continue;
           }
 
-          throw new Error(`GtR HTTP ${r.status} for ${fullUrl}`);
+          lastErr = new Error(`GtR HTTP ${r.status} for ${fullUrl}`);
+          continue;
         }
 
-        // First try JSON.
+        // Try JSON first.
         try {
           return JSON.parse(text);
         } catch {
-          // Then try XML.
+          // GtR often returns XML even when JSON is requested.
           const xml = new DOMParser().parseFromString(text, 'application/xml');
           const parserError = xml.querySelector('parsererror');
 
           if (parserError) {
-            throw new Error(`GtR returned non-JSON and non-XML for ${fullUrl}`);
+            lastErr = new Error(`GtR returned non-JSON and non-XML for ${fullUrl}`);
+            continue;
           }
 
           return xml;
@@ -822,11 +830,7 @@ async function fetchGtrJson(url, timeoutMs = 25000, maxRetries = 4) {
 
       } catch (e) {
         lastErr = e;
-
-        // Do not retry 404-like failures.
-        if (String(e?.message || '').includes('HTTP 404')) {
-          throw e;
-        }
+        continue;
       }
     }
   }
