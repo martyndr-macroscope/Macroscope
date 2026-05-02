@@ -1189,13 +1189,20 @@ function extractGtrResourceUrlsAny(obj, kind) {
 
   const urls = [];
 
+  if (obj?._gtrNoMatch) return [];
+
   if (obj instanceof Document) {
-    urls.push(...extractXmlValues(obj, [
-      'resourceUrl',
-      'gtr\\:resourceUrl',
-      'link',
-      'gtr\\:link'
-    ]));
+    const nodes = Array.from(obj.querySelectorAll('*'));
+
+    for (const el of nodes) {
+      for (const attr of ['href', 'url', 'resourceUrl']) {
+        const v = el.getAttribute?.(attr);
+        if (v) urls.push(v);
+      }
+
+      const txt = String(el.textContent || '').trim();
+      if (txt) urls.push(txt);
+    }
   } else {
     urls.push(...deepCollectStrings(obj, s => rx.test(String(s || ''))));
   }
@@ -1411,6 +1418,12 @@ async function searchGtrProjectsForInstitution(institutionName) {
 
     try {
       const res = await fetchGtrJson(url, 30000, 2);
+      console.log(
+  'GtR project search response sample:',
+  res instanceof Document
+    ? res.documentElement.outerHTML.slice(0, 2000)
+    : JSON.stringify(res).slice(0, 2000)
+);
       const urls = extractGtrResourceUrlsAny(res, 'project');
 
       for (const u of urls) projectUrls.push(u);
