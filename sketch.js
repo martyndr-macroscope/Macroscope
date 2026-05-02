@@ -1729,6 +1729,55 @@ async function buildGrantRecordFromProject(projectUrl, projectObj, institutionNa
   };
 }
 
+function normaliseUkriGrantFieldsOnItem(item) {
+  if (!item) return;
+
+  const raw =
+    Array.isArray(item.ukri_grants) ? item.ukri_grants :
+    Array.isArray(item['UKRI Grants']) ? item['UKRI Grants'] :
+    Array.isArray(item.ukriGrants) ? item.ukriGrants :
+    [];
+
+  const clean = raw.filter(g => g && (g.grant_title || g.title || g.project_title));
+
+  if (clean.length) {
+    item.ukri_grants = clean.map(g => ({
+      grant_title: g.grant_title || g.title || g.project_title || '(Untitled UKRI project)',
+      dates: g.dates || '',
+      start_date: g.start_date || g.start || '',
+      end_date: g.end_date || g.end || '',
+      awarding_body: g.awarding_body || g.funder || g.funder_name || '',
+      institution_searched: g.institution_searched || '',
+      institution_role: g.institution_role || '',
+      institution_is_pi_or_lead: !!g.institution_is_pi_or_lead,
+      value_to_institution: g.value_to_institution ?? '',
+      project_value_possible: g.project_value_possible ?? g.value_pounds ?? '',
+      value_note: g.value_note || '',
+      project_id: g.project_id || g.grant_reference || g.grantReference || '',
+      project_url: g.project_url || g.resourceUrl || '',
+      source: g.source || 'UKRI Gateway to Research',
+      match_method: g.match_method || '',
+      matched_publication_title: g.matched_publication_title || '',
+      matched_publication_doi: g.matched_publication_doi || ''
+    }));
+
+    item['UKRI Grants'] = item.ukri_grants;
+    item.ukri_grants_positive = true;
+  } else {
+    delete item.ukri_grants;
+    delete item['UKRI Grants'];
+    item.ukri_grants_positive = false;
+  }
+}
+
+function itemHasUkriGrant(item) {
+  return !!(
+    item?.ukri_grants_positive ||
+    (Array.isArray(item?.ukri_grants) && item.ukri_grants.length) ||
+    (Array.isArray(item?.['UKRI Grants']) && item['UKRI Grants'].length)
+  );
+}
+
 function appendUkriGrantToItem(i, grant) {
   const item = itemsData?.[i];
   if (!item || !grant?.grant_title) return false;
@@ -2265,6 +2314,8 @@ let ovClusterColors = 0;   // node tint saturation for clusters
 let ovClusterLabels = 0;   // label pill opacity for clusters
 let ovFieldLabels = 0;     // label pill opacity for fields
 let ovRefAssessment = 0;   // coloured REF asterisk overlay
+let ovUkriGrants = 0;      // £ overlay on publications with UKRI grants
+
 
 // Keep handles to overlay sliders so we can restore UI positions on load
 let ovAbsSlider = null,
@@ -2272,7 +2323,8 @@ let ovAbsSlider = null,
     ovClustColorSlider = null,
     ovClustLabelSlider = null,
     ovFieldLabelSlider = null,
-    ovRefAssessmentSlider = null;
+ovRefAssessmentSlider = null,
+ovUkriGrantsSlider = null;
 let nodeSizeSlider = null;
 
 
@@ -4736,6 +4788,32 @@ if (ovRefAssessment > 0 && alpha > 0) {
     text('*', p.x, p.y);
     pop();
   }
+}
+
+// --- UKRI Grants overlay (£ icon on publications with matched grants) ---
+if (ovUkriGrants > 0 && alpha > 0 && itemHasUkriGrant(itemsData?.[i])) {
+  const grantA = Math.round(255 * ovUkriGrants);
+
+  push();
+  textAlign(CENTER, CENTER);
+  textStyle(BOLD);
+
+  const baseSize =
+    isSquare
+      ? (r * 2 * getFulltextBoxMult() * 1.35)
+      : (r * 2.8);
+
+  textSize(Math.max(8 / cam.scale, baseSize));
+
+  stroke(0, Math.round(grantA * 0.75));
+  strokeWeight(1.5 / cam.scale);
+  fill(255, 220, 90, grantA);
+
+  const dx = r * 0.85;
+  const dy = -r * 0.85;
+  text('£', p.x + dx, p.y + dy);
+
+  pop();
 }
 
   }
@@ -12663,15 +12741,16 @@ const filt = {
     fulltextSizeScale
   };
 
-  const overlays = {
-    ovAbstracts,
-    ovOpenAccess,
-    ovClusterColors,
-    ovClusterLabels,
-    ovFieldLabels,
-    ovRefAssessment,
-    semanticZoomEnabled
-  };
+const overlays = {
+  ovAbstracts,
+  ovOpenAccess,
+  ovClusterColors,
+  ovClusterLabels,
+  ovFieldLabels,
+  ovRefAssessment,
+  ovUkriGrants,
+  semanticZoomEnabled
+};
 
     const fieldState = {
     fieldOfCluster:
@@ -12729,6 +12808,7 @@ const filt = {
 
     items: itemsData.map((it, i) => {
       const clone = { ...(it || {}) };
+      normaliseUkriGrantFieldsOnItem(clone);
 
       const text = typeof clone.fulltext === 'string' ? clone.fulltext : '';
       if (text.trim()) {
@@ -12982,6 +13062,9 @@ async function restoreProjectState(save) {
   // 1) Put base data back
   setLoadingProgress(0.28, 'Preparing data…');
   itemsData = Array.isArray(save.items) ? save.items : [];
+  for (const item of itemsData) {
+  normaliseUkriGrantFieldsOnItem(item);
+}
   const es = Array.isArray(save.edges) ? save.edges : buildEdgesFromItems(itemsData);
 
   // 2) Rebuild nodes from items so all derived fields exist
@@ -13143,6 +13226,7 @@ async function restoreProjectState(save) {
     if (Number.isFinite(+save.overlays.ovClusterLabels)) ovClusterLabels = +save.overlays.ovClusterLabels;
     if (Number.isFinite(+save.overlays.ovFieldLabels)) ovFieldLabels = +save.overlays.ovFieldLabels;
     if (Number.isFinite(+save.overlays.ovRefAssessment)) ovRefAssessment = +save.overlays.ovRefAssessment;
+    if (Number.isFinite(+save.overlays.ovUkriGrants)) ovUkriGrants = +save.overlays.ovUkriGrants;
     if (typeof save.overlays.semanticZoomEnabled === 'boolean') {
       semanticZoomEnabled = save.overlays.semanticZoomEnabled;
     }
@@ -13265,6 +13349,7 @@ if (save.semantic_clustering && typeof save.semantic_clustering === 'object') {
   applySavedOverlayValue(ovClustLabelSlider, ovClusterLabels);
   applySavedOverlayValue(ovFieldLabelSlider, ovFieldLabels);
   applySavedOverlayValue(ovRefAssessmentSlider, ovRefAssessment);
+  applySavedOverlayValue(ovUkriGrantsSlider, ovUkriGrants);
 
 if (nodeSizeSlider?.elt) {
   const currentRadius = NODE_R * nodeSizeScale;
@@ -20425,6 +20510,10 @@ function buildOverlaysInto(containerBody) {
     ovRefAssessment = Number(e.target.value) / 100;
     redraw();
   });
+  ovUkriGrantsSlider = mkSlider('UKRI Grants £', Math.round(ovUkriGrants * 100), (e) => {
+  ovUkriGrants = Number(e.target.value) / 100;
+  redraw();
+});
 
 }
 
