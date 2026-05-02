@@ -640,9 +640,9 @@ async function fetchOAJson(fullUrl, timeoutMs = 25000) {
   let lastErr = null;
 
   // Always try proxy first if configured, but do NOT globally disable it on one failure.
-  const attempts = FETCH_PROXY
-    ? [viaProxy(fullUrl), fullUrl]
-    : [fullUrl];
+const attempts = (FETCH_PROXY && !IS_LOCAL)
+  ? [viaProxy(fullUrl)]
+  : (FETCH_PROXY ? [viaProxy(fullUrl), fullUrl] : [fullUrl]);
 
   for (const u of attempts) {
     try {
@@ -759,13 +759,15 @@ function normaliseGtrUrl(url) {
   return u;
 }
 
-async function fetchGtrJson(url, timeoutMs = 25000, maxRetries = 4) {
+async function fetchGtrJson(url, timeoutMs = 25000, maxRetries = 3) {
   const fullUrl = normaliseGtrUrl(url);
   if (!fullUrl) throw new Error('Empty GtR URL');
 
-const attempts = FETCH_PROXY
-  ? [viaProxy(fullUrl), fullUrl]
-  : [fullUrl];
+  // Hosted semanticspace.ai must use proxy only.
+  // Direct GtR calls are blocked by CORS.
+  const attempts = (FETCH_PROXY && !IS_LOCAL)
+    ? [viaProxy(fullUrl)]
+    : (FETCH_PROXY ? [viaProxy(fullUrl), fullUrl] : [fullUrl]);
 
   let lastErr = null;
 
@@ -775,10 +777,7 @@ const attempts = FETCH_PROXY
         const r = await fetchWithTimeout(
           u,
           {
-            headers: {
-              // GtR often returns XML even when JSON is requested.
-              accept: 'application/vnd.rcuk.gtr.json-v7, application/json;q=0.9, application/xml;q=0.8, text/xml;q=0.8, */*;q=0.5'
-            },
+            headers: { accept: GTR_JSON_ACCEPT },
             mode: 'cors',
             redirect: 'follow'
           },
@@ -787,13 +786,10 @@ const attempts = FETCH_PROXY
 
         const text = await r.text();
 
-        // Do not retry permanent URL/endpoint failures.
-if (r.status === 404) {
-  lastErr = new Error(`GtR HTTP 404 for ${fullUrl}`);
-  continue;
-}
+        if (r.status === 404) {
+          return { _gtrNoMatch: true, _status: 404, _url: fullUrl };
+        }
 
-        // Retry temporary / throttling failures.
         if (!r.ok) {
           if ([429, 500, 502, 503, 504].includes(r.status)) {
             const waitMs = Math.min(60000, 3000 * Math.pow(2, retry));
@@ -806,11 +802,9 @@ if (r.status === 404) {
           throw new Error(`GtR HTTP ${r.status} for ${fullUrl}`);
         }
 
-        // First try JSON.
         try {
           return JSON.parse(text);
         } catch {
-          // Then try XML.
           const xml = new DOMParser().parseFromString(text, 'application/xml');
           const parserError = xml.querySelector('parsererror');
 
@@ -823,11 +817,6 @@ if (r.status === 404) {
 
       } catch (e) {
         lastErr = e;
-
-        // Do not retry 404-like failures.
-        if (String(e?.message || '').includes('HTTP 404')) {
-          throw e;
-        }
       }
     }
   }
@@ -898,6 +887,30 @@ function deepCollectStrings(obj, predicate, out = []) {
   }
 
   return out;
+}
+
+
+function rebuildAdj() {
+  adj = new Array(nodes.length).fill(0).map(() => []);
+
+  for (const e of (edges || [])) {
+    const s = Number(e.source);
+    const t = Number(e.target);
+
+    if (
+      Number.isInteger(s) &&
+      Number.isInteger(t) &&
+      s >= 0 &&
+      t >= 0 &&
+      s < nodes.length &&
+      t < nodes.length
+    ) {
+      adj[s].push(t);
+      adj[t].push(s);
+    }
+  }
+
+  return adj;
 }
 
 function extractGtrResourceUrls(obj, kind) {
@@ -1703,6 +1716,29 @@ let msg = "";
 let layoutRunning = false;
 let vx = [], vy = [];       // velocities per node
 let adj = [];               // adjacency list (built from edges)
+
+function rebuildAdj() {
+  adj = new Array(nodes.length).fill(0).map(() => []);
+
+  for (const e of (edges || [])) {
+    const s = Number(e.source);
+    const t = Number(e.target);
+
+    if (
+      Number.isInteger(s) &&
+      Number.isInteger(t) &&
+      s >= 0 &&
+      t >= 0 &&
+      s < nodes.length &&
+      t < nodes.length
+    ) {
+      adj[s].push(t);
+      adj[t].push(s);
+    }
+  }
+
+  return adj;
+}
 
 function stopLayoutCompletely() {
   layoutRunning = false;
