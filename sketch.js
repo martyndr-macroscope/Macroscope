@@ -1273,28 +1273,69 @@ function getProjectOutcomePublicationUrl(projectUrl) {
   return id ? `${GTR_API_BASE}/projects/${encodeURIComponent(id)}/outcomes/publications` : '';
 }
 
+function findGtrProjectComposition(obj) {
+  if (!obj || typeof obj !== 'object' || obj instanceof Document) return null;
+
+  if (obj.projectComposition?.project) return obj.projectComposition;
+  if (obj.project?.title || obj.project?.grantReference || obj.project?.fund) {
+    return { project: obj.project, leadResearchOrganisation: obj.leadResearchOrganisation || null };
+  }
+  if (obj.title || obj.grantReference || obj.fund) {
+    return { project: obj, leadResearchOrganisation: obj.leadResearchOrganisation || null };
+  }
+
+  if (Array.isArray(obj)) {
+    for (const x of obj) {
+      const found = findGtrProjectComposition(x);
+      if (found) return found;
+    }
+  } else {
+    for (const v of Object.values(obj)) {
+      const found = findGtrProjectComposition(v);
+      if (found) return found;
+    }
+  }
+
+  return null;
+}
+
+function gtrMillisToDateString(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return '';
+  const d = new Date(n);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toISOString().slice(0, 10);
+}
+
 function extractProjectTitle(projectObj) {
   if (projectObj instanceof Document) {
     return extractXmlValues(projectObj, [
       'title',
       'gtr\\:title',
+      'grantReference',
+      'gtr\\:grantReference',
       'name',
       'gtr\\:name'
     ])[0] || '';
   }
 
-  return (
-    projectObj?.projectComposition?.project?.title ||
+  const pc = findGtrProjectComposition(projectObj);
+  const p = pc?.project || {};
+
+  return String(
+    p.title ||
     projectObj?.title ||
     projectObj?.name ||
     projectObj?.projectTitle ||
     ''
-  );
+  ).trim();
 }
 
 function extractProjectDates(projectObj) {
   if (projectObj instanceof Document) {
     const start = extractXmlValues(projectObj, [
+      'fund start',
+      'gtr\\:fund gtr\\:start',
       'start',
       'gtr\\:start',
       'startDate',
@@ -1302,6 +1343,8 @@ function extractProjectDates(projectObj) {
     ])[0] || '';
 
     const end = extractXmlValues(projectObj, [
+      'fund end',
+      'gtr\\:fund gtr\\:end',
       'end',
       'gtr\\:end',
       'endDate',
@@ -1314,26 +1357,19 @@ function extractProjectDates(projectObj) {
     };
   }
 
-  const directStart = extractBestTextField(projectObj, [
-    'start',
-    'startDate',
-    'fundStart',
-    'plannedStartDate'
-  ]);
+  const pc = findGtrProjectComposition(projectObj);
+  const p = pc?.project || {};
+  const f = p.fund || projectObj?.fund || {};
 
-  const directEnd = extractBestTextField(projectObj, [
-    'end',
-    'endDate',
-    'fundEnd',
-    'plannedEndDate'
-  ]);
+  const start =
+    gtrMillisToDateString(f.start) ||
+    compactDateStr(f.startDate || p.start || p.startDate || '');
 
-  const linkDates = extractLinkedDateRangeByRel(projectObj, 'FUND');
+  const end =
+    gtrMillisToDateString(f.end) ||
+    compactDateStr(f.endDate || p.end || p.endDate || '');
 
-  return {
-    start: compactDateStr(directStart || linkDates.start || ''),
-    end: compactDateStr(directEnd || linkDates.end || '')
-  };
+  return { start, end };
 }
 
 function extractPublicationCoreFromGtr(pubObj) {
@@ -1493,10 +1529,14 @@ function inferInstitutionRole(projectObj, institutionName) {
 }
 
 function extractGrantValueForInstitution(projectObj, institutionName) {
+  const pc = findGtrProjectComposition(projectObj);
+  const p = pc?.project || {};
+  const f = p.fund || projectObj?.fund || {};
+
   const directValue =
+    f.valuePounds ??
     projectObj?.projectComposition?.project?.fund?.valuePounds ??
     projectObj?.project?.fund?.valuePounds ??
-    projectObj?.fund?.valuePounds ??
     null;
 
   if (Number.isFinite(Number(directValue))) {
@@ -1684,15 +1724,19 @@ async function resolveAwardingBodyFromProject(projectObj) {
     return funderNames[0] || '';
   }
 
-  const direct =
+  const pc = findGtrProjectComposition(projectObj);
+  const p = pc?.project || {};
+  const f = p.fund || projectObj?.fund || {};
+
+  return String(
+    f?.funder?.name ||
     projectObj?.projectComposition?.project?.fund?.funder?.name ||
     projectObj?.fund?.funder?.name ||
     projectObj?.funder?.name ||
     projectObj?.funderName ||
     projectObj?.leadFunderName ||
-    '';
-
-  return String(direct || '').trim();
+    ''
+  ).trim();
 }
 
 function formatGrantDateRange(start, end) {
@@ -1709,6 +1753,15 @@ async function buildGrantRecordFromProject(projectUrl, projectObj, institutionNa
   const awardingBody = await resolveAwardingBodyFromProject(projectObj);
   const valueInfo = extractGrantValueForInstitution(projectObj, institutionName);
   const role = inferInstitutionRole(projectObj, institutionName);
+
+  console.log('Built UKRI grant record:', {
+  title,
+  dates,
+  awardingBody,
+  valueInfo,
+  projectUrl,
+  shape: projectObj?.projectComposition ? 'projectComposition' : Object.keys(projectObj || {}).slice(0, 10)
+});
 
   return {
     grant_title: title || '(Untitled UKRI project)',
