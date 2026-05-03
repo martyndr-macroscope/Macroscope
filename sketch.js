@@ -198,9 +198,287 @@ async function ensureFulltextAvailable(i, { attachToItem = true } = {}) {
     return item.fulltext;
   }
 
+  // 1. Existing IndexedDB cache path
   const restored = await loadPersistedFulltextForIndex(i, { attachToItem });
-  return restored || '';
+  if (restored) return restored;
+
+  // 2. New external shard cache path
+  const external = await loadExternalShardFulltextForIndex(i, { attachToItem });
+  if (external) return external;
+
+  return '';
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// External shard-based full-text cache support
+// For macroscope-text-cache v0.2+ outputs.
+// ─────────────────────────────────────────────────────────────────────────────
+
+let FT_EXTERNAL_DIR_HANDLE = null;
+let FT_EXTERNAL_MANIFEST = null;
+let FT_EXTERNAL_SHARD_CACHE = new Map(); // cache_path -> Map(recordKey -> record)
+
+function hasExternalTextCache(item) {
+  const tc = item?.text_cache || item?.fulltext_cache || null;
+
+  return !!(
+    tc &&
+    (tc.status === 'ok' || tc.cache_ok === true || tc.ok === true) &&
+    (tc.cache_path || tc.shard_path || tc.path)
+  );
+}
+
+function itemHasAnyFulltextCache(item) {
+  return !!(
+    (typeof item?.fulltext === 'string' && item.fulltext.trim()) ||
+    item?.fulltext_cached ||
+    item?.fulltext_cache_key ||
+    item?.fulltext_cache_ok ||
+    hasExternalTextCache(item)
+  );
+}
+
+function normaliseExternalTextCacheOnItem(item) {
+  if (!item) return false;
+
+  const tc = item.text_cache || item.fulltext_cache || null;
+  const hasExternal = hasExternalTextCache(item);
+
+  if (hasExternal) {
+    item.fulltext_cached = true;
+    item.fulltext_cache_ok = true;
+    item.fulltext_chars = Number(tc.chars || tc.fulltext_chars || item.fulltext_chars || 0) || 0;
+    item.fulltext_source = tc.source_url || tc.source || item.fulltext_source || '';
+    item.fulltext_source_kind = tc.kind || tc.source_kind || item.fulltext_source_kind || '';
+    item.fulltext_extracted_at = tc.created_at || tc.extracted_at || item.fulltext_extracted_at || '';
+    item.fulltext_cache_path = tc.cache_path || tc.shard_path || tc.path || '';
+    item.fulltext_cache_record_id = tc.record_id || tc.id || tc.key || '';
+    return true;
+  }
+
+  return itemHasAnyFulltextCache(item);
+}
+
+function getTextCachePathForItem(item) {
+  const tc = item?.text_cache || item?.fulltext_cache || {};
+  return String(
+    tc.cache_path ||
+    tc.shard_path ||
+    tc.path ||
+    item?.fulltext_cache_path ||
+    ''
+  ).trim();
+}
+
+function getExternalRecordKeysForItem(item, i) {
+  const tc = item?.text_cache || item?.fulltext_cache || {};
+  const oa = item?.openalex || {};
+
+  const keys = [
+    tc.record_id,
+    tc.id,
+    tc.key,
+    item?.fulltext_cache_record_id,
+    item?.id,
+    oa.id,
+    normOA?.(oa.id),
+    oa.doi,
+    item?.doi,
+    normDOI?.(oa.doi || item?.doi || ''),
+    getStableCacheKeyForIndex?.(i)
+  ]
+    .filter(Boolean)
+    .map(v => String(v).trim())
+    .filter(Boolean);
+
+  return Array.from(new Set(keys));
+}
+
+function normaliseShardRecordKey(rec) {
+  return String(
+    rec?.id ||
+    rec?.key ||
+    rec?.openalexId ||
+    rec?.openalex_id ||
+    rec?.doi ||
+    ''
+  ).trim();
+}
+
+async function chooseExternalTextCacheFolder() {
+  if (!window.showDirectoryPicker) {
+    alert(
+      'Your browser does not support folder access. Use Chrome/Edge, or run Macroscope from a local server and keep the cache folder beside the JSON.'
+    );
+    return false;
+  }
+
+  FT_EXTERNAL_DIR_HANDLE = await window.showDirectoryPicker({
+    mode: 'read'
+  });
+
+  FT_EXTERNAL_SHARD_CACHE.clear();
+
+  try {
+    const manifestHandle = await FT_EXTERNAL_DIR_HANDLE.getFileHandle('manifest.json');
+    const manifestFile = await manifestHandle.getFile();
+    FT_EXTERNAL_MANIFEST = JSON.parse(await manifestFile.text());
+  } catch (e) {
+    console.warn('No manifest.json found in selected cache folder. Shards can still be loaded by path.', e);
+    FT_EXTERNAL_MANIFEST = null;
+  }
+
+  // Refresh node square states
+  for (let i = 0; i < (itemsData?.length || 0); i++) {
+    const item = itemsData[i];
+    const hasFT = normaliseExternalTextCacheOnItem(item);
+    if (nodes?.[i]) nodes[i].hasFullText = !!hasFT;
+  }
+
+  msg = 'External text cache folder connected.';
+  updateInfo?.();
+  redraw?.();
+  return true;
+}
+
+async function getFileHandleByRelativePath(rootHandle, relPath) {
+  const parts = String(relPath || '')
+    .replace(/^\.?\//, '')
+    .split('/')
+    .filter(Boolean);
+
+  if (!parts.length) throw new Error('Empty cache path.');
+
+  let handle = rootHandle;
+
+  // If user selected the parent project folder and path starts cache/...
+  // this works. If user selected the cache folder itself and path starts cache/,
+  // skip the first segment.
+  let start = 0;
+  if (parts[0] === 'cache') {
+    try {
+      handle = await handle.getDirectoryHandle('cache');
+      start = 1;
+    } catch {
+      start = 1;
+    }
+  }
+
+  for (let p = start; p < parts.length - 1; p++) {
+    handle = await handle.getDirectoryHandle(parts[p]);
+  }
+
+  return await handle.getFileHandle(parts[parts.length - 1]);
+}
+
+async function loadShardMap(cachePath) {
+  const cleanPath = String(cachePath || '').replace(/^\.?\//, '');
+  if (!cleanPath) throw new Error('No shard path supplied.');
+
+  if (FT_EXTERNAL_SHARD_CACHE.has(cleanPath)) {
+    return FT_EXTERNAL_SHARD_CACHE.get(cleanPath);
+  }
+
+  if (!FT_EXTERNAL_DIR_HANDLE) {
+    throw new Error('External text cache folder not connected. Use Load > Connect Text Cache Folder.');
+  }
+
+  const fileHandle = await getFileHandleByRelativePath(FT_EXTERNAL_DIR_HANDLE, cleanPath);
+  const file = await fileHandle.getFile();
+  const text = await file.text();
+
+  const map = new Map();
+
+  // JSONL preferred
+  if (cleanPath.endsWith('.jsonl')) {
+    for (const line of text.split(/\r?\n/)) {
+      const s = line.trim();
+      if (!s) continue;
+
+      try {
+        const rec = JSON.parse(s);
+        const primary = normaliseShardRecordKey(rec);
+        if (primary) map.set(primary, rec);
+
+        // Add useful aliases
+        for (const alias of [
+          rec.id,
+          rec.key,
+          rec.openalexId,
+          rec.openalex_id,
+          rec.doi,
+          normDOI?.(rec.doi || '')
+        ].filter(Boolean)) {
+          map.set(String(alias).trim(), rec);
+        }
+      } catch (e) {
+        console.warn('Bad JSONL shard line skipped:', e);
+      }
+    }
+  } else {
+    // Also tolerate JSON array/object shards
+    const parsed = JSON.parse(text);
+    const rows = Array.isArray(parsed) ? parsed : Object.values(parsed.records || parsed.items || parsed);
+    for (const rec of rows) {
+      const primary = normaliseShardRecordKey(rec);
+      if (primary) map.set(primary, rec);
+    }
+  }
+
+  FT_EXTERNAL_SHARD_CACHE.set(cleanPath, map);
+  return map;
+}
+
+async function loadExternalShardFulltextForIndex(i, { attachToItem = true } = {}) {
+  const item = itemsData?.[i];
+  if (!item || !hasExternalTextCache(item)) return '';
+
+  const cachePath = getTextCachePathForItem(item);
+  const shardMap = await loadShardMap(cachePath);
+  const keys = getExternalRecordKeysForItem(item, i);
+
+  let rec = null;
+  for (const k of keys) {
+    if (shardMap.has(k)) {
+      rec = shardMap.get(k);
+      break;
+    }
+  }
+
+  // Fallback: scan by DOI/title if direct key failed
+  if (!rec) {
+    const itemDoi = normDOI?.(item?.openalex?.doi || item?.doi || '') || '';
+    const itemTitle = normTitle?.(item?.openalex?.display_name || item?.openalex?.title || item?.title || item?.label || '') || '';
+
+    for (const candidate of shardMap.values()) {
+      const cDoi = normDOI?.(candidate?.doi || '') || '';
+      const cTitle = normTitle?.(candidate?.title || '') || '';
+      if ((itemDoi && cDoi && itemDoi === cDoi) || (itemTitle && cTitle && itemTitle === cTitle)) {
+        rec = candidate;
+        break;
+      }
+    }
+  }
+
+  const fulltext = String(rec?.text || rec?.fulltext || rec?.content || '').trim();
+  if (!fulltext) return '';
+
+  item.fulltext_cached = true;
+  item.fulltext_cache_ok = true;
+  item.fulltext_chars = fulltext.length;
+  item.fulltext_source = rec.source_url || rec.source || item.fulltext_source || '';
+  item.fulltext_source_kind = rec.kind || rec.source_kind || item.fulltext_source_kind || '';
+  item.fulltext_validation = rec.validation || item.fulltext_validation || null;
+
+  if (nodes?.[i]) nodes[i].hasFullText = true;
+
+  if (attachToItem) {
+    item.fulltext = fulltext;
+  }
+
+  return fulltext;
+}
+
 
 async function rehydrateAllPersistedFulltextsForSave() {
   for (let i = 0; i < (itemsData?.length || 0); i++) {
@@ -3559,6 +3837,20 @@ importPdfBtn.style('cursor', 'pointer');
 captureUI?.(importPdfBtn.elt);
 importPdfBtn.mousePressed(openPdfImportDialog);
 
+const connectTextCacheBtn = createButton('Connect Text Cache Folder');
+connectTextCacheBtn.parent(loadMenu);
+connectTextCacheBtn.mousePressed(async () => {
+  closeLoadMenu?.();
+  try {
+    await chooseExternalTextCacheFolder();
+  } catch (e) {
+    console.error(e);
+    msg = 'Failed to connect text cache folder.';
+    updateInfo?.();
+    redraw?.();
+  }
+});
+
 // Click-away close
 document.addEventListener('pointerdown', (ev) => {
   if (!loadMenu || loadMenu.elt.style.display === 'none') return;
@@ -4015,7 +4307,8 @@ let dimsIndex = {
   concepts: new Map(),
   institutions: new Map(),
   clusters: new Map(),
-  fields: new Map()
+  fields: new Map(),
+  grants: new Map()
 };
 
 
@@ -5744,6 +6037,67 @@ function svgClusterRefBars(sum, width = 236, height = 86) {
   `;
 }
 
+function buildGrantDimensionInfoHTML(d) {
+  const nodesArr = Array.from(d.nodes || []);
+  const grant = d.grant || {};
+
+  const refVals = nodesArr
+    .map(i => getNodeRefOverlayValue(i))
+    .filter(v => Number.isFinite(v));
+
+  const dist = { 1: 0, 2: 0, 3: 0, 4: 0 };
+  for (const v of refVals) {
+    const star = Math.max(1, Math.min(4, Math.round(v)));
+    dist[star]++;
+  }
+
+  const gpa = refVals.length
+    ? refVals.reduce((a, b) => a + b, 0) / refVals.length
+    : NaN;
+
+  const totalValue =
+    Number(grant.value_to_institution) ||
+    Number(String(grant.project_value_possible || '').replace(/[£,]/g, '')) ||
+    NaN;
+
+  const bar = (label, n, max) => {
+    const w = max ? Math.round((n / max) * 100) : 0;
+    return `
+      <div style="display:grid;grid-template-columns:28px 1fr 28px;gap:6px;align-items:center;margin:3px 0">
+        <div>${label}</div>
+        <div style="height:8px;background:rgba(255,255,255,.10);border-radius:999px;overflow:hidden">
+          <div style="height:100%;width:${w}%;background:rgba(255,220,90,.85)"></div>
+        </div>
+        <div style="text-align:right">${n}</div>
+      </div>
+    `;
+  };
+
+  const max = Math.max(1, dist[1], dist[2], dist[3], dist[4]);
+
+  return `
+    <div style="margin:10px 0 12px 0;padding:10px;border:1px solid rgba(255,255,255,0.14);border-radius:8px;background:rgba(255,255,255,0.04)">
+      <div style="font-weight:600;font-size:13px;margin-bottom:8px;">UKRI Grant Summary</div>
+
+      <div style="display:grid;grid-template-columns:auto 1fr;gap:6px 10px;font-size:12px;margin-bottom:10px">
+        <div style="opacity:.7">Associated pubs</div><div>${nodesArr.length}</div>
+        <div style="opacity:.7">REF-assessed pubs</div><div>${refVals.length}</div>
+        <div style="opacity:.7">REF GPA</div><div>${Number.isFinite(gpa) ? gpa.toFixed(2) : '—'}</div>
+        <div style="opacity:.7">Awarding body</div><div>${esc(grant.awarding_body || '—')}</div>
+        <div style="opacity:.7">Dates</div><div>${esc(grant.dates || '—')}</div>
+        <div style="opacity:.7">Value</div><div>${Number.isFinite(totalValue) ? `£${totalValue.toLocaleString('en-GB')}` : esc(grant.project_value_possible || '—')}</div>
+        <div style="opacity:.7">PI/lead institution</div><div>${grant.institution_is_pi_or_lead ? 'Yes' : 'No / uncertain'}</div>
+      </div>
+
+      <div style="font-weight:600;font-size:12px;margin:8px 0 4px;">REF star distribution</div>
+      ${bar('4★', dist[4], max)}
+      ${bar('3★', dist[3], max)}
+      ${bar('2★', dist[2], max)}
+      ${bar('1★', dist[1], max)}
+    </div>
+  `;
+}
+
 function buildClusterDimensionInfoHTML(d) {
   if (!d || String(d.type || '').toLowerCase() !== 'clusters') return '';
 
@@ -6670,11 +7024,13 @@ _renderDimensionPanel(k) {
   let extraSummary = '';
   let aiLensHtml = '';
 
-  if (d.type === 'fields' && d.summaryHtml) {
-    extraSummary = `<div style="margin:10px 0 12px 0">${d.summaryHtml}</div>`;
-  } else if (String(d.type || '').toLowerCase() === 'clusters') {
-    extraSummary = buildClusterDimensionInfoHTML(d);
-  }
+if (d.type === 'fields' && d.summaryHtml) {
+  extraSummary = `<div style="margin:10px 0 12px 0">${d.summaryHtml}</div>`;
+} else if (String(d.type || '').toLowerCase() === 'clusters') {
+  extraSummary = buildClusterDimensionInfoHTML(d);
+} else if (String(d.type || '').toLowerCase() === 'grants') {
+  extraSummary = buildGrantDimensionInfoHTML(d);
+}
 
   // --- NEW: aggregated author summary card ----------------------------------
   let authorMetaHtml = '';
@@ -7102,13 +7458,12 @@ const refsTotal = Array.isArray(w.referenced_works)
     const abstractFull = abstractText;
     const abstractShort = abstractFull.length > 1000 ? abstractFull.slice(0,1000) + '…' : abstractFull;
 
-const hasFullText = !!(
-  (typeof item.fulltext === 'string' && item.fulltext.trim().length > 0) ||
-  item.fulltext_cached ||
-  item.fulltext_cache_key ||
-  nodes?.[i]?.hasFullText
-);
-    const canExtract  = _hasFTCand(w, doiUrl);
+const hasFullText = itemHasAnyFulltextCache(item);
+const tc = item.text_cache || item.fulltext_cache || {};
+const cachePath = getTextCachePathForItem(item);
+const cachedChars = Number(item.fulltext_chars || tc.chars || 0) || 0;
+const cachedKind = item.fulltext_source_kind || tc.kind || tc.source_kind || '';
+const canExtract  = _hasFTCand(w, doiUrl);
 
     // REF score display (if available)
         const refBand = String(item.ref_score_band || '').trim();
@@ -7231,7 +7586,19 @@ ${ukriGrantsHtml}
       ${
         hasFullText
           ? `<div id="${ftId}" style="opacity:.95">
-     Cached ✓ <span style="opacity:.65;font-size:12px">(${String(item.fulltext||'').length.toLocaleString()} chars)</span>
+     <div style="
+       padding:7px 8px;
+       border:1px solid rgba(120,210,140,.45);
+       border-radius:8px;
+       background:rgba(70,150,90,.16);
+       margin-bottom:7px;
+     ">
+       <b>Cached ✓</b>
+       ${cachedChars ? `<span style="opacity:.75;font-size:12px">(${cachedChars.toLocaleString()} chars)</span>` : ''}
+       ${cachedKind ? `<div style="opacity:.75;font-size:12px">Source: ${safe(cachedKind)}</div>` : ''}
+       ${cachePath ? `<div style="opacity:.55;font-size:11px;word-break:break-all">Shard: ${safe(cachePath)}</div>` : ''}
+     </div>
+
      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">
        <button id="${ftViewId}" style="background:rgba(255,255,255,0.08);
          border:1px solid rgba(255,255,255,0.2);color:#fff;padding:6px 10px;
@@ -7427,6 +7794,9 @@ console.log('Pill counts updated', { i, refs: it.refsCount, citedBy: it.cbc });
 
     // REF score display (prefer itemsData because REF scoring is stored there)
     const item = itemsData[i] || {};
+    const hasCachedFulltext = itemHasAnyFulltextCache(item);
+const tc = item.text_cache || item.fulltext_cache || {};
+const cachePath = getTextCachePathForItem(item);
     const refBand = String(item.ref_score_band || d.ref_score_band || '').trim();
     const refPctRaw = (item.ref_percent ?? d.ref_percent);
     const refPct = Number(refPctRaw);
@@ -7552,7 +7922,51 @@ ${
 }
 
 
+function grantDimensionKey(g) {
+  return [
+    normGrantTitle(g?.grant_title || g?.title || ''),
+    g?.project_id || '',
+    g?.start_date || '',
+    g?.end_date || ''
+  ].join('|');
+}
 
+function grantDisplayLabel(g) {
+  return g?.grant_title || g?.title || g?.project_title || '(Untitled UKRI project)';
+}
+
+function getItemUkriGrants(item) {
+  if (Array.isArray(item?.ukri_grants)) return item.ukri_grants;
+  if (Array.isArray(item?.['UKRI Grants'])) return item['UKRI Grants'];
+  return [];
+}
+
+function buildGrantDimensionsIndex() {
+  const map = new Map();
+
+  for (let i = 0; i < (itemsData?.length || 0); i++) {
+    const grants = getItemUkriGrants(itemsData[i]);
+
+    for (const g of grants) {
+      const key = grantDimensionKey(g);
+      if (!key.trim()) continue;
+
+      if (!map.has(key)) {
+        map.set(key, {
+          key,
+          type: 'grants',
+          label: grantDisplayLabel(g),
+          nodes: new Set(),
+          grant: { ...g }
+        });
+      }
+
+      map.get(key).nodes.add(i);
+    }
+  }
+
+  return map;
+}
 
 
 
@@ -7881,6 +8295,7 @@ function buildDimensionsIndex() {
   dimsIndex.concepts.clear();
   dimsIndex.institutions.clear();
   dimsIndex.fields.clear();
+  dimsIndex.grants = buildGrantDimensionsIndex();
   // NOTE: dimsIndex.clusters is rebuilt separately at the end.
 
   const push = (map, key, idx) => {
@@ -7974,9 +8389,6 @@ if (rec.count >= min) dimsIndex.clusters.set(rec.label, rec);
       if (rec.count > 0) dimsIndex.fields.set(rec.label, rec);
     }
   }
-
-
-
 }
 
 
@@ -8325,6 +8737,69 @@ captureUI(row.elt);
   return det;
 }
 
+function createGrantDimensionsFromItems({ replaceExisting = true } = {}) {
+  const grantMap = buildGrantDimensionsIndex();
+
+  if (!grantMap.size) {
+    msg = 'No UKRI grant-linked publications found to create grant dimensions.';
+    updateInfo?.();
+    redraw?.();
+    return 0;
+  }
+
+  if (replaceExisting) {
+    dimTools = (dimTools || []).filter(d => String(d?.type || '').toLowerCase() !== 'grants');
+    if (typeof dimByKey?.clear === 'function') dimByKey.clear();
+  }
+
+  const C = worldCenterFromCamera ? worldCenterFromCamera() : { x: 0, y: 0 };
+  const radius = 260;
+  let added = 0;
+
+  const grants = Array.from(grantMap.values())
+    .sort((a, b) => b.nodes.size - a.nodes.size);
+
+  grants.forEach((rec, j) => {
+    const toolKey = `grants:${rec.key}`;
+    const angle = (Math.PI * 2 * j) / Math.max(1, grants.length);
+
+    const existing = (dimTools || []).findIndex(d => d.key === toolKey);
+    const tool = {
+      type: 'grants',
+      key: toolKey,
+      label: rec.label,
+      nodes: rec.nodes,
+      power: DEFAULT_DIM_POWER,
+      x: C.x + Math.cos(angle) * radius,
+      y: C.y + Math.sin(angle) * radius,
+      selected: false,
+      userMoved: false,
+      color: [255, 220, 90],
+      focusOn: false,
+      grant: rec.grant
+    };
+
+    if (existing >= 0) {
+      dimTools[existing] = { ...dimTools[existing], ...tool };
+    } else {
+      dimTools.push(tool);
+      added++;
+    }
+  });
+
+  dimMembershipDirty = true;
+  if (lenses?.hideNonDim) recomputeVisibility?.();
+
+  msg = `Created ${grantMap.size} UKRI grant dimensions.`;
+  updateInfo?.();
+  redraw?.();
+
+  return added;
+}
+
+if (typeof window !== 'undefined') {
+  window.createGrantDimensionsFromItems = createGrantDimensionsFromItems;
+}
 
 // Place this right after esc(s) and before the UI that calls it.
 function toggleDimensionTool(type, rec) {
@@ -10414,15 +10889,16 @@ function setSynthBodyText(text, filename = 'synthesis.md') {
   }
 }
 // ---- [ADD] Inspect extracted full text for a single item ----
-function openExtractedFullTextPanel(i) {
+async function openExtractedFullTextPanel(i) {
   const it = itemsData?.[i] || {};
-  const txt = String(it.fulltext || '');
-  if (!txt.trim()) {
-    openSynthPanel?.('No extracted text cached for this item.');
+  const txt = await ensureFulltextAvailable(i, { attachToItem: true });
+
+  if (!String(txt || '').trim()) {
+    openSynthPanel?.('No extracted text cached for this item. If this is a shard-based cache, use Load → Connect Text Cache Folder first.');
     return;
   }
 
-  const title = it.title || it.openalex?.title || `Item ${i}`;
+  const title = it.title || it.openalex?.display_name || it.openalex?.title || `Item ${i}`;
   const heading = `${title} — Extracted text`;
   openSynthPanel?.(heading);
 
@@ -10431,11 +10907,12 @@ function openExtractedFullTextPanel(i) {
   const esc = (s) => String(s ?? '').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
   const meta =
 `Source: ${it.fulltext_source || '-'}
+Kind: ${it.fulltext_source_kind || '-'}
+Shard: ${getTextCachePathForItem(it) || '-'}
 Extracted: ${it.fulltext_extracted_at || '-'}
-Chars: ${txt.length}
+Chars: ${String(txt).length}
 `;
 
-  // Render as <pre> to avoid markdown formatting costs and preserve what was extracted
   const html =
     `<div class="review-container">
        <div class="review-subheading-sm">Extraction metadata</div>
@@ -10448,14 +10925,16 @@ Chars: ${txt.length}
     synthBody.html(html);
     synthBody.elt.scrollTop = 0;
   }
+
+  enforceFulltextMemoryLimit?.({ keepVisible: false });
 }
 
-function downloadExtractedFullText(i) {
+async function downloadExtractedFullText(i) {
   const it = itemsData?.[i] || {};
-  const txt = String(it.fulltext || '');
-  if (!txt.trim()) return;
+  const txt = await ensureFulltextAvailable(i, { attachToItem: true });
+  if (!String(txt || '').trim()) return;
 
-  const title = (it.title || it.openalex?.title || `item_${i}`)
+  const title = (it.title || it.openalex?.display_name || it.openalex?.title || `item_${i}`)
     .replace(/[^\w\-]+/g, '_')
     .slice(0, 80);
 
@@ -10466,6 +10945,8 @@ function downloadExtractedFullText(i) {
   a.download = `${title}_extracted.txt`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 2500);
+
+  enforceFulltextMemoryLimit?.({ keepVisible: false });
 }
 
 
@@ -10900,7 +11381,7 @@ async function openaiChatDirect(messages, opts = {}) {
 
 
 // Collect visible cached full texts and map to a consistent corpus
-function collectVisibleForReader() {
+async function collectVisibleForReader() {
   // Your project already has this helper; keep this shim name for compatibility
   return collectVisibleFulltextCorpus(); // expects [{idx,title,authors,year,venue,doi,text}, ...]
 }
@@ -11651,9 +12132,9 @@ function getRefUoaFromDocOrItem(d) {
 // Main entry point (wired from AI dropdown)
 async function runREFLens() {
   // 0) Collect visible cached full texts (same mechanism as Reader)
-  const docsRaw = (typeof collectVisibleFulltextCorpus === 'function')
-    ? collectVisibleFulltextCorpus()
-    : [];
+const docsRaw = (typeof collectVisibleFulltextCorpus === 'function')
+  ? await collectVisibleFulltextCorpus()
+  : [];
   if (!docsRaw.length) { openSynthPanel('No cached full texts visible.'); return; }
 
   // IMPORTANT: ensure each doc has x,y so the lens/marker is placed correctly
@@ -13128,10 +13609,8 @@ async function restoreProjectState(save) {
   // Reconnect persisted full-text metadata to node state
   for (let i = 0; i < nodes.length; i++) {
     const item = itemsData?.[i] || {};
-    const hasFT =
-      !!item.fulltext_cached ||
-      !!item.fulltext_cache_key ||
-      (typeof item.fulltext === 'string' && item.fulltext.trim().length > 0);
+    const hasFT = normaliseExternalTextCacheOnItem(item);
+    nodes[i].hasFullText = !!hasFT;
 
     nodes[i].hasFullText = !!hasFT;
   }
@@ -14039,37 +14518,51 @@ const READER_TARGET_WORDS      = 5000;  // final review target length (approx)
 const READER_MAX_PAPERS        = 250;   // hard cap to avoid huge runs
 const READER_PAPERS_PER_CHUNK  = 30;    // how many stage-1 paragraphs to merge per chunk
 
-function collectVisibleFulltextCorpus() {
+async function collectVisibleFulltextCorpus() {
   const out = [];
   if (!Array.isArray(nodes) || !Array.isArray(itemsData)) return out;
+
   for (let i = 0; i < nodes.length; i++) {
-    if (!visibleMask?.[i]) continue;                   // only what’s on screen
+    if (!visibleMask?.[i]) continue;
+
     const it = itemsData[i];
-    if (!it || typeof it.fulltext !== 'string' || !it.fulltext.trim()) continue;  // cached full text only
+    if (!it || !itemHasAnyFulltextCache(it)) continue;
+
+    const text = await ensureFulltextAvailable(i, { attachToItem: true });
+    if (!String(text || '').trim()) continue;
+
     const w = it.openalex || {};
-    const title  = w.display_name || w.title || it.title || 'Untitled';
-// Use the canonical helper – this fixes “Anon” by handling compact OpenAlex records.
-const authorsArr = (typeof getAuthors === 'function') ? getAuthors(w) : [];
-const authors    = Array.isArray(authorsArr) ? authorsArr.join(', ') : String(authorsArr || '');
-const year   = w.publication_year || '';
-// Add venue fallbacks (covers compact OA + primary_location)
-const venue  = w.host_venue?.display_name
-           || w.primary_location?.source?.display_name
-           || w.venue_name
-           || '';
-// Normalise DOI
-const doiRaw   = (w.doi || '').toString();
-const doiClean = (typeof cleanDOI === 'function')
-  ? cleanDOI(doiRaw)
-  : doiRaw.replace(/^https?:\/\/doi\.org\//,'');
+    const title = w.display_name || w.title || it.title || 'Untitled';
+
+    const authorsArr = (typeof getAuthors === 'function') ? getAuthors(w) : [];
+    const authors = Array.isArray(authorsArr) ? authorsArr.join(', ') : String(authorsArr || '');
+
+    const year = w.publication_year || '';
+    const venue =
+      w.host_venue?.display_name ||
+      w.primary_location?.source?.display_name ||
+      w.venue_name ||
+      '';
+
+    const doiRaw = (w.doi || it.doi || '').toString();
+    const doiClean = (typeof cleanDOI === 'function')
+      ? cleanDOI(doiRaw)
+      : doiRaw.replace(/^https?:\/\/doi\.org\//, '');
 
     out.push({
       idx: i,
-      title, authors, year, venue,
+      title,
+      authors,
+      year,
+      venue,
       doi: doiClean,
-      text: it.fulltext
+      text,
+      source: 'fulltext'
     });
+
+    enforceFulltextMemoryLimit?.({ keepVisible: false });
   }
+
   return out;
 }
 
@@ -14411,9 +14904,8 @@ function escapeRegex(s) { return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'
 
 
 // --- Reader compatibility shim ---
-function collectVisibleForReader() {
-  // Old name used in earlier builds; just forward to the current helper
-  return collectVisibleFulltextCorpus();
+async function collectVisibleForReader() {
+  return await collectVisibleFulltextCorpus();
 }
 // Build a chunk prompt: summarize a group of full-text papers, keeping [n] tags
 
@@ -17200,7 +17692,7 @@ function addOpenAlexItemAsNode(item, workRaw) {
     oa: !!item.oa,
     cbc: Number(item.cbc || 0),
     hasAbs: !!item.hasAbs,
-    hasFullText: !!item.hasFullText,
+    hasFullText: itemHasAnyFulltextCache(item),
     visible: true
   });
   ensureVelArrays?.();
@@ -17525,7 +18017,7 @@ const y = Number(
     oa: !!item.oa,
     cbc: Number(item.cbc || 0),
     hasAbs: !!item.hasAbs,
-    hasFullText: !!item.hasFullText,
+    hasFullText: itemHasAnyFulltextCache(item),
     year: Number.isFinite(y) ? y : undefined, 
     visible: true
   });
@@ -19444,6 +19936,7 @@ async function sampleYear(year, k, ui = {}) {
     const wiggle = ((page - 1) % 20) / 20; // 0..0.95 loops
     const pct = p0 + (p1 - p0) * wiggle;
     setLoadingProgress(pct, `${labelPrefix}… page ${page} · scanned ${seen.toLocaleString()} · kept ${reservoir.length}/${k}`);
+    createGrantDimensionsFromItems({ replaceExisting: true });
     updateInfo?.();
     redraw?.();
 
@@ -20776,7 +21269,7 @@ for (let i = 0; i < N; i++) {
     oa: !!nn.oa,
     year: y,
     hasAbs: !!nn.hasAbs,
-    hasFullText: !!nn.hasFullText,
+    hasFullText: itemHasAnyFulltextCache(item),
     idStr: (nn.id || '').replace(/^https?:\/\/openalex\.org\//i, '') || null,
     intIn: (Number.isFinite(+nn.intIn) ? (+nn.intIn|0) : undefined),
   };
@@ -21152,6 +21645,9 @@ const dims = (dimTools || []).map(d => ({
   y: d.y,
   power: d.power|0,
   nodes: toArray(d.nodes),
+  ...(String(d.type || '').toLowerCase() === 'grants' ? {
+    grant: d.grant || null
+  } : {}),
   ...(d.type === 'ai' ? {
     aiSig:       d.aiSig || null,
     aiTitle:     d.aiTitle || d.label || null,
@@ -21219,7 +21715,8 @@ const dimIndexSnapshot = {
   authors:      snapshotMap(dimsIndex.authors),
   venues:       snapshotMap(dimsIndex.venues),
   concepts:     snapshotMap(dimsIndex.concepts),
-  institutions: snapshotMap(dimsIndex.institutions)
+  institutions: snapshotMap(dimsIndex.institutions),
+  grants:       snapshotMap(dimsIndex.grants || buildGrantDimensionsIndex())
 };
 
   return {
@@ -24886,7 +25383,7 @@ async function runFullTextLitReview() {
 
 
   // 0) Collect visible cached full texts
-  const docsAll = collectVisibleFulltextCorpus() || []; // [{idx,title,authors,year,venue,doi,url,text},...]
+  const docsAll = await collectVisibleFulltextCorpus() || []; // [{idx,title,authors,year,venue,doi,url,text},...]
   if (!docsAll.length) { openSynthPanel('No cached full texts visible.'); return; }
   for (let i = 0; i < docsAll.length; i++) docsAll[i].ref = i + 1;
 
@@ -25928,7 +26425,7 @@ function ensureKeyCoverage(keyMd, themes, docsAll) {
 // ============== Multi Cluster Lit Reviews ==============
 
 // Collect visible, cached full texts for a given cluster id
-function collectVisibleFulltextForCluster(cid) {
+async function collectVisibleFulltextForCluster(cid) {
   const all = collectVisibleFulltextCorpus(); // [{idx,title,authors,year,venue,doi,text}, ...]
   if (!Array.isArray(clusterOf) || !Array.isArray(all)) return [];
   return all.filter(d => Number.isFinite(d.idx) && clusterOf[d.idx] === cid);
