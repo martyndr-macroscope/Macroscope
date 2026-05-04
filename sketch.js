@@ -13338,15 +13338,12 @@ const overlays = {
   }
 
   const obj = {
-    meta: {
-      format: 'domain-viz-save-v2',
-            fulltext_cache_mode: 'indexeddb-sidecar',
-      exported_at: new Date().toISOString()
-
-
-
-
-    },
+meta: {
+  format: 'domain-viz-save-v2',
+  fulltext_cache_mode: 'indexeddb-sidecar',
+  exported_at: new Date().toISOString(),
+  import_source: window.currentProjectImportSource || null
+},
 
     items: itemsData.map((it, i) => {
       const clone = { ...(it || {}) };
@@ -13609,6 +13606,18 @@ async function restoreProjectState(save) {
   for (const item of itemsData) {
   normaliseUkriGrantFieldsOnItem(item);
 }
+
+window.currentProjectImportSource =
+  save?.meta?.import_source ||
+  (
+    itemsData.some(it =>
+      Array.isArray(it?.ref_records) ||
+      it?.ref_uoa_number ||
+      it?.ref_uoa_name
+    )
+      ? 'ref_spreadsheet'
+      : null
+  );
   const es = Array.isArray(save.edges) ? save.edges : buildEdgesFromItems(itemsData);
 
   // 2) Rebuild nodes from items so all derived fields exist
@@ -13727,6 +13736,25 @@ async function restoreProjectState(save) {
       persistentFieldThreshold = +save.filters.persistentFieldThreshold;
     }
   }
+// Backwards-compatible repair for REF imports saved before the REF finalisation fix.
+// REF imports often have sparse/no edges; a non-zero cluster-size threshold can hide every node.
+const looksLikeRefProject =
+  window.currentProjectImportSource === 'ref_spreadsheet' ||
+  itemsData.some(it =>
+    Array.isArray(it?.ref_records) ||
+    it?.ref_uoa_number ||
+    it?.ref_uoa_name
+  );
+
+const edgeCount = Array.isArray(save?.edges) ? save.edges.length : 0;
+
+if (looksLikeRefProject && edgeCount === 0 && Number(clusterSizeThreshold || 0) > 0) {
+  console.warn(
+    'REF project has no saved edges and a non-zero cluster size filter; resetting clusterSizeThreshold to 0 so nodes are visible.'
+  );
+  clusterSizeThreshold = 0;
+}
+
 
   const savedCamera = {
     x: Number.isFinite(+save?.camera?.x) ? +save.camera.x : null,
@@ -17978,14 +18006,19 @@ function getOrCreateNodeForWork(work, seedIdx) {
   const byTtl = ttl && titleToNode.has(ttl) ? titleToNode.get(ttl) : null;
   idx = byOa ?? byDoi ?? byTtl;
 
-  if (Number.isInteger(idx) && idx >= 0) {
-    // Merge any missing info and ensure all keys map to this node
-    mergeWorkIntoItem(idx, work);
-    if (oa  && !oaIdToNode.has(oa))   oaIdToNode.set(oa, idx);
-    if (doi && !doiToNode.has(doi))   doiToNode.set(doi, idx);
-    if (ttl && !titleToNode.has(ttl)) titleToNode.set(ttl, idx);
-    return idx;
-  }
+if (Number.isInteger(idx) && idx >= 0) {
+  // idx is a node index. Convert to the backing itemsData index before merging.
+  const itemIdx = Number.isInteger(nodes?.[idx]?.idx) ? nodes[idx].idx : idx;
+
+  mergeWorkIntoItem(itemIdx, work);
+
+  // Ensure all lookup maps continue to point to the node index.
+  if (oa  && !oaIdToNode.has(oa))   oaIdToNode.set(oa, idx);
+  if (doi && !doiToNode.has(doi))   doiToNode.set(doi, idx);
+  if (ttl && !titleToNode.has(ttl)) titleToNode.set(ttl, idx);
+
+  return idx;
+}
 
   // 2) Create a brand new node
 const oaMin = compactOA(work);
@@ -29407,7 +29440,92 @@ window.openRefSpreadsheetRetrievalDialog = openRefSpreadsheetRetrievalDialog;
 // <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 // ─────────────────────────────────────────────────────────────────────────────
 
+function finaliseRefSpreadsheetImport({ importedWorks = [], importedNodeIndices = [] } = {}) {
+  window.currentProjectImportSource = 'ref_spreadsheet';
 
+  // Build intra-import citation edges where OpenAlex references another work
+  // that is also present in the imported REF batch.
+  try {
+    const oaToNode = new Map();
+
+    for (let k = 0; k < importedWorks.length; k++) {
+      const w = importedWorks[k];
+      const nodeIdx = importedNodeIndices[k];
+      const oa = normOA?.(w?.id);
+      if (oa && Number.isInteger(nodeIdx) && nodeIdx >= 0) {
+        oaToNode.set(oa, nodeIdx);
+      }
+    }
+
+    for (let k = 0; k < importedWorks.length; k++) {
+      const w = importedWorks[k];
+      const nodeIdx = importedNodeIndices[k];
+      if (!Number.isInteger(nodeIdx) || nodeIdx < 0) continue;
+
+      const refs =
+        (Array.isArray(w?.referenced_works) && w.referenced_works) ||
+        (Array.isArray(w?.referencedWorks)  && w.referencedWorks)  ||
+        (Array.isArray(w?.referenced)       && w.referenced)       ||
+        [];
+
+      for (const refId of refs) {
+        const otherIdx = oaToNode.get(normOA?.(refId));
+        if (Number.isInteger(otherIdx) && otherIdx >= 0 && otherIdx !== nodeIdx) {
+          ensureUndirectedEdge?.(nodeIdx, otherIdx);
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('REF import citation-edge reconstruction failed:', e);
+  }
+
+  // Important: REF imports can be sparse/edge-less. A cluster-size threshold
+  // of 5 will hide all singleton clusters, making the import look empty.
+  clusterSizeThreshold = 0;
+  clusterRefCountThreshold = 0;
+
+  // Also reset filters that can hide everything after a fresh import.
+  degThreshold = 0;
+  extCitesThreshold = 0;
+
+  // Rebuild the same derived state expected by save/load and the interface.
+  try { setWorldSizeForN?.(nodes.length); } catch {}
+  try { buildAdjacency?.(nodes.length, edges); } catch {}
+  try { rebuildAdj?.(); } catch {}
+  try { computeDegreesFromAdj?.(); } catch {}
+  try { computeCbcRobustStats?.(); } catch {}
+  try { computeIntInRobustStats?.(); } catch {}
+  try { computeYearBounds?.(); } catch {}
+  try { computeDomainClusters?.(); } catch {}
+
+  try { initDegreeFilterUI?.(); } catch {}
+  try { initExtCitesFilterUI?.(); } catch {}
+  try { initYearFilterUI?.(); } catch {}
+  try { initClusterFilterUI?.(); } catch {}
+  try { initClusterRefCountFilterUI?.(); } catch {}
+  try { initClusterRefGpaFilterUI?.(); } catch {}
+
+  try { buildDimensionsIndex?.(); } catch {}
+  try { renderDimensionsUI?.(); } catch {}
+  try { updateDimSections?.(); } catch {}
+  try { refreshDimMembershipFlags?.(); } catch {}
+
+  try { recomputeVisibility?.(); } catch {}
+  try { ensureVelArrays?.(); } catch {}
+
+  // Make sure the active view cache is coherent before saving.
+  try {
+    if (typeof __snapshotView === 'function') {
+      __snapshotView(window.viewMode || viewMode || 'citation');
+    }
+  } catch (e) {
+    console.warn('Could not snapshot REF import view:', e);
+  }
+
+  try { fitWorldInView?.(60); } catch {}
+  try { updateInfo?.(); } catch {}
+  try { redraw?.(); } catch {}
+}
 
 async function retrieveFromRefSpreadsheetFile(file) {
   if (typeof XLSX === 'undefined') {
@@ -29457,6 +29575,9 @@ async function retrieveFromRefSpreadsheetFile(file) {
   try { indexExistingOAIds?.(); } catch {}
 
   let ok = 0, fail = 0;
+const importedWorks = [];
+const importedNodeIndices = [];
+window.currentProjectImportSource = 'ref_spreadsheet';
 
   for (let i = 0; i < uniqueDois.length; i++) {
     const doi = uniqueDois[i];
@@ -29476,11 +29597,17 @@ try {
   if (!oaWork) throw new Error('No OpenAlex work returned');
 
   // Merge/add node
-  const idx = getOrCreateNodeForWork(oaWork, null);
+// Merge/add node. getOrCreateNodeForWork returns a node index.
+const nodeIdx = getOrCreateNodeForWork(oaWork, null);
+const itemIdx = Number.isInteger(nodes?.[nodeIdx]?.idx) ? nodes[nodeIdx].idx : nodeIdx;
 
-  // Attach REF UoA metadata
-  const item = itemsData[idx] || (itemsData[idx] = {});
-  item.ref_records = item.ref_records || [];
+importedWorks.push(oaWork);
+importedNodeIndices.push(nodeIdx);
+
+// Attach REF UoA metadata to the backing itemsData entry.
+const item = itemsData[itemIdx] || (itemsData[itemIdx] = {});
+item.ref_records = item.ref_records || [];
+item.import_source = 'ref_spreadsheet';
 
   for (const r of (pack?.records || [])) {
     item.ref_records.push({
@@ -29506,12 +29633,12 @@ try {
   hideLoading?.();
   showToast?.(`REF import complete: ${ok} added/merged, ${fail} failed.`);
 
-  // Refresh UI/indices
-  try { buildDimensionsIndex?.(); } catch {}
-  try { updateDimSections?.(); } catch {}
-  try { recomputeVisibility?.(); } catch {}
-  try { updateInfo?.(); } catch {}
-  try { redraw?.(); } catch {}
+// Full graph/UI finalisation for REF imports.
+finaliseRefSpreadsheetImport({
+  importedWorks,
+  importedNodeIndices
+});
+
 }
 window.retrieveFromRefSpreadsheetFile = retrieveFromRefSpreadsheetFile;
 
