@@ -13092,8 +13092,10 @@ function ensureJsonFilename(name) {
 
 // Legacy download-based save (no File System Access API)
 async function saveProjectLegacy() {
-  await rehydrateAllPersistedFulltextsForSave();
-  const obj = serializeState({ checkpointMode: false });
+const obj = serializeState({
+  checkpointMode: false,
+  includeFulltext: false
+});
 
   // Base default on current project name (without .json) if we have one
   let base = (window.currentProjectName || 'domain-map')
@@ -13135,10 +13137,15 @@ async function saveProjectLegacy() {
 
 // File System Access API save (Chrome/Edge, etc.)
 async function saveProjectFS() {
-  await rehydrateAllPersistedFulltextsForSave();
+// Do NOT rehydrate all full texts before saving.
+// For large corpora this can exceed Chrome's max string size.
+const obj  = serializeState({
+  checkpointMode: false,
+  includeFulltext: false
+});
 
-  const obj  = serializeState({ checkpointMode: false });
-  const json = JSON.stringify(obj, null, 2);
+// Compact JSON is much smaller than pretty-printed JSON.
+const json = JSON.stringify(obj);
 
   let handle = window.currentProjectHandle || null;
   let effectiveName = window.currentProjectName || 'domain-map.json';
@@ -13210,6 +13217,7 @@ function deepCloneJsonSafe(v, fallback = null) {
 
 function serializeState(opts = {}) {
   const checkpointMode = !!opts.checkpointMode;
+  const includeFulltext = opts.includeFulltext === true && !checkpointMode;
   // Make sure the currently visible view is written back into the mode cache
   // before we serialize it. Otherwise save.nodePositions and save.viewCache
   // can disagree, and load will restore stale/random positions.
@@ -13354,20 +13362,22 @@ const overlays = {
       // Never persist session-only counters
       delete clone._ftAttemptCount;
 
-      if (checkpointMode) {
-        // Lean checkpoint/autosave: no heavy embedded text
-        delete clone.fulltext;
-        delete clone.fulltext_preview;
-        delete clone.fulltext_validation;
-      } else {
-        // Normal project save: keep the embedded full text
-        // so the JSON is portable and self-contained.
-        if (text.trim()) {
-          clone.fulltext = text;
-        } else {
-          delete clone.fulltext;
-        }
-      }
+if (!includeFulltext) {
+  // Lean save: keep enough metadata for the full-text indicator/cache,
+  // but do not embed the huge text itself.
+  if (text.trim()) {
+    clone.fulltext_cache_key = clone.fulltext_cache_key || getStableCacheKeyForIndex(i);
+    clone.fulltext_cached = true;
+    clone.fulltext_chars = clone.fulltext_chars || text.length;
+  }
+
+  delete clone.fulltext;
+  delete clone.fulltext_preview;
+} else {
+  // Optional self-contained export mode only.
+  if (text.trim()) clone.fulltext = text;
+  else delete clone.fulltext;
+}
 
       return clone;
     }),
