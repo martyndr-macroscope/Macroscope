@@ -23379,6 +23379,19 @@ function computePeaksOfExcellenceData(opts = {}) {
   const minAssessed = 11; // more than 10 REF-scored publications
   const rows = [];
 
+  const inferredInstitution = opts.targetInstitution
+    ? {
+        name: String(opts.targetInstitution || '').trim(),
+        normalisedName: normaliseInstitutionNameForReport(opts.targetInstitution),
+        publicationCount: 0,
+        publicationsWithInstitutionData: 0
+      }
+    : inferDominantInstitutionForReport();
+
+  const targetInstitutionName =
+    inferredInstitution?.name ||
+    'Northumbria University';
+
   const clusterIds = [];
   if (Array.isArray(clusterLabels) && clusterLabels.length) {
     for (let cid = 0; cid < clusterLabels.length; cid++) clusterIds.push(cid);
@@ -23395,33 +23408,36 @@ function computePeaksOfExcellenceData(opts = {}) {
     }
     if (!allNodeIds.length) continue;
 
-    // Only keep Northumbria first/last-author publications
-    const northNodeIds = allNodeIds.filter(i => {
+    // Only keep first/last-author publications for the dominant institution.
+    const institutionNodeIds = allNodeIds.filter(i => {
       const item = itemsData?.[i] || {};
-      return publicationMatchesNorthumbriaFirstOrLast(item);
+      return publicationMatchesInstitutionFirstOrLast(item, targetInstitutionName);
     });
 
-    if (!northNodeIds.length) continue;
+    if (!institutionNodeIds.length) continue;
 
-    const ref = collectClusterRefSummary(northNodeIds);
+    const ref = collectClusterRefSummary(institutionNodeIds);
     if ((ref?.n || 0) < minAssessed) continue;
 
     let totalCitations = 0;
-    for (const i of northNodeIds) {
+    for (const i of institutionNodeIds) {
       const item = itemsData?.[i] || {};
       const c = Number(item?.cited_by_count || item?.openalex?.cited_by_count || 0);
       totalCitations += Number.isFinite(c) ? Math.max(0, c) : 0;
     }
 
-    const avgCitations = northNodeIds.length ? (totalCitations / northNodeIds.length) : 0;
+    const avgCitations = institutionNodeIds.length
+      ? (totalCitations / institutionNodeIds.length)
+      : 0;
 
     rows.push({
       clusterId: cid,
       clusterLabel: String(clusterLabels?.[cid] || '').trim() || `Cluster ${cid + 1}`,
-      gpa: Number(ref.gpa || 0),                     // X axis: quality
-      avgCitations: Number(avgCitations || 0),      // Y axis: impact
-      northScale: northNodeIds.length,              // bubble size
-      assessedPublications: Number(ref.n || 0),     // REF-assessed Northumbria first/last pubs
+      gpa: Number(ref.gpa || 0),                         // X axis: quality
+      avgCitations: Number(avgCitations || 0),            // Y axis: impact
+      institutionScale: institutionNodeIds.length,        // bubble size
+      northScale: institutionNodeIds.length,              // backwards-compatible alias
+      assessedPublications: Number(ref.n || 0),           // REF-assessed first/last pubs for target institution
       totalCitations: Number(totalCitations || 0),
       totalClusterPublications: allNodeIds.length
     });
@@ -23430,7 +23446,7 @@ function computePeaksOfExcellenceData(opts = {}) {
   rows.sort((a, b) =>
     (b.gpa - a.gpa) ||
     (b.avgCitations - a.avgCitations) ||
-    (b.northScale - a.northScale) ||
+    ((b.institutionScale || b.northScale || 0) - (a.institutionScale || a.northScale || 0)) ||
     a.clusterLabel.localeCompare(b.clusterLabel)
   );
 
@@ -23439,6 +23455,8 @@ function computePeaksOfExcellenceData(opts = {}) {
     title: opts.userTitle || 'Peaks of Excellence',
     userText: opts.userText || '',
     minAssessed,
+    targetInstitution: targetInstitutionName,
+    dominantInstitution: inferredInstitution,
     eligibleClusterCount: rows.length,
     rows
   };
@@ -23834,6 +23852,9 @@ function buildPeaksOfExcellenceHtml(data) {
 
   const rows = Array.isArray(data?.rows) ? data.rows : [];
 
+  const targetInstitution = String(data?.targetInstitution || 'Northumbria University').trim();
+  const targetInstitutionEsc = escHtml(targetInstitution);
+
   const plotW = 1080;
   const plotH = 640;
   const padL = 84;
@@ -23845,7 +23866,7 @@ function buildPeaksOfExcellenceHtml(data) {
 
   const gpaVals = rows.map(r => Number(r.gpa || 0));
   const impactVals = rows.map(r => Number(r.avgCitations || 0));
-  const sizeVals = rows.map(r => Number(r.northScale || 0));
+  const sizeVals = rows.map(r => Number(r.institutionScale ?? r.northScale ?? 0));
 
 const minGpa = 2; // fixed lower bound to spread the plot
 const maxGpa = Math.max(...gpaVals, 2.5); // keep dynamic upper bound
@@ -23920,7 +23941,7 @@ const maxGpa = Math.max(...gpaVals, 2.5); // keep dynamic upper bound
 const bubbles = rows.map((r, i) => {
   const x = xFor(Number(r.gpa || 0));
   const y = yFor(Number(r.avgCitations || 0));
-  const rr = rFor(Number(r.northScale || 1));
+  const rr = rFor(Number(r.institutionScale ?? r.northScale ?? 1));
   const fill = colorForBubble(Number(r.gpa || 0));
 
   const rank = i + 1;
@@ -23953,7 +23974,7 @@ const bubbles = rows.map((r, i) => {
       <td>${escHtml(r.clusterLabel)}</td>
       <td>${fmtNum(r.gpa, 2)}</td>
       <td>${fmtNum(r.avgCitations, 2)}</td>
-      <td>${fmtInt(r.northScale)}</td>
+<td>${fmtInt(r.institutionScale ?? r.northScale)}</td>
       <td>${fmtInt(r.assessedPublications)}</td>
       <td>${fmtInt(r.totalCitations)}</td>
       <td>${fmtInt(r.totalClusterPublications)}</td>
@@ -24069,7 +24090,337 @@ const bubbles = rows.map((r, i) => {
     </div>
 
     <div class="intro">
-      ${escHtml(data?.userText || 'This report maps clusters with more than 10 REF-scored publications, using only publications where Northumbria academics are first or last author. The x-axis shows quality (GPA), the y-axis shows impact (average citations per publication), and bubble size shows the scale of the cluster based on the number of Northumbria first/last publications in that cluster.')}
+      
+
+sketch.js
+JavaScript
+In the "Peaks of Excellence" report generated in Macroscope we currently use only First and Last Authors from Northumbria University. I need to make this report more generalisable for other institutions. So for the dataset being reported can you identify the institution with the highest number of publications and use that as the basis of the filter such that only authors from that institution who are first or last author are included. Also change the report to replace 'Northumbria University' with the identified institution. Give me the drop-in edits.     
+
+I’ll trace the existing Peaks of Excellence generation and author/institution filtering, then give you edits that preserve the current Northumbria behaviour as a fallback while making it data-driven.
+
+I’ve found the current hard-coded points: computePeaksOfExcellenceData() filters with publicationMatchesNorthumbriaFirstOrLast(), and the HTML still labels the plot/table as Northumbria-specific. I’m going to replace that with a dominant-institution helper and pass the institution name into the report data.
+
+Thought for 55s
+Below are the drop-in edits for sketch.js. The current Peaks report is hard-coded to Northumbria in both the filtering logic and report labels. The relevant existing code uses publicationMatchesNorthumbriaFirstOrLast(item) in computePeaksOfExcellenceData() and hard-coded “Northumbria” strings in buildPeaksOfExcellenceHtml() / the exported HTML. 
+
+
+1. Add general institution-detection helpers
+Find this existing function near the lower part of the file:
+
+function authorshipMatchesNorthumbriaFirstOrLast(auth) {
+Insert the following helper block immediately before it:
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Institution-aware report filtering
+// Used by Peaks of Excellence and other institution-specific reports.
+// Infers the dominant institution in the loaded dataset and then filters
+// first/last-author publications against that institution.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function normaliseInstitutionNameForReport(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/&/g, ' and ')
+    .replace(/\b(the|of)\b/g, ' ')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function getAuthorshipInstitutionNames(auth) {
+  const out = [];
+
+  const insts = Array.isArray(auth?.institutions) ? auth.institutions : [];
+  for (const inst of insts) {
+    const nm = String(
+      inst?.display_name ||
+      inst?.name ||
+      inst?.institution?.display_name ||
+      inst?.institution?.name ||
+      ''
+    ).trim();
+
+    if (nm) out.push(nm);
+  }
+
+  return out;
+}
+
+function getPublicationInstitutionNames(item) {
+  const w = item?.openalex || item?.openAlex || item || null;
+  const auths = Array.isArray(w?.authorships) ? w.authorships : [];
+
+  const seen = new Map();
+
+  for (const auth of auths) {
+    for (const nm of getAuthorshipInstitutionNames(auth)) {
+      const key = normaliseInstitutionNameForReport(nm);
+      if (!key) continue;
+      if (!seen.has(key)) seen.set(key, nm);
+    }
+  }
+
+  return Array.from(seen.values());
+}
+
+function inferDominantInstitutionForReport(nodeIds = null) {
+  const counts = new Map();
+  const displayNames = new Map();
+
+  const ids = Array.isArray(nodeIds)
+    ? nodeIds
+    : Array.from({ length: itemsData?.length || 0 }, (_, i) => i);
+
+  let publicationsWithInstitutionData = 0;
+
+  for (const i of ids) {
+    const item = itemsData?.[i];
+    if (!item) continue;
+
+    // Count each institution at most once per publication.
+    const names = getPublicationInstitutionNames(item);
+    if (!names.length) continue;
+
+    publicationsWithInstitutionData++;
+
+    for (const nm of names) {
+      const key = normaliseInstitutionNameForReport(nm);
+      if (!key) continue;
+
+      counts.set(key, (counts.get(key) || 0) + 1);
+
+      // Keep the first readable display name encountered.
+      if (!displayNames.has(key)) displayNames.set(key, nm);
+    }
+  }
+
+  let bestKey = '';
+  let bestCount = 0;
+
+  for (const [key, count] of counts.entries()) {
+    if (count > bestCount) {
+      bestKey = key;
+      bestCount = count;
+    }
+  }
+
+  // Backwards-compatible fallback for older datasets or sparse affiliation data.
+  const fallbackName = 'Northumbria University';
+
+  return {
+    name: displayNames.get(bestKey) || fallbackName,
+    normalisedName: bestKey || normaliseInstitutionNameForReport(fallbackName),
+    publicationCount: bestCount,
+    publicationsWithInstitutionData
+  };
+}
+
+function authorshipMatchesInstitutionFirstOrLast(auth, institutionName) {
+  if (!auth || typeof auth !== 'object') return false;
+
+  const pos = String(auth.author_position || '').trim().toLowerCase();
+  if (!(pos === 'first' || pos === 'last')) return false;
+
+  const target = normaliseInstitutionNameForReport(institutionName);
+  if (!target) return false;
+
+  // Prefer structured OpenAlex institution metadata.
+  const instHit = getAuthorshipInstitutionNames(auth).some(nm => {
+    return normaliseInstitutionNameForReport(nm) === target;
+  });
+
+  if (instHit) return true;
+
+  // Fallback for records where OpenAlex only preserved raw affiliation text.
+  const rawAff = normaliseInstitutionNameForReport(auth.raw_affiliation_string || '');
+  if (rawAff && rawAff.includes(target)) return true;
+
+  return false;
+}
+
+function publicationMatchesInstitutionFirstOrLast(item, institutionName) {
+  const w = item?.openalex || item?.openAlex || item || null;
+  const auths = Array.isArray(w?.authorships) ? w.authorships : [];
+  if (!auths.length) return false;
+
+  return auths.some(auth => authorshipMatchesInstitutionFirstOrLast(auth, institutionName));
+}
+2. Keep the existing Northumbria functions, but make them wrappers
+Replace your existing hard-coded functions:
+
+function authorshipMatchesNorthumbriaFirstOrLast(auth) {
+  if (!auth || typeof auth !== 'object') return false;
+
+  const pos = String(auth.author_position || '').trim().toLowerCase();
+  if (!(pos === 'first' || pos === 'last')) return false;
+
+  const insts = Array.isArray(auth.institutions) ? auth.institutions : [];
+  const instHit = insts.some(inst => {
+    const nm = String(inst?.display_name || inst?.name || '').trim().toLowerCase();
+    return nm === 'northumbria university';
+  });
+  if (instHit) return true;
+
+  const rawAff = String(auth.raw_affiliation_string || '').trim().toLowerCase();
+  if (rawAff.includes('northumbria university')) return true;
+
+  return false;
+}
+
+function publicationMatchesNorthumbriaFirstOrLast(item) {
+  const w = item?.openalex || item?.openAlex || item || null;
+  const auths = Array.isArray(w?.authorships) ? w.authorships : [];
+  if (!auths.length) return false;
+
+  return auths.some(auth => authorshipMatchesNorthumbriaFirstOrLast(auth));
+}
+with this backwards-compatible version:
+
+function authorshipMatchesNorthumbriaFirstOrLast(auth) {
+  return authorshipMatchesInstitutionFirstOrLast(auth, 'Northumbria University');
+}
+
+function publicationMatchesNorthumbriaFirstOrLast(item) {
+  return publicationMatchesInstitutionFirstOrLast(item, 'Northumbria University');
+}
+This means any other parts of Macroscope that still call the Northumbria-specific functions will continue to work.
+
+3. Replace computePeaksOfExcellenceData
+Find:
+
+function computePeaksOfExcellenceData(opts = {}) {
+Replace the whole function with:
+
+function computePeaksOfExcellenceData(opts = {}) {
+  const minAssessed = 11; // more than 10 REF-scored publications
+  const rows = [];
+
+  const inferredInstitution = opts.targetInstitution
+    ? {
+        name: String(opts.targetInstitution || '').trim(),
+        normalisedName: normaliseInstitutionNameForReport(opts.targetInstitution),
+        publicationCount: 0,
+        publicationsWithInstitutionData: 0
+      }
+    : inferDominantInstitutionForReport();
+
+  const targetInstitutionName =
+    inferredInstitution?.name ||
+    'Northumbria University';
+
+  const clusterIds = [];
+  if (Array.isArray(clusterLabels) && clusterLabels.length) {
+    for (let cid = 0; cid < clusterLabels.length; cid++) clusterIds.push(cid);
+  } else {
+    const seen = new Set((clusterOf || []).filter(v => Number.isFinite(v) && v >= 0));
+    for (const cid of seen) clusterIds.push(cid);
+    clusterIds.sort((a, b) => a - b);
+  }
+
+  for (const cid of clusterIds) {
+    const allNodeIds = [];
+    for (let i = 0; i < (clusterOf?.length || 0); i++) {
+      if (clusterOf[i] === cid) allNodeIds.push(i);
+    }
+    if (!allNodeIds.length) continue;
+
+    // Only keep first/last-author publications for the dominant institution.
+    const institutionNodeIds = allNodeIds.filter(i => {
+      const item = itemsData?.[i] || {};
+      return publicationMatchesInstitutionFirstOrLast(item, targetInstitutionName);
+    });
+
+    if (!institutionNodeIds.length) continue;
+
+    const ref = collectClusterRefSummary(institutionNodeIds);
+    if ((ref?.n || 0) < minAssessed) continue;
+
+    let totalCitations = 0;
+    for (const i of institutionNodeIds) {
+      const item = itemsData?.[i] || {};
+      const c = Number(item?.cited_by_count || item?.openalex?.cited_by_count || 0);
+      totalCitations += Number.isFinite(c) ? Math.max(0, c) : 0;
+    }
+
+    const avgCitations = institutionNodeIds.length
+      ? (totalCitations / institutionNodeIds.length)
+      : 0;
+
+    rows.push({
+      clusterId: cid,
+      
+      gpa: Number(ref.gpa || 0),                         // X axis: quality
+      avgCitations: Number(avgCitations || 0),            // Y axis: impact
+      institutionScale: institutionNodeIds.length,        // bubble size
+      northScale: institutionNodeIds.length,              // backwards-compatible alias
+      assessedPublications: Number(ref.n || 0),           // REF-assessed first/last pubs for target institution
+      totalCitations: Number(totalCitations || 0),
+      totalClusterPublications: allNodeIds.length
+    });
+  }
+
+  rows.sort((a, b) =>
+    (b.gpa - a.gpa) ||
+    (b.avgCitations - a.avgCitations) ||
+    ((b.institutionScale || b.northScale || 0) - (a.institutionScale || a.northScale || 0)) ||
+    a.clusterLabel.localeCompare(b.clusterLabel)
+  );
+
+  return {
+    generatedAt: new Date().toISOString(),
+    title: opts.userTitle || 'Peaks of Excellence',
+    userText: opts.userText || '',
+    minAssessed,
+    targetInstitution: targetInstitutionName,
+    dominantInstitution: inferredInstitution,
+    eligibleClusterCount: rows.length,
+    rows
+  };
+}
+This now identifies the institution with the highest publication count in the dataset, then filters to first/last-author publications from that institution.
+
+4. Patch buildPeaksOfExcellenceHtml
+Find the start of:
+
+function buildPeaksOfExcellenceHtml(data) {
+Inside it, find this line:
+
+const rows = Array.isArray(data?.rows) ? data.rows : [];
+Immediately after it, add:
+
+  const targetInstitution = String(data?.targetInstitution || 'Northumbria University').trim();
+  const targetInstitutionEsc = escHtml(targetInstitution);
+Then replace:
+
+const sizeVals = rows.map(r => Number(r.northScale || 0));
+with:
+
+  const sizeVals = rows.map(r => Number(r.institutionScale ?? r.northScale ?? 0));
+Replace:
+
+const rr = rFor(Number(r.northScale || 1));
+with:
+
+  const rr = rFor(Number(r.institutionScale ?? r.northScale ?? 1));
+Replace this bubble title line:
+
+<title>${escHtml(r.clusterLabel)} | Rank ${rank} | GPA ${fmtNum(r.gpa, 2)} | Avg citations ${fmtNum(r.avgCitations, 2)} | Northumbria publications ${fmtInt(r.northScale)} | REF assessed ${fmtInt(r.assessedPublications)}</title>
+with:
+
+<title>${escHtml(r.clusterLabel)} | Rank ${rank} | GPA ${fmtNum(r.gpa, 2)} | Avg citations ${fmtNum(r.avgCitations, 2)} | ${targetInstitutionEsc} publications ${fmtInt(r.institutionScale ?? r.northScale)} | REF assessed ${fmtInt(r.assessedPublications)}</title>
+Replace this table cell:
+
+<td>${fmtInt(r.northScale)}</td>
+with:
+
+<td>${fmtInt(r.institutionScale ?? r.northScale)}</td>
+5. Replace the hard-coded Northumbria wording in the Peaks HTML
+Inside buildPeaksOfExcellenceHtml(data), replace this intro block:
+
+${escHtml(data?.userText || 'This report maps clusters with more than 10 REF-scored publications, using only publications where Northumbria academics are first or last author. The x-axis shows quality (GPA), the y-axis shows impact (average citations per publication), and bubble size shows the scale of the cluster based on the number of Northumbria first/last publications in that cluster.')}
+with:
+
+${escHtml(data?.userText || `This report maps clusters with more than 10 REF-scored publications, using only publications where authors affiliated with ${targetInstitution} are first or last author. The x-axis shows quality (GPA), the y-axis shows impact (average citations per publication), and bubble size shows the scale of the cluster based on the number of ${targetInstitution} first/last-author publications in that cluster.`)}
     </div>
 
     <div class="cards">
@@ -24120,7 +24471,7 @@ const bubbles = rows.map((r, i) => {
             <th>Cluster</th>
             <th>GPA</th>
             <th>Avg citations</th>
-            <th>Northumbria scale</th>
+<th>${targetInstitutionEsc} scale</th>
             <th>REF assessed</th>
             <th>Total citations</th>
             <th>Total cluster pubs</th>
@@ -24442,6 +24793,7 @@ async function exportPeaksOfExcellenceZip(opts = {}) {
     userText: opts.userText || ''
   });
 
+  console.log('Peaks of Excellence target institution:', reportData.targetInstitution, reportData.dominantInstitution);
   setLoadingProgress?.(0.65, 'Building Peaks of Excellence HTML…');
   const html = buildPeaksOfExcellenceHtml(reportData);
 
@@ -25970,31 +26322,148 @@ function compactOA(work) {
   };
 }
 
-function authorshipMatchesNorthumbriaFirstOrLast(auth) {
+// ─────────────────────────────────────────────────────────────────────────────
+// Institution-aware report filtering
+// Used by Peaks of Excellence and other institution-specific reports.
+// Infers the dominant institution in the loaded dataset and then filters
+// first/last-author publications against that institution.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function normaliseInstitutionNameForReport(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/&/g, ' and ')
+    .replace(/\b(the|of)\b/g, ' ')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function getAuthorshipInstitutionNames(auth) {
+  const out = [];
+
+  const insts = Array.isArray(auth?.institutions) ? auth.institutions : [];
+  for (const inst of insts) {
+    const nm = String(
+      inst?.display_name ||
+      inst?.name ||
+      inst?.institution?.display_name ||
+      inst?.institution?.name ||
+      ''
+    ).trim();
+
+    if (nm) out.push(nm);
+  }
+
+  return out;
+}
+
+function getPublicationInstitutionNames(item) {
+  const w = item?.openalex || item?.openAlex || item || null;
+  const auths = Array.isArray(w?.authorships) ? w.authorships : [];
+
+  const seen = new Map();
+
+  for (const auth of auths) {
+    for (const nm of getAuthorshipInstitutionNames(auth)) {
+      const key = normaliseInstitutionNameForReport(nm);
+      if (!key) continue;
+      if (!seen.has(key)) seen.set(key, nm);
+    }
+  }
+
+  return Array.from(seen.values());
+}
+
+function inferDominantInstitutionForReport(nodeIds = null) {
+  const counts = new Map();
+  const displayNames = new Map();
+
+  const ids = Array.isArray(nodeIds)
+    ? nodeIds
+    : Array.from({ length: itemsData?.length || 0 }, (_, i) => i);
+
+  let publicationsWithInstitutionData = 0;
+
+  for (const i of ids) {
+    const item = itemsData?.[i];
+    if (!item) continue;
+
+    // Count each institution at most once per publication.
+    const names = getPublicationInstitutionNames(item);
+    if (!names.length) continue;
+
+    publicationsWithInstitutionData++;
+
+    for (const nm of names) {
+      const key = normaliseInstitutionNameForReport(nm);
+      if (!key) continue;
+
+      counts.set(key, (counts.get(key) || 0) + 1);
+
+      // Keep the first readable display name encountered.
+      if (!displayNames.has(key)) displayNames.set(key, nm);
+    }
+  }
+
+  let bestKey = '';
+  let bestCount = 0;
+
+  for (const [key, count] of counts.entries()) {
+    if (count > bestCount) {
+      bestKey = key;
+      bestCount = count;
+    }
+  }
+
+  // Backwards-compatible fallback for older datasets or sparse affiliation data.
+  const fallbackName = 'Northumbria University';
+
+  return {
+    name: displayNames.get(bestKey) || fallbackName,
+    normalisedName: bestKey || normaliseInstitutionNameForReport(fallbackName),
+    publicationCount: bestCount,
+    publicationsWithInstitutionData
+  };
+}
+
+function authorshipMatchesInstitutionFirstOrLast(auth, institutionName) {
   if (!auth || typeof auth !== 'object') return false;
 
   const pos = String(auth.author_position || '').trim().toLowerCase();
   if (!(pos === 'first' || pos === 'last')) return false;
 
-  const insts = Array.isArray(auth.institutions) ? auth.institutions : [];
-  const instHit = insts.some(inst => {
-    const nm = String(inst?.display_name || inst?.name || '').trim().toLowerCase();
-    return nm === 'northumbria university';
+  const target = normaliseInstitutionNameForReport(institutionName);
+  if (!target) return false;
+
+  // Prefer structured OpenAlex institution metadata.
+  const instHit = getAuthorshipInstitutionNames(auth).some(nm => {
+    return normaliseInstitutionNameForReport(nm) === target;
   });
+
   if (instHit) return true;
 
-  const rawAff = String(auth.raw_affiliation_string || '').trim().toLowerCase();
-  if (rawAff.includes('northumbria university')) return true;
+  // Fallback for records where OpenAlex only preserved raw affiliation text.
+  const rawAff = normaliseInstitutionNameForReport(auth.raw_affiliation_string || '');
+  if (rawAff && rawAff.includes(target)) return true;
 
   return false;
 }
 
-function publicationMatchesNorthumbriaFirstOrLast(item) {
+function publicationMatchesInstitutionFirstOrLast(item, institutionName) {
   const w = item?.openalex || item?.openAlex || item || null;
   const auths = Array.isArray(w?.authorships) ? w.authorships : [];
   if (!auths.length) return false;
 
-  return auths.some(auth => authorshipMatchesNorthumbriaFirstOrLast(auth));
+  return auths.some(auth => authorshipMatchesInstitutionFirstOrLast(auth, institutionName));
+}
+
+function authorshipMatchesNorthumbriaFirstOrLast(auth) {
+  return authorshipMatchesInstitutionFirstOrLast(auth, 'Northumbria University');
+}
+
+function publicationMatchesNorthumbriaFirstOrLast(item) {
+  return publicationMatchesInstitutionFirstOrLast(item, 'Northumbria University');
 }
 
 function computeClusterGrowthSeries(nodeIds) {
