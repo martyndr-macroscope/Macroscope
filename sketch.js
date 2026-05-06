@@ -4445,7 +4445,7 @@ const DIM_COLORS = {
   institutions: [140, 255, 170],
   clusters: [255, 230, 100], 
 fields: [180, 220, 255]
-
+  grants: [255, 220, 90]
 
 };
 // Robust citation shading
@@ -7945,7 +7945,10 @@ function buildGrantDimensionsIndex() {
   const map = new Map();
 
   for (let i = 0; i < (itemsData?.length || 0); i++) {
-    const grants = getItemUkriGrants(itemsData[i]);
+    const item = itemsData[i];
+    normaliseUkriGrantFieldsOnItem?.(item);
+
+    const grants = getItemUkriGrants(item);
 
     for (const g of grants) {
       const key = grantDimensionKey(g);
@@ -7956,12 +7959,24 @@ function buildGrantDimensionsIndex() {
           key,
           type: 'grants',
           label: grantDisplayLabel(g),
+          count: 0,
           nodes: new Set(),
           grant: { ...g }
         });
       }
 
-      map.get(key).nodes.add(i);
+      const rec = map.get(key);
+      if (!rec.nodes.has(i)) {
+        rec.nodes.add(i);
+        rec.count++;
+      }
+
+      // Keep the richest metadata encountered.
+      rec.grant = {
+        ...rec.grant,
+        ...g,
+        grant_title: rec.grant?.grant_title || g.grant_title || g.title || g.project_title
+      };
     }
   }
 
@@ -8564,14 +8579,15 @@ function updateDimSections() {
   dimSectionsWrap.html('');  // clear only the lists area
   dimSections = {};
 
-  const sections = [
-    ['Authors',      'authors',      dimsIndex.authors],
-    ['Venues',       'venues',       dimsIndex.venues],
-    ['Concepts',     'concepts',     dimsIndex.concepts],
-    ['Institutions', 'institutions', dimsIndex.institutions],
-    ['Clusters',     'clusters',     dimsIndex.clusters],
-    ['Domains',      'fields',       dimsIndex.fields],
-  ];
+const sections = [
+  ['Authors',      'authors',      dimsIndex.authors],
+  ['Venues',       'venues',       dimsIndex.venues],
+  ['Concepts',     'concepts',     dimsIndex.concepts],
+  ['Institutions', 'institutions', dimsIndex.institutions],
+  ['Clusters',     'clusters',     dimsIndex.clusters],
+  ['Domains',      'fields',       dimsIndex.fields],
+  ['UKRI Grants',  'grants',       dimsIndex.grants],
+];
 
   // Tokenize the query (AND match)
   const tokens = (dimSearchQuery ? dimSearchQuery.split(/\s+/).filter(Boolean) : []);
@@ -8808,11 +8824,8 @@ function toggleDimensionTool(type, rec) {
   // Use a stable key so clusters don't duplicate (cid:###)
   // Use a view-specific stable key so clusters from different modes do not collide
   const modeKey  = String(viewMode || 'citation');
-  const stableId =
-    (type === 'clusters' && rec.cid != null) ? `cid:${rec.cid}` :
-    (type === 'fields'   && rec.fid != null) ? `fid:${rec.fid}` :
-    rec.key;
-  const toolKey  = `${type}|${stableId}`;
+
+const toolKey = dimKeyFor(type, rec);
   let idx = dimByKey.get(toolKey);
 
 dimMembershipDirty = true;
@@ -8847,6 +8860,10 @@ dimMembershipDirty = true;
       tool.summaryHtml = payload.summaryHtml;
       tool.summaryText = payload.summaryText;
     }
+    if (type === 'grants') {
+  tool.grant = { ...(rec.grant || {}) };
+  tool.count = Number.isFinite(+rec.count) ? +rec.count : (rec.nodes?.size || 0);
+}
 
     idx = dimTools.push(tool) - 1;
     dimByKey.set(toolKey, idx);
@@ -10491,8 +10508,13 @@ async function buildGraphFromPayloadAsync(payload, opts = {}) {
   const { autoStartLayout = true } = opts;
   const items = Array.isArray(payload?.items) ? payload.items
               : (Array.isArray(payload) ? payload : []);
-  itemsData = items;
-  selectedIndex = -1;
+itemsData = items;
+
+for (const item of itemsData) {
+  normaliseUkriGrantFieldsOnItem?.(item);
+}
+
+selectedIndex = -1;
 
   if (!items.length) {
     msg = "No items found in JSON.";
@@ -13231,28 +13253,36 @@ function serializeState(opts = {}) {
 
   const nodePos = nodes.map(n => ({ x: n.x, y: n.y, r: n.r || 3 }));
 
-  const dims = (dimTools || []).map(d => {
-    if (!d) return null;
-    return {
-      type: d.type,
-      key: d.key,
-      label: d.label,
-      cid: (d.cid != null ? d.cid : null),
-      power: Number.isFinite(+d.power) ? +d.power : 0,
-      x: d.x,
-      y: d.y,
-      color: d.color || null,
-      nodes: Array.from(d.nodes || []),
+const dims = (dimTools || []).map(d => {
+  if (!d) return null;
 
-      ...(d.type === 'ai' && {
-        aiSig: d.aiSig || d.aiSignature || null,
-        aiTitle: d.aiTitle || d.label || null,
-        aiContent: d.aiContent || '',
-        aiCreatedAt: d.aiCreatedAt || null,
-        summaryRef: d.summaryRef || null
-      })
-    };
-  });
+  return {
+    type: d.type,
+    key: d.key,
+    label: d.label,
+    cid: (d.cid != null ? d.cid : null),
+    fid: (d.fid != null ? d.fid : null),
+    power: Number.isFinite(+d.power) ? +d.power : 0,
+    x: d.x,
+    y: d.y,
+    color: d.color || null,
+    nodes: Array.from(d.nodes || []),
+    focusOn: !!d.focusOn,
+    userMoved: !!d.userMoved,
+
+    ...(d.type === 'grants' && {
+      grant: d.grant ? deepCloneJsonSafe(d.grant, {}) : null
+    }),
+
+    ...(d.type === 'ai' && {
+      aiSig: d.aiSig || d.aiSignature || null,
+      aiTitle: d.aiTitle || d.label || null,
+      aiContent: d.aiContent || '',
+      aiCreatedAt: d.aiCreatedAt || null,
+      summaryRef: d.summaryRef || null
+    })
+  };
+});
 
   const cl = {
     clusterOf: (clusterOf && clusterOf.length === nodes.length) ? Array.from(clusterOf) : null,
@@ -13687,35 +13717,51 @@ window.currentProjectImportSource =
   dimTools = [];
   dimByKey.clear();
 
+  // Backwards compatibility:
+// older saved projects may have ukri_grants on publications but no saved Grant handles.
+// buildDimensionsIndex() below will expose them through Dimensions > UKRI Grants.
+for (const item of itemsData || []) {
+  normaliseUkriGrantFieldsOnItem?.(item);
+}
+
   if (Array.isArray(save.dimensions)) {
-    for (const d of save.dimensions) {
-      if (!d) continue;
+  for (const d of save.dimensions) {
+    if (!d) continue;
 
-      const tool = {
-        type: d.type,
-        key: d.key,
-        label: d.label,
-        cid: (d.cid != null ? d.cid : undefined),
-        power: Number.isFinite(+d.power) ? +d.power : DEFAULT_DIM_POWER,
-        x: Number(d.x || 0),
-        y: Number(d.y || 0),
-        color: d.color || (DIM_COLORS?.[d.type] || [220,220,220]),
-        nodes: new Set(Array.isArray(d.nodes) ? d.nodes.map(v => v|0) : [])
-      };
+    const type = String(d.type || '').trim();
 
-      if (d.type === 'ai') {
-        tool.aiSig = d.aiSig || null;
-        tool.aiSignature = d.aiSig || null;
-        tool.aiTitle = d.aiTitle || d.label || null;
-        tool.aiContent = d.aiContent || '';
-        tool.aiCreatedAt = d.aiCreatedAt || null;
-        tool.summaryRef = d.summaryRef || null;
-      }
+    const tool = {
+      type,
+      key: d.key,
+      label: d.label,
+      cid: (d.cid != null ? d.cid : undefined),
+      fid: (d.fid != null ? d.fid : undefined),
+      power: Number.isFinite(+d.power) ? +d.power : DEFAULT_DIM_POWER,
+      x: Number(d.x || 0),
+      y: Number(d.y || 0),
+      color: d.color || (DIM_COLORS?.[type] || [220,220,220]),
+      nodes: new Set(Array.isArray(d.nodes) ? d.nodes.map(v => v|0) : []),
+      focusOn: !!d.focusOn,
+      userMoved: !!d.userMoved
+    };
 
-      dimTools.push(tool);
-      if (tool.key != null) dimByKey.set(tool.key, tool);
+    if (type === 'grants') {
+      tool.grant = d.grant ? deepCloneJsonSafe(d.grant, {}) : {};
     }
+
+    if (type === 'ai') {
+      tool.aiSig = d.aiSig || null;
+      tool.aiSignature = d.aiSig || null;
+      tool.aiTitle = d.aiTitle || d.label || null;
+      tool.aiContent = d.aiContent || '';
+      tool.aiCreatedAt = d.aiCreatedAt || null;
+      tool.summaryRef = d.summaryRef || null;
+    }
+
+    const idx = dimTools.push(tool) - 1;
+    if (tool.key != null) dimByKey.set(tool.key, idx);
   }
+}
 
   // 6) Restore settings
   setLoadingProgress(0.945, 'Restoring settings…');
@@ -25392,9 +25438,18 @@ function buildIntegratedNorthumbriaReportHtml(data) {
 }
 
 // Build the same stable key that toggleDimensionTool uses
-function dimKeyFor(type, rec){
-  const stableId = (type === 'clusters' && rec.cid != null) ? `cid:${rec.cid}` : rec.key;
+function dimKeyFor(type, rec) {
+  const stableId =
+    (type === 'clusters' && rec.cid != null) ? `cid:${rec.cid}` :
+    (type === 'fields'   && rec.fid != null) ? `fid:${rec.fid}` :
+    (type === 'grants') ? String(rec.key || grantDimensionKey?.(rec.grant || rec) || rec.label || '') :
+    rec.key;
+
   return `${type}|${stableId}`;
+}
+
+function dimExists(type, rec) {
+  return dimByKey?.has(dimKeyFor(type, rec));
 }
 
 function dimExists(type, rec){
