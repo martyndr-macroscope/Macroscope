@@ -4444,7 +4444,7 @@ const DIM_COLORS = {
   concepts: [195, 160, 255],
   institutions: [140, 255, 170],
   clusters: [255, 230, 100], 
-fields: [180, 220, 255]
+fields: [180, 220, 255],
   grants: [255, 220, 90]
 
 };
