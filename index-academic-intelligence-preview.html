@@ -1,0 +1,1160 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Semantic Space - Academic Intelligence</title>
+
+  <meta name="description" content="Semantic Space provides Academic Intelligence reports for universities, using Macroscope to map epistemic landscapes, research strengths, emerging fields and institutional opportunity." />
+
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-P4JGDSDVEQ"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){ dataLayer.push(arguments); }
+    gtag('js', new Date());
+    gtag('config', 'G-P4JGDSDVEQ');
+  </script>
+
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+
+  <style>
+    :root {
+      --paper: #f5f7fb;
+      --paper-2: #ffffff;
+      --paper-3: #edf2f7;
+      --ink: #111827;
+      --muted: #64748b;
+      --line: #d8dee8;
+      --line-soft: rgba(100, 116, 139, 0.18);
+      --red: #e35d42;
+      --blue: #246bfe;
+      --green: #13845f;
+      --gold: #b7791f;
+      --charcoal: #1f2937;
+      --radius: 8px;
+      --shadow: 0 24px 70px rgba(22, 34, 51, 0.13);
+      --shadow-soft: 0 10px 28px rgba(22, 34, 51, 0.08);
+    }
+
+    * { box-sizing: border-box; }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 10% -10%, rgba(36, 107, 254, 0.14), transparent 34%),
+        radial-gradient(circle at 98% 8%, rgba(19, 132, 95, 0.12), transparent 32%),
+        linear-gradient(180deg, #ffffff 0%, var(--paper) 46%, #eef3f9 100%),
+        var(--paper);
+      color: var(--ink);
+      font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      -webkit-font-smoothing: antialiased;
+      overflow-x: hidden;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    .shell {
+      width: min(1180px, calc(100vw - 32px));
+      margin: 0 auto;
+    }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      border-bottom: 1px solid rgba(216, 222, 232, 0.86);
+      background: rgba(255, 255, 255, 0.82);
+      backdrop-filter: blur(14px);
+    }
+
+    .topbar-inner {
+      min-height: 74px;
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      align-items: center;
+      gap: 18px;
+    }
+
+    .brand-mark {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .brand-mark img {
+      width: 154px;
+      height: auto;
+      display: block;
+      filter: invert(1);
+    }
+
+    .edition {
+      justify-self: center;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      white-space: nowrap;
+      color: var(--muted);
+    }
+
+    .nav {
+      justify-self: end;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .nav a,
+    .nav button,
+    .btn {
+      min-height: 36px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 8px 14px;
+      background: rgba(255, 255, 255, 0.72);
+      color: var(--ink);
+      font: inherit;
+      cursor: pointer;
+      box-shadow: 0 4px 14px rgba(22, 34, 51, 0.04);
+      transition: transform 0.14s ease, background 0.14s ease, color 0.14s ease, border-color 0.14s ease, box-shadow 0.14s ease;
+    }
+
+    .nav a:hover,
+    .nav button:hover,
+    .btn:hover {
+      transform: translateY(-1px);
+      background: var(--ink);
+      color: #fff;
+      box-shadow: var(--shadow-soft);
+    }
+
+    .btn.dark {
+      background: var(--blue);
+      border-color: var(--blue);
+      color: #fff;
+    }
+
+    .btn.dark:hover {
+      background: var(--ink);
+      border-color: var(--ink);
+    }
+
+    .btn.red {
+      background: var(--blue);
+      border-color: var(--blue);
+      color: #fff;
+    }
+
+    .btn.red:hover {
+      background: var(--ink);
+      border-color: var(--ink);
+    }
+
+    main {
+      padding: 26px 0 58px;
+    }
+
+    .dateline {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(255, 255, 255, 0.66);
+      padding: 11px 14px;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      box-shadow: 0 8px 24px rgba(22, 34, 51, 0.04);
+    }
+
+    .dateline span {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.08fr) minmax(340px, 0.92fr);
+      gap: 34px;
+      padding: 56px 0 44px;
+    }
+
+    .hero-copy {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+
+    .kicker {
+      display: inline-flex;
+      width: fit-content;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid rgba(36, 107, 254, 0.16);
+      border-radius: 999px;
+      background: rgba(36, 107, 254, 0.08);
+      padding: 7px 11px;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--blue);
+    }
+
+    h1 {
+      max-width: 760px;
+      margin: 20px 0 0;
+      font-family: Inter, system-ui, sans-serif;
+      font-size: clamp(42px, 6vw, 76px);
+      font-weight: 850;
+      line-height: 0.98;
+      letter-spacing: -0.055em;
+      text-wrap: balance;
+    }
+
+    .standfirst {
+      max-width: 680px;
+      margin: 22px 0 0;
+      font-family: Inter, system-ui, sans-serif;
+      font-size: clamp(18px, 1.7vw, 22px);
+      line-height: 1.52;
+      letter-spacing: -0.018em;
+      color: var(--charcoal);
+    }
+
+    .standfirst strong {
+      color: var(--blue);
+      font-weight: 750;
+    }
+
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 28px;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .brief-strip {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: auto;
+      padding-top: 34px;
+    }
+
+    .brief-stat {
+      min-height: 126px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(255, 255, 255, 0.72);
+      padding: 14px;
+      box-shadow: 0 8px 24px rgba(22, 34, 51, 0.04);
+    }
+
+    .brief-stat:last-child {
+      border-right: 0;
+    }
+
+    .brief-stat strong {
+      display: block;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 13px;
+      line-height: 1;
+      color: var(--blue);
+    }
+
+    .brief-stat span {
+      display: block;
+      margin-top: 16px;
+      font-size: 13px;
+      line-height: 1.42;
+      color: var(--muted);
+    }
+
+    .hero-visual {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fff;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      align-self: start;
+    }
+
+    .report-card-head {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 14px;
+      align-items: start;
+      border-bottom: 1px solid var(--line);
+      padding: 18px;
+    }
+
+    .report-card-head p {
+      margin: 6px 0 0;
+      font-size: 13px;
+      line-height: 1.5;
+      color: var(--muted);
+    }
+
+    .report-title {
+      font-family: Inter, system-ui, sans-serif;
+      font-size: 24px;
+      font-weight: 750;
+      line-height: 1.08;
+      letter-spacing: -0.035em;
+    }
+
+    .report-badge {
+      border: 1px solid rgba(36, 107, 254, 0.2);
+      border-radius: 999px;
+      background: rgba(36, 107, 254, 0.08);
+      padding: 6px 10px;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.12em;
+      color: var(--blue);
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .map-plate {
+      position: relative;
+      min-height: 330px;
+      background:
+        linear-gradient(rgba(245, 247, 251, 0.08), rgba(245, 247, 251, 0.08)),
+        url("Background_2.png") center / cover;
+      border-bottom: 1px solid var(--line);
+      overflow: hidden;
+    }
+
+    .map-plate::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        linear-gradient(90deg, rgba(255, 255, 255, 0.95) 0, rgba(255, 255, 255, 0.66) 42%, rgba(255, 255, 255, 0.12) 100%),
+        radial-gradient(circle at 70% 26%, rgba(36, 107, 254, 0.18), transparent 32%);
+    }
+
+    .map-note {
+      position: absolute;
+      z-index: 2;
+      left: 18px;
+      bottom: 18px;
+      width: min(320px, calc(100% - 36px));
+      border: 1px solid rgba(216, 222, 232, 0.9);
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.92);
+      padding: 14px;
+      font-size: 13px;
+      line-height: 1.48;
+      color: var(--charcoal);
+      box-shadow: 0 12px 36px rgba(22, 34, 51, 0.12);
+    }
+
+    .map-note strong {
+      display: block;
+      margin-bottom: 4px;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 10px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--blue);
+    }
+
+    .report-footer {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0;
+      background: #fbfcfe;
+    }
+
+    .report-footer div {
+      padding: 14px 16px;
+      border-right: 1px solid var(--line-soft);
+      font-size: 12px;
+      line-height: 1.4;
+      color: var(--muted);
+    }
+
+    .report-footer div:last-child {
+      border-right: 0;
+    }
+
+    .report-footer strong {
+      display: block;
+      color: var(--ink);
+      font-size: 13px;
+      margin-bottom: 4px;
+    }
+
+    .section {
+      border-top: 1px solid var(--line);
+      padding: 48px 0;
+    }
+
+    .section-head {
+      display: grid;
+      grid-template-columns: 0.65fr 1.35fr;
+      gap: 24px;
+      align-items: start;
+      margin-bottom: 26px;
+    }
+
+    .section-label {
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--blue);
+    }
+
+    h2 {
+      margin: 0;
+      font-family: Inter, system-ui, sans-serif;
+      font-size: clamp(30px, 4vw, 48px);
+      font-weight: 800;
+      line-height: 1.07;
+      letter-spacing: -0.044em;
+    }
+
+    .lede {
+      margin: 12px 0 0;
+      font-size: 16px;
+      line-height: 1.65;
+      color: var(--muted);
+    }
+
+    .workflow {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .workflow article {
+      min-height: 260px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.76);
+      box-shadow: var(--shadow-soft);
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .step-no {
+      width: 38px;
+      height: 38px;
+      display: inline-grid;
+      place-items: center;
+      border-radius: 12px;
+      background: linear-gradient(135deg, var(--blue), #16a085);
+      color: #fff;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .workflow h3,
+    .tiles h3,
+    .studio-panel h3 {
+      margin: 0;
+      font-size: 19px;
+      line-height: 1.22;
+      letter-spacing: -0.02em;
+    }
+
+    .workflow p,
+    .tiles p,
+    .studio-panel p {
+      margin: 0;
+      font-size: 14px;
+      line-height: 1.55;
+      color: var(--muted);
+    }
+
+    .workflow .tag {
+      margin-top: auto;
+      width: fit-content;
+      border-radius: 999px;
+      background: var(--paper-3);
+      padding: 7px 9px;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--blue);
+    }
+
+    .studio {
+      display: grid;
+      grid-template-columns: minmax(0, 0.88fr) minmax(0, 1.12fr);
+      gap: 24px;
+      align-items: stretch;
+    }
+
+    .video-panel,
+    .studio-panel {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--paper-2);
+      overflow: hidden;
+      box-shadow: var(--shadow);
+    }
+
+    .panel-bar {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      border-bottom: 1px solid var(--line);
+      padding: 13px 16px;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+      background: #fbfcfe;
+    }
+
+    .video-embed {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      background: #111827;
+    }
+
+    .video-embed iframe {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      border: 0;
+    }
+
+    .video-caption {
+      padding: 14px 16px 16px;
+      font-size: 14px;
+      line-height: 1.55;
+      color: var(--muted);
+    }
+
+    .studio-panel {
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+
+    .studio-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      min-height: 100%;
+    }
+
+    .studio-cell {
+      padding: 18px;
+      border-right: 1px solid var(--line-soft);
+      border-bottom: 1px solid var(--line-soft);
+    }
+
+    .studio-cell:nth-child(2n) {
+      border-right: 0;
+    }
+
+    .studio-cell:nth-last-child(-n + 2) {
+      border-bottom: 0;
+    }
+
+    .studio-cell b {
+      display: block;
+      margin-bottom: 8px;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--blue);
+    }
+
+    .tiles {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 18px;
+    }
+
+    .tiles article {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.78);
+      box-shadow: var(--shadow-soft);
+      padding: 20px;
+    }
+
+    .tiles article:nth-child(2) {
+      border-color: rgba(36, 107, 254, 0.28);
+    }
+
+    .tiles article:nth-child(3) {
+      border-color: rgba(19, 132, 95, 0.28);
+    }
+
+    .tiles h3 {
+      font-family: Inter, system-ui, sans-serif;
+      font-size: 22px;
+      font-weight: 760;
+      letter-spacing: -0.03em;
+      padding-right: 0;
+    }
+
+    .tiles p {
+      margin-top: 10px;
+      padding-right: 0;
+    }
+
+    .contact-band {
+      display: grid;
+      grid-template-columns: minmax(0, 0.92fr) minmax(340px, 0.68fr);
+      gap: 24px;
+      border-top: 1px solid var(--line);
+      padding-top: 48px;
+    }
+
+    .contact-copy {
+      padding-top: 6px;
+    }
+
+    .contact-copy p {
+      max-width: 650px;
+      font-size: 17px;
+      line-height: 1.65;
+      color: var(--muted);
+    }
+
+    form {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--paper-2);
+      box-shadow: var(--shadow);
+      padding: 16px;
+      display: grid;
+      gap: 12px;
+    }
+
+    label {
+      display: block;
+      margin-bottom: 6px;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    input {
+      width: 100%;
+      min-height: 42px;
+      border: 1px solid var(--line-soft);
+      border-radius: 8px;
+      background: #fbfcfe;
+      padding: 10px 11px;
+      color: var(--ink);
+      font: inherit;
+    }
+
+    input:focus {
+      outline: 3px solid rgba(36, 107, 254, 0.14);
+      border-color: var(--blue);
+    }
+
+    .form-actions {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      padding-top: 4px;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    .status {
+      min-height: 16px;
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 11px;
+      line-height: 1.4;
+      color: var(--green);
+      text-transform: none;
+      letter-spacing: 0;
+    }
+
+    .footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+      border-top: 1px solid var(--line);
+      padding: 22px 0 34px;
+      color: var(--muted);
+      font-family: "IBM Plex Mono", monospace;
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    @media (max-width: 980px) {
+      .topbar-inner,
+      .hero,
+      .section-head,
+      .studio,
+      .contact-band {
+        grid-template-columns: 1fr;
+      }
+
+      .edition,
+      .nav {
+        justify-self: start;
+      }
+
+      .topbar-inner {
+        padding: 14px 0;
+      }
+
+      h1 {
+        font-size: clamp(40px, 7.4vw, 58px);
+      }
+
+      .standfirst {
+        font-size: 20px;
+      }
+
+      .brief-strip,
+      .workflow,
+      .tiles {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+
+    @media (max-width: 640px) {
+      .shell {
+        width: min(100% - 24px, 1180px);
+      }
+
+      .nav {
+        width: 100%;
+        overflow-x: auto;
+        padding-bottom: 2px;
+      }
+
+      .dateline {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .hero {
+        padding: 34px 0 36px;
+      }
+
+      h1 {
+        max-width: 100%;
+        font-size: clamp(34px, 10.5vw, 40px);
+        line-height: 1.03;
+        letter-spacing: -0.055em;
+      }
+
+      .standfirst {
+        font-size: 18px;
+        line-height: 1.55;
+      }
+
+      .hero-actions .btn {
+        min-height: 40px;
+      }
+
+      .brief-strip,
+      .workflow,
+      .tiles,
+      .studio-grid,
+      .report-footer {
+        grid-template-columns: 1fr;
+      }
+
+      .brief-stat,
+      .report-footer div,
+      .studio-cell {
+        border-right: 0;
+      }
+
+      .brief-stat {
+        min-height: 0;
+        padding: 14px;
+      }
+
+      .map-plate {
+        min-height: 280px;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <header class="topbar">
+    <div class="shell topbar-inner">
+      <a class="brand-mark" href="#" aria-label="Semantic Space home">
+        <img src="semanticspace-logo.png" alt="Semantic Space" />
+      </a>
+
+      <div class="edition">Academic Intelligence</div>
+
+      <nav class="nav" aria-label="Primary navigation">
+        <a href="#studio">Studio</a>
+        <a href="demo/">Demo</a>
+        <button type="button" onclick="openBetaAccess()">Beta</button>
+      </nav>
+    </div>
+  </header>
+
+  <main class="shell">
+    <div class="dateline">
+      <span>Institutional strategy reports powered by Macroscope</span>
+      <span>Universities &middot; funders &middot; research offices</span>
+    </div>
+
+    <section class="hero" aria-labelledby="page-title">
+      <div class="hero-copy">
+        <div class="kicker">Semantic Space reports</div>
+        <h1 id="page-title">Academic Intelligence for the university as a living system.</h1>
+        <p class="standfirst">
+          We use <strong>Macroscope</strong> to turn a university's research record into an epistemic landscape: a readable, auditable map of strengths, adjacency, momentum and opportunity.
+        </p>
+
+        <div class="hero-actions">
+          <a class="btn dark" href="#contact">Request a briefing</a>
+          <a class="btn" href="demo/">Open Macroscope demo</a>
+          <a class="btn" href="#studio">Watch the walkthrough</a>
+        </div>
+
+        <div class="brief-strip" aria-label="Academic intelligence summary">
+          <div class="brief-stat">
+            <strong>01</strong>
+            <span>Map the institution's fields, clusters, centres and emerging edges.</span>
+          </div>
+          <div class="brief-stat">
+            <strong>02</strong>
+            <span>Compare internal capability with global scholarly movement.</span>
+          </div>
+          <div class="brief-stat">
+            <strong>03</strong>
+            <span>Generate executive reports with traceable evidence behind every claim.</span>
+          </div>
+          <div class="brief-stat">
+            <strong>04</strong>
+            <span>Turn academic complexity into strategy-grade intelligence.</span>
+          </div>
+        </div>
+      </div>
+
+      <aside class="hero-visual" aria-label="Sample Academic Intelligence report preview">
+        <div class="report-card-head">
+          <div>
+            <div class="report-title">Epistemic Landscape Brief</div>
+            <p>Sample institutional report module generated from Macroscope field maps.</p>
+          </div>
+          <div class="report-badge">Report studio</div>
+        </div>
+
+        <div class="map-plate">
+          <div class="map-note">
+            <strong>Finding 4.2</strong>
+            A cross-school cluster is forming around computational health, design methods and biomedical signal analysis. Its citation flow suggests an institutional bridge, not a conventional department.
+          </div>
+        </div>
+
+        <div class="report-footer">
+          <div>
+            <strong>Evidence layer</strong>
+            Papers, authors, venues, institutions, citations and AI annotations remain linked back to the map.
+          </div>
+          <div>
+            <strong>Report layer</strong>
+            Modern report layouts turn the landscape into clear briefings for senior teams.
+          </div>
+        </div>
+      </aside>
+    </section>
+
+    <section class="section" aria-labelledby="process-title">
+      <div class="section-head">
+        <div class="section-label">Revised process</div>
+        <div>
+          <h2 id="process-title">From raw scholarship to a report the university can act on.</h2>
+          <p class="lede">Macroscope remains the engine: it gathers and structures research evidence. The new Semantic Space product is the intelligence layer built on top of it.</p>
+        </div>
+      </div>
+
+      <div class="workflow">
+        <article>
+          <span class="step-no">1</span>
+          <h3>Assemble the corpus</h3>
+          <p>OpenAlex, local publication data, PDFs and topic seeds become a structured institutional knowledge base.</p>
+          <div class="tag">Retrieval</div>
+        </article>
+
+        <article>
+          <span class="step-no">2</span>
+          <h3>Map the epistemic landscape</h3>
+          <p>Macroscope renders fields as citation terrain, showing clusters, bridges, outliers and latent concentrations of expertise.</p>
+          <div class="tag">Macroscope</div>
+        </article>
+
+        <article>
+          <span class="step-no">3</span>
+          <h3>Interrogate with lenses</h3>
+          <p>Analysts inspect authors, concepts, venues, institutions and chronology, then test narratives against the evidence.</p>
+          <div class="tag">Analysis</div>
+        </article>
+
+        <article>
+          <span class="step-no">4</span>
+          <h3>Publish intelligence reports</h3>
+          <p>Report Studio translates the map into boards, strategy briefs, school profiles and opportunity landscapes.</p>
+          <div class="tag">Reports</div>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="studio" aria-labelledby="studio-title">
+      <div class="section-head">
+        <div class="section-label">Product suite</div>
+        <div>
+          <h2 id="studio-title">Macroscope, Report Studio and the intelligence stack.</h2>
+          <p class="lede">The demo still shows the underlying map interface. The new website frames it as part of a broader service: generating institutional intelligence reports from the university's research landscape.</p>
+        </div>
+      </div>
+
+      <div class="studio">
+        <div class="video-panel">
+          <div class="panel-bar">
+            <span>Macroscope walkthrough</span>
+            <span>Video</span>
+          </div>
+          <div class="video-embed" aria-label="Macroscope overview video">
+            <iframe
+              src="https://www.youtube.com/embed/-TJSqPAysT8"
+              title="Macroscope overview"
+              frameborder="0"
+              allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+              allowfullscreen
+            ></iframe>
+          </div>
+          <div class="video-caption">
+            The original walkthrough is retained here as the product's evidence engine: the interactive scholarly map that powers the reports.
+          </div>
+        </div>
+
+        <div class="studio-panel">
+          <div class="panel-bar">
+            <span>Report Studio modules</span>
+            <span>Current build</span>
+          </div>
+
+          <div class="studio-grid">
+            <div class="studio-cell">
+              <b>University profile</b>
+              <h3>Institutional knowledge atlas</h3>
+              <p>Research clusters, signature fields, collaboration bridges and distinctive capabilities.</p>
+            </div>
+            <div class="studio-cell">
+              <b>Field intelligence</b>
+              <h3>Emerging topic reports</h3>
+              <p>Momentum, citation movement, frontier papers and comparator institutions.</p>
+            </div>
+            <div class="studio-cell">
+              <b>Strategic options</b>
+              <h3>Opportunity landscapes</h3>
+              <p>Where a university can plausibly lead, partner, consolidate or invest.</p>
+            </div>
+            <div class="studio-cell">
+              <b>Audit trail</b>
+              <h3>Traceable claims</h3>
+              <p>Every report assertion links back to papers, map positions, source metadata and analysis notes.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" aria-labelledby="reports-title">
+      <div class="section-head">
+        <div class="section-label">What we produce</div>
+        <div>
+          <h2 id="reports-title">Reports for strategy teams who need evidence, not dashboards.</h2>
+          <p class="lede">The format is deliberately polished: a readable narrative, sharp exhibits, and the ability to drill back into the underlying map when the room asks why.</p>
+        </div>
+      </div>
+
+      <div class="tiles">
+        <article>
+          <h3>Vice-chancellor briefings</h3>
+          <p>Institution-level views of research identity, comparative position and strategic white space.</p>
+        </article>
+        <article>
+          <h3>School and faculty reviews</h3>
+          <p>Evidence-led portraits of concentration, interdisciplinarity, rising topics and collaboration potential.</p>
+        </article>
+        <article>
+          <h3>Funding and partnership maps</h3>
+          <p>Readable intelligence on where external programmes, scholarly movement and institutional capability overlap.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="contact-band" id="contact" aria-labelledby="contact-title">
+      <div class="contact-copy">
+        <div class="section-label">Start with a question</div>
+        <h2 id="contact-title">Tell us the university landscape you need to understand.</h2>
+        <p>We are working with early partners on focused Academic Intelligence briefs: institutional research profiles, emerging field scans, comparator studies and strategy reports built from Macroscope evidence.</p>
+
+        <div class="hero-actions">
+          <a class="btn" href="demo/">Open demo environment</a>
+          <button class="btn" type="button" onclick="openBetaAccess()">Beta access</button>
+        </div>
+      </div>
+
+      <form id="early-access" onsubmit="return handleEarlyAccess(event)">
+        <div>
+          <label for="name">Name</label>
+          <input id="name" name="name" placeholder="Your name" required />
+        </div>
+
+        <div>
+          <label for="email">Email</label>
+          <input id="email" name="email" type="email" placeholder="Email" required />
+        </div>
+
+        <div>
+          <label for="org">University / organisation</label>
+          <input id="org" name="org" placeholder="Institution or team" />
+        </div>
+
+        <div>
+          <label for="domain">Strategic question</label>
+          <input id="domain" name="domain" placeholder="Field, faculty or landscape of interest" required />
+        </div>
+
+        <div class="form-actions">
+          <button class="btn red" type="submit">Request briefing</button>
+          <div class="status" id="status" role="status" aria-live="polite"></div>
+        </div>
+      </form>
+    </section>
+  </main>
+
+  <footer class="shell footer">
+    <span>&copy; <span id="year"></span> Semantic Space</span>
+    <span>Academic Intelligence &middot; Macroscope &middot; Report Studio</span>
+  </footer>
+
+  <script>
+    const FORMSPREE_ENDPOINT = "https://formspree.io/f/xvgwdawq";
+
+    async function handleEarlyAccess(e) {
+      e.preventDefault();
+      const form = e.currentTarget;
+      const btn = form.querySelector('button[type="submit"]');
+      const status = document.getElementById('status');
+      status.textContent = '';
+
+      const payload = {
+        name: form.name.value.trim(),
+        email: form.email.value.trim(),
+        organization: form.org.value.trim(),
+        strategic_question: form.domain.value.trim(),
+        _subject: 'Academic Intelligence briefing request',
+        _gotcha: ''
+      };
+
+      btn.disabled = true;
+      btn.textContent = 'Sending';
+
+      try {
+        const res = await fetch(FORMSPREE_ENDPOINT, {
+          method: 'POST',
+          headers: {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(payload)
+        });
+
+        if (res.ok) {
+          form.reset();
+          status.textContent = 'Thanks. We will be in touch soon.';
+        } else {
+          const data = await res.json().catch(() => ({}));
+          status.textContent = data?.error || 'Something went wrong. Please try again.';
+        }
+      } catch (err) {
+        status.textContent = 'Network error. Please try again.';
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Request briefing';
+      }
+
+      return false;
+    }
+
+    document.getElementById('year').textContent = new Date().getFullYear();
+
+    function openBetaAccess() {
+      const pwd = window.prompt('Enter beta access password:');
+      if (pwd === null) return;
+
+      if (pwd === 'macroscope') {
+        try {
+          sessionStorage.setItem('macroscope_beta_ok', 'yes');
+        } catch (e) {
+          console.warn('Could not persist beta flag in sessionStorage:', e);
+        }
+        window.location.href = 'beta/';
+      } else {
+        window.alert('Incorrect password.');
+      }
+    }
+  </script>
+</body>
+</html>
